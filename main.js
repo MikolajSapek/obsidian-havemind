@@ -39,6 +39,63 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
 
+// ../../packages/protocol/dist/appearance-scope.js
+var OBSIDIAN_PREFIX = ".obsidian/";
+var ALLOW_EXACT = /* @__PURE__ */ new Set([
+  ".obsidian/appearance.json",
+  ".obsidian/app.json",
+  ".obsidian/core-plugins.json",
+  // Graph view settings, node colour groups included — a stated user requirement.
+  ".obsidian/graph.json",
+  ".obsidian/hotkeys.json"
+]);
+var SNIPPETS_PREFIX = ".obsidian/snippets/";
+var SNIPPETS_SEGMENT_COUNT = 3;
+var SNIPPET_EXTENSIONS = /* @__PURE__ */ new Set(["css"]);
+var THEMES_PREFIX = ".obsidian/themes/";
+var THEMES_MIN_SEGMENT_COUNT = 4;
+var THEME_EXTENSIONS = /* @__PURE__ */ new Set([
+  "css",
+  "gif",
+  "jpeg",
+  "jpg",
+  "json",
+  "png",
+  "svg",
+  "webp"
+]);
+var SECRET_STORE_SEGMENT = "data.json";
+function normalizeSeparators(path) {
+  return path.replace(/\\/gu, "/");
+}
+function extensionOf(path) {
+  const dot = path.lastIndexOf(".");
+  const slash = path.lastIndexOf("/");
+  if (dot <= slash + 1)
+    return "";
+  return path.slice(dot + 1).toLowerCase();
+}
+function hasBlockedSegment(segments) {
+  return segments.some((segment) => segment.length === 0 || segment === "." || segment === ".." || segment === SECRET_STORE_SEGMENT);
+}
+function isSyncableConfigPath(path) {
+  const normalized = normalizeSeparators(path);
+  if (!normalized.startsWith(OBSIDIAN_PREFIX))
+    return false;
+  const segments = normalized.split("/");
+  if (hasBlockedSegment(segments))
+    return false;
+  if (ALLOW_EXACT.has(normalized))
+    return true;
+  if (normalized.startsWith(SNIPPETS_PREFIX)) {
+    return segments.length === SNIPPETS_SEGMENT_COUNT && SNIPPET_EXTENSIONS.has(extensionOf(normalized));
+  }
+  if (normalized.startsWith(THEMES_PREFIX)) {
+    return segments.length >= THEMES_MIN_SEGMENT_COUNT && THEME_EXTENSIONS.has(extensionOf(normalized));
+  }
+  return false;
+}
+
 // ../../packages/protocol/dist/canonicalization.js
 var WINDOWS_DRIVE_PATH = /^[a-zA-Z]:/u;
 var RESERVED_ROOTS = /* @__PURE__ */ new Set([
@@ -81,7 +138,13 @@ function normalizedVaultPath(path) {
 }
 function reservedRoot(path) {
   const [root] = path.split("/");
-  return root !== void 0 && RESERVED_ROOTS.has(root.toLowerCase());
+  if (root === void 0 || !RESERVED_ROOTS.has(root.toLowerCase())) {
+    return false;
+  }
+  if (isSyncableConfigPath(path)) {
+    return false;
+  }
+  return true;
 }
 function canonicalizeVaultPath(path) {
   const normalized = normalizedVaultPath(path);
@@ -17793,8 +17856,10 @@ var LABELS = {
   synced: "Synced",
   offline: "Offline",
   conflict: "Conflict",
-  "reconnect-required": "Reconnect required"
+  "reconnect-required": "Reconnect required",
+  "reset-required": "Reset required"
 };
+var RESET_REQUIRED_DETAIL = "The stored connection data is incomplete or unreadable. Reset the connection and pair this device again.";
 var NO_E2EE_NOTE = "Private Tailscale network only \u2014 no end-to-end encryption.";
 function connectionStatusFromCycle(status) {
   switch (status) {
@@ -17860,6 +17925,15 @@ var PANEL_STYLES = {
     colorToken: "--text-error",
     spin: false,
     showForm: true
+  },
+  // The paste form stays available alongside the Reset button: pairing this
+  // device afresh overwrites the broken record and is an equally valid way out.
+  "reset-required": {
+    icon: "alert-triangle",
+    label: "Connection data damaged",
+    colorToken: "--text-error",
+    spin: false,
+    showForm: true
   }
 };
 function buildConnectionPanel(input) {
@@ -17874,6 +17948,9 @@ function buildConnectionPanel(input) {
   }
   if (input.status === "reconnect-required" || input.status === "offline") {
     parts.push(input.errorMessage ?? "The server refused the session.");
+  }
+  if (input.status === "reset-required") {
+    parts.push(input.errorMessage ?? RESET_REQUIRED_DETAIL);
   }
   parts.push(NO_E2EE_NOTE);
   return {
@@ -17934,7 +18011,23 @@ function pathExtension(canonicalPath) {
 var SYNCABLE_BINARY_EXTENSION_SET = new Set(
   SYNCABLE_BINARY_EXTENSIONS
 );
+var CONFIG_TEXT_EXTENSIONS = /* @__PURE__ */ new Set([
+  "md",
+  "json",
+  "css",
+  "js",
+  "txt"
+]);
+function configContentKind(canonicalPath) {
+  const extension = pathExtension(canonicalPath);
+  if (SYNCABLE_BINARY_EXTENSION_SET.has(extension)) return "binary";
+  if (CONFIG_TEXT_EXTENSIONS.has(extension)) return "markdown";
+  return null;
+}
 function eligibleKind(canonicalPath) {
+  if (isSyncableConfigPath(canonicalPath)) {
+    return configContentKind(canonicalPath);
+  }
   const extension = pathExtension(canonicalPath);
   const kind = extension === "md" ? "markdown" : SYNCABLE_BINARY_EXTENSION_SET.has(extension) ? "binary" : null;
   if (kind === null) {
@@ -18262,6 +18355,21 @@ var SYNCABLE_EXTENSION_SET = /* @__PURE__ */ new Set([
   "md",
   ...SYNCABLE_BINARY_EXTENSIONS
 ]);
+var MAX_BINARY_FILE_MB = MAX_BINARY_FILE_BYTES / (1024 * 1024);
+function formatReconcileNotices(result) {
+  const notices = [];
+  if (result.attachmentsExcluded > 0) {
+    notices.push(
+      `Havemind: ${result.attachmentsExcluded} attachment(s) not synced (unsupported file type(s)).`
+    );
+  }
+  if (result.binaryExcluded > 0) {
+    notices.push(
+      `Havemind: ${result.binaryExcluded} attachment(s) not synced (over the ${MAX_BINARY_FILE_MB} MB size limit).`
+    );
+  }
+  return notices;
+}
 async function readEligibleContent(vault, readPath, kind) {
   if (kind === "binary") {
     const bytes = await vault.readBinary(readPath);
@@ -18273,9 +18381,11 @@ async function readEligibleContent(vault, readPath, kind) {
 async function reconcileVaultState(options) {
   const { observer, repository, vault } = options;
   const allPaths = await vault.listAllPaths();
-  const attachmentsExcluded = allPaths.filter(
-    (path) => !SYNCABLE_EXTENSION_SET.has(pathExtension(path.normalize("NFC")))
-  ).length;
+  const attachmentsExcluded = allPaths.filter((path) => {
+    const normalized = path.normalize("NFC");
+    if (isSyncableConfigPath(normalized)) return false;
+    return !SYNCABLE_EXTENSION_SET.has(pathExtension(normalized));
+  }).length;
   const paths = await vault.listSyncablePaths();
   const eligible = /* @__PURE__ */ new Map();
   let ignored = 0;
@@ -18412,6 +18522,81 @@ function groupBy(items, key) {
 }
 function normalizeContent2(text) {
   return canonicalizeMarkdown(text);
+}
+
+// src/sync/config-adapter.ts
+var CONFIG_DIR = ".obsidian";
+var HAVEMIND_PLUGIN_DIR = ".obsidian/plugins/havemind-sync";
+function isUnderHavemindPlugin(folder) {
+  return folder === HAVEMIND_PLUGIN_DIR || folder.startsWith(`${HAVEMIND_PLUGIN_DIR}/`);
+}
+async function listSyncableConfigPaths(adapter, root = CONFIG_DIR) {
+  const found = [];
+  const pending = [root];
+  const visited = /* @__PURE__ */ new Set();
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    if (dir === void 0 || visited.has(dir)) continue;
+    visited.add(dir);
+    let listing;
+    try {
+      listing = await adapter.list(dir);
+    } catch {
+      continue;
+    }
+    for (const file2 of listing.files) {
+      if (isSyncableConfigPath(file2)) found.push(file2);
+    }
+    for (const folder of listing.folders) {
+      if (isUnderHavemindPlugin(folder)) continue;
+      pending.push(folder);
+    }
+  }
+  found.sort();
+  return found;
+}
+async function ensureConfigParentDirs(adapter, path) {
+  const separator = path.lastIndexOf("/");
+  if (separator === -1) return;
+  const segments = path.slice(0, separator).split("/");
+  let prefix = "";
+  for (const segment of segments) {
+    prefix = prefix === "" ? segment : `${prefix}/${segment}`;
+    try {
+      await adapter.mkdir(prefix);
+    } catch {
+    }
+  }
+}
+async function writeConfigText(adapter, path, content) {
+  await ensureConfigParentDirs(adapter, path);
+  await adapter.write(path, content);
+}
+async function writeConfigBinary(adapter, path, data) {
+  await ensureConfigParentDirs(adapter, path);
+  await adapter.writeBinary(path, data);
+}
+async function removeConfig(adapter, path) {
+  if (await adapter.exists(path)) await adapter.remove(path);
+}
+
+// src/sync/config-poller.ts
+async function pollConfigOnce(deps) {
+  const ops = [];
+  const configPaths = await deps.listConfigPaths();
+  const onDisk = /* @__PURE__ */ new Set();
+  for (const path of configPaths) {
+    onDisk.add(normalizeWirePath(path).toLowerCase());
+    const op = await deps.observer.observeModify(path);
+    if (op !== null) ops.push(op);
+  }
+  for (const mapping of await deps.listMappings()) {
+    if (!isSyncableConfigPath(mapping.path)) continue;
+    if (onDisk.has(mapping.collisionKey)) continue;
+    const op = await deps.observer.observeDelete(mapping.path);
+    if (op !== null) ops.push(op);
+  }
+  return ops;
 }
 
 // src/sync/outbox-repository.ts
@@ -20327,7 +20512,14 @@ var RequestUrlOnboardingApi = class {
     });
   }
   async fetchBootstrapPage(request) {
-    const url2 = request.cursor === null ? request.url : `${request.url}?cursor=${encodeURIComponent(request.cursor)}`;
+    const params = [];
+    if (request.vaultId !== null) {
+      params.push(`vault=${encodeURIComponent(request.vaultId)}`);
+    }
+    if (request.cursor !== null) {
+      params.push(`cursor=${encodeURIComponent(request.cursor)}`);
+    }
+    const url2 = params.length === 0 ? request.url : `${request.url}?${params.join("&")}`;
     return this.send(request.url, {
       method: "GET",
       requestUrl: url2,
@@ -21540,7 +21732,8 @@ var OnboardingController = class {
         cursor: state.bootstrapCursor,
         redirect: "error",
         refreshToken,
-        url: url2
+        url: url2,
+        vaultId: state.vaultId
       })
     );
     const page = parseBootstrapResponse(response, url2);
@@ -21993,6 +22186,7 @@ function decodeBase64Url2(value) {
 }
 
 // src/runtime/obsidian-adapters.ts
+var CONFIG_POLL_INTERVAL_MS = 5e3;
 function toActivityKind(kind) {
   return kind === "update" ? "edit" : kind;
 }
@@ -22174,12 +22368,20 @@ function createVaultFilePort(options) {
       return state.fileIdAtPath(path);
     },
     async readByPath(path) {
+      if (isSyncableConfigPath(path)) {
+        if (!await vault.adapter.exists(path)) return null;
+        return canonicalizeMarkdown(await vault.adapter.read(path));
+      }
       const existing = vault.getAbstractFileByPath(path);
       if (existing === null) return null;
       const raw = await vault.read(existing);
       return canonicalizeMarkdown(raw);
     },
     async readBinaryByPath(path) {
+      if (isSyncableConfigPath(path)) {
+        if (!await vault.adapter.exists(path)) return null;
+        return new Uint8Array(await vault.adapter.readBinary(path));
+      }
       const existing = vault.getAbstractFileByPath(path);
       if (existing === null) return null;
       const buffer = await vault.readBinary(existing);
@@ -22197,6 +22399,10 @@ function createVaultFilePort(options) {
     conflictArtifactPathFor: (revisionId) => state.conflictArtifactPathFor(revisionId),
     recordConflictArtifactPath: (revisionId, path) => state.recordConflictArtifactPath(revisionId, path),
     async writeByPath(path, content) {
+      if (isSyncableConfigPath(path)) {
+        await writeConfigText(vault.adapter, path, content);
+        return;
+      }
       const existing = vault.getAbstractFileByPath(path);
       if (existing === null) {
         await ensureParentFolders(vault, path);
@@ -22206,6 +22412,10 @@ function createVaultFilePort(options) {
       await vault.modify(existing, content);
     },
     async writeBinaryByPath(path, bytes) {
+      if (isSyncableConfigPath(path)) {
+        await writeConfigBinary(vault.adapter, path, toArrayBuffer(bytes));
+        return;
+      }
       const existing = vault.getAbstractFileByPath(path);
       const data = toArrayBuffer(bytes);
       if (existing === null) {
@@ -22216,6 +22426,10 @@ function createVaultFilePort(options) {
       await vault.modifyBinary(existing, data);
     },
     async deleteByPath(path) {
+      if (isSyncableConfigPath(path)) {
+        await removeConfig(vault.adapter, path);
+        return;
+      }
       const existing = vault.getAbstractFileByPath(path);
       if (existing !== null) {
         await vault.delete(existing);
@@ -22350,6 +22564,9 @@ function isRecord17(value) {
 var HAVEMIND_STATUS_DISCONNECTED = formatStatusBar({
   status: "disconnected"
 });
+var HAVEMIND_STATUS_RESET_REQUIRED = formatStatusBar({
+  status: "reset-required"
+});
 var CLIENT_INSTANCE_KEY = "clientInstanceId";
 var APPROVAL_POLL_INTERVAL_MS = 5e3;
 var MAX_CONNECT_STEPS = 720;
@@ -22444,18 +22661,116 @@ function serverNameFromUrl(apiBaseUrl) {
 var OWNER_CONNECTION_KEY = "ownerConnection";
 var OWNER_DEVICE_LABEL = "Havemind owner device";
 var INVITEE_DEVICE_LABEL = "Havemind device";
-async function readOwnerConnection(plugin) {
-  const data = await plugin.loadData();
-  const record2 = isRecord17(data) ? data[OWNER_CONNECTION_KEY] : null;
-  if (isRecord17(record2) && typeof record2.apiBaseUrl === "string" && typeof record2.vaultId === "string") {
-    return {
-      apiBaseUrl: record2.apiBaseUrl,
-      vaultId: record2.vaultId,
-      ...typeof record2.memberId === "string" ? { memberId: record2.memberId } : {},
-      ...typeof record2.deviceId === "string" ? { deviceId: record2.deviceId } : {}
-    };
+var OWNER_CONNECTION_CORRUPT_PREFIX = "ownerConnectionCorrupt.";
+var CORRUPT_SIDECAR_PREFIXES = [
+  PERSIST_CORRUPT_PREFIX,
+  PERSIST_PRODUCER_CORRUPT_PREFIX,
+  OWNER_CONNECTION_CORRUPT_PREFIX
+];
+function isCorruptSidecarKey(key) {
+  return CORRUPT_SIDECAR_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+function parseOwnerConnection(raw) {
+  if (raw === null || raw === void 0) {
+    return { status: "absent" };
   }
-  return null;
+  if (!isRecord17(raw) || typeof raw.apiBaseUrl !== "string" || typeof raw.vaultId !== "string") {
+    return { status: "corrupt", raw };
+  }
+  return {
+    status: "connection",
+    raw,
+    connection: {
+      apiBaseUrl: raw.apiBaseUrl,
+      vaultId: raw.vaultId,
+      ...typeof raw.memberId === "string" ? { memberId: raw.memberId } : {},
+      ...typeof raw.deviceId === "string" ? { deviceId: raw.deviceId } : {}
+    }
+  };
+}
+async function readOwnerConnectionResult(plugin) {
+  const data = await plugin.loadData();
+  return parseOwnerConnection(isRecord17(data) ? data[OWNER_CONNECTION_KEY] : null);
+}
+async function readOwnerConnection(plugin) {
+  const result = await readOwnerConnectionResult(plugin);
+  return result.status === "connection" ? result.connection : null;
+}
+function gateOwnerConnection(result, refreshTokenPresent) {
+  if (result.status === "absent") return { kind: "absent" };
+  if (result.status === "corrupt") {
+    return { kind: "reset-required", reason: "corrupt-record", raw: result.raw };
+  }
+  if (!refreshTokenPresent) {
+    return { kind: "reset-required", reason: "missing-secret", raw: result.raw };
+  }
+  return { kind: "connect", connection: result.connection };
+}
+async function hasStoredRefreshToken(plugin) {
+  const clientInstanceId = await ensureClientInstanceId(
+    createClientInstanceRepo(plugin)
+  );
+  const secrets = new ObsidianOnboardingSecrets({
+    clientInstanceId,
+    secretStorage: plugin.app.secretStorage
+  });
+  return await secrets.getRefreshToken() !== null;
+}
+async function evaluateOwnerConnection(plugin) {
+  const result = await readOwnerConnectionResult(plugin);
+  if (result.status !== "connection") {
+    return gateOwnerConnection(result, false);
+  }
+  let refreshTokenPresent;
+  try {
+    refreshTokenPresent = await hasStoredRefreshToken(plugin);
+  } catch (error51) {
+    console.warn(
+      "Havemind: could not read the stored refresh token; assuming the pairing is intact.",
+      error51
+    );
+    refreshTokenPresent = true;
+  }
+  return gateOwnerConnection(result, refreshTokenPresent);
+}
+async function preserveCorruptOwnerConnection(plugin, raw, timestamp) {
+  await getPluginDataMutex(plugin).update((base) => {
+    const key = `${OWNER_CONNECTION_CORRUPT_PREFIX}${timestamp}`;
+    if (key in base) return base;
+    return { ...base, [key]: raw };
+  });
+}
+async function resetHavemindConnectionState(plugin, now = () => Date.now()) {
+  const result = await readOwnerConnectionResult(plugin);
+  if (result.status !== "absent") {
+    await preserveCorruptOwnerConnection(plugin, result.raw, now());
+  }
+  try {
+    const clientInstanceId = await ensureClientInstanceId(
+      createClientInstanceRepo(plugin)
+    );
+    const secrets = new ObsidianOnboardingSecrets({
+      clientInstanceId,
+      secretStorage: plugin.app.secretStorage
+    });
+    await secrets.saveRefreshToken("");
+    await secrets.saveRejoinSecret("");
+    await secrets.clearInvitationEnvelope();
+    await secrets.clearPendingCredential();
+    await secrets.clearPendingRotation();
+  } catch (error51) {
+    console.warn(
+      "Havemind: could not clear the stored connection secrets during reset.",
+      error51
+    );
+  }
+  await getPluginDataMutex(plugin).update((base) => {
+    const next = {};
+    for (const [key, value] of Object.entries(base)) {
+      if (isCorruptSidecarKey(key)) next[key] = value;
+    }
+    return next;
+  });
 }
 async function writeOwnerConnection(plugin, connection) {
   await getPluginDataMutex(plugin).update((base) => ({
@@ -22583,6 +22898,32 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
   };
 }
 var PUSH_PRODUCER_KEY = "pushProducer";
+var CONFIG_POLL_FAILURE_NOTICE_EVERY = 10;
+var CONFIG_POLL_FAILURE_NOTICE = "Havemind: config sync ran into repeated errors \u2014 see console.";
+function describeConfigPollFailure(error51) {
+  return error51 instanceof Error ? `reason=${error51.name}` : `reason=${typeof error51}`;
+}
+function createConfigPollTick(deps) {
+  const warn = deps.warn ?? ((message, reason) => console.warn(message, reason));
+  let consecutiveFailures = 0;
+  return async () => {
+    try {
+      const ops = await deps.poll();
+      consecutiveFailures = 0;
+      if (ops.length === 0) return;
+      for (const op of ops) deps.recordActivity(op);
+      deps.triggerSync();
+    } catch (error51) {
+      consecutiveFailures += 1;
+      warn(
+        `Havemind: config sync tick failed (${consecutiveFailures} consecutive).`,
+        describeConfigPollFailure(error51)
+      );
+      const shouldNotify = consecutiveFailures === 1 || consecutiveFailures % CONFIG_POLL_FAILURE_NOTICE_EVERY === 0;
+      if (shouldNotify) deps.notify(CONFIG_POLL_FAILURE_NOTICE);
+    }
+  };
+}
 function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock) {
   const vault = plugin.app.vault;
   const store = {
@@ -22637,16 +22978,25 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
   producerRef.current = repository;
   const snapshot = {
     async listSyncablePaths() {
-      return vault.getFiles().map((file2) => file2.path).filter((path) => {
+      const notes = vault.getFiles().map((file2) => file2.path).filter((path) => {
         const extension = pathExtension(path.normalize("NFC"));
         return extension === "md" || SYNCABLE_BINARY_EXTENSIONS.includes(extension);
       });
+      const config2 = await listSyncableConfigPaths(vault.adapter, CONFIG_DIR);
+      return [...notes, ...config2];
     },
     async readText(path) {
+      if (isSyncableConfigPath(path)) {
+        return await vault.adapter.exists(path) ? vault.adapter.read(path) : "";
+      }
       const file2 = vault.getAbstractFileByPath(path);
       return file2 === null ? "" : vault.read(file2);
     },
     async readBinary(path) {
+      if (isSyncableConfigPath(path)) {
+        if (!await vault.adapter.exists(path)) return new Uint8Array(0);
+        return new Uint8Array(await vault.adapter.readBinary(path));
+      }
       const file2 = vault.getAbstractFileByPath(path);
       if (file2 === null) return new Uint8Array(0);
       return new Uint8Array(await vault.readBinary(file2));
@@ -22655,6 +23005,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       return vault.getFiles().map((file2) => file2.path);
     },
     async exists(path) {
+      if (isSyncableConfigPath(path)) return vault.adapter.exists(path);
       return vault.getAbstractFileByPath(path) !== null;
     }
   };
@@ -22781,16 +23132,33 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
             `Havemind: ${result.skipped} file(s) could not be synced and were skipped.`
           );
         }
-        if (result.attachmentsExcluded > 0) {
-          new import_obsidian.Notice(
-            `Havemind: ${result.attachmentsExcluded} attachment(s) not synced (markdown only for now).`
-          );
+        for (const notice of formatReconcileNotices(result)) {
+          new import_obsidian.Notice(notice);
         }
       }
     )
   );
+  const configObserver = {
+    observeModify: (path) => lockedObserve(path, () => observer.observeModify(path)),
+    observeDelete: (path) => lockedObserve(path, () => observer.observeDelete(path))
+  };
+  const runConfigPollTick = createConfigPollTick({
+    poll: () => pollConfigOnce({
+      observer: configObserver,
+      listConfigPaths: () => listSyncableConfigPaths(vault.adapter, CONFIG_DIR),
+      listMappings: () => repository.listMappings()
+    }),
+    recordActivity,
+    triggerSync,
+    notify: (message) => new import_obsidian.Notice(message)
+  });
+  const configPollId = window.setInterval(() => {
+    void runConfigPollTick();
+  }, CONFIG_POLL_INTERVAL_MS);
+  plugin.registerInterval(configPollId);
   return {
     dispose: () => {
+      window.clearInterval(configPollId);
       modifyDebouncer.dispose();
       disposeListeners();
     },
@@ -22896,9 +23264,27 @@ function parseProducerStateResult(raw) {
   return { status: "ok", state: { mappings, heads }, quarantinedMappings };
 }
 async function startHavemindConnection(plugin, onStatus, hooks) {
-  const owner = await readOwnerConnection(plugin);
-  if (owner !== null) {
-    return startSyncLoop(plugin, owner, onStatus, { role: "owner", ...hooks === void 0 ? {} : { hooks } });
+  const gate = await evaluateOwnerConnection(plugin);
+  if (gate.kind === "reset-required") {
+    try {
+      await preserveCorruptOwnerConnection(plugin, gate.raw, Date.now());
+    } catch (error51) {
+      console.warn(
+        "Havemind: failed to preserve the damaged connection record to a sidecar.",
+        error51
+      );
+    }
+    console.warn(
+      `Havemind: the stored connection is unusable (${gate.reason}); reset it and pair this device again.`
+    );
+    onStatus("reset-required", HAVEMIND_STATUS_RESET_REQUIRED);
+    return NOOP_HANDLE;
+  }
+  if (gate.kind === "connect") {
+    return startSyncLoop(plugin, gate.connection, onStatus, {
+      role: "owner",
+      ...hooks === void 0 ? {} : { hooks }
+    });
   }
   const { controller: onboarding } = await buildOnboardingController(plugin);
   const connectedState = await driveToConnected({
@@ -23698,6 +24084,17 @@ var HavemindOnboardingView = class extends import_obsidian2.ItemView {
       retry.addClass("havemind-retry");
       retry.onClickEvent(() => this.options.onRetry?.());
     }
+    if (this.options.onReset !== void 0 && panel.status === "reset-required") {
+      const reset = content.createEl("button", {
+        text: "Reset connection",
+        attr: {
+          "aria-label": "Reset the stored Havemind connection and pair this device again"
+        }
+      });
+      reset.addClass("mod-warning");
+      reset.addClass("havemind-reset");
+      reset.onClickEvent(() => this.options.onReset?.());
+    }
   }
   /**
    * Draws the MRG-03 "Conflicts" section when copies exist. The provider reads
@@ -24113,6 +24510,11 @@ var HavemindPlugin = class extends import_obsidian2.Plugin {
      */
     __publicField(this, "retryInFlight", false);
     /**
+     * Guards the user-initiated "Reset connection" (P1 #5) so a double-click can
+     * never run two overlapping clear-and-rewrite passes over `data.json`.
+     */
+    __publicField(this, "resetInFlight", false);
+    /**
      * MRG-03 conflict resolver. Its per-copy guard makes a double-clicked resolve
      * fire each destructive vault op at most once. Lazily bound to the live vault
      * port on first use so a headless test never needs a real vault.
@@ -24190,6 +24592,9 @@ var HavemindPlugin = class extends import_obsidian2.Plugin {
         onRetry: () => {
           void this.retryConnection();
         },
+        onReset: () => {
+          void this.resetConnection();
+        },
         onCopyInvitation: (envelope) => {
           void copyTextToClipboard(envelope, browserClipboardCopyDeps());
         },
@@ -24229,8 +24634,6 @@ var HavemindPlugin = class extends import_obsidian2.Plugin {
     });
     this.setStatus(formatStatusBar({ status: "disconnected" }));
     this.addSettingTab(new HavemindSettingTab(this.app, this));
-    this.registerEditorExtension([]);
-    this.registerMarkdownPostProcessor(() => void 0);
     this.registerObsidianProtocolHandler("havemind-join", (data) => {
       if (!isSafePassiveJoinProtocolData(data)) return;
       this.connectionActive = false;
@@ -24550,6 +24953,9 @@ var HavemindPlugin = class extends import_obsidian2.Plugin {
     this.connectionStatus = status;
     if (status === "synced") {
       this.lastSyncedAt = Date.now();
+      this.connectionError = void 0;
+    }
+    if (status === "reset-required") {
       this.connectionError = void 0;
     }
     if (status === "reconnect-required") {
@@ -24904,6 +25310,56 @@ var HavemindPlugin = class extends import_obsidian2.Plugin {
       await this.startConnection();
     } finally {
       this.retryInFlight = false;
+    }
+  }
+  /**
+   * User-initiated "Reset connection" (P1 #5): clear the damaged persisted
+   * pairing so this device can be paired again. This is the supported form of the
+   * manual "delete data.json" the field incident needed.
+   *
+   * Order: quiesce first (stop the loop, disarm the rejoin poll) so nothing
+   * re-writes the keys mid-reset, then clear disk + secrets, then drop the
+   * in-memory mirrors of what was just cleared (roster, send-queue state,
+   * pending invitation/approval) and return the panel to `disconnected`.
+   *
+   * Idempotent under a rapid double-click via `resetInFlight`. No vault content
+   * is touched: notes on disk are the source of truth and are re-reconciled once
+   * the device is paired again.
+   */
+  async resetConnection() {
+    if (this.resetInFlight) return;
+    this.resetInFlight = true;
+    try {
+      this.disarmRejoin();
+      this.connection?.stop();
+      this.connection = null;
+      this.syncState = null;
+      await resetHavemindConnectionState(this);
+      this.rosterMembers = [];
+      this.deadMembershipIds = [];
+      this.rejoinWaiting = /* @__PURE__ */ new Set();
+      this.pendingInvitation = null;
+      this.pendingApprovals = [];
+      this.notifiedQuarantineIds = /* @__PURE__ */ new Set();
+      this.awaitingApproval = null;
+      this.guestInvitationInvalid = false;
+      this.connectionActive = false;
+      this.connectionNotice = void 0;
+      this.connectionNoticeKind = void 0;
+      this.connectionStatus = "disconnected";
+      this.lastSyncedAt = void 0;
+      this.connectionError = void 0;
+      this.setStatus(formatStatusBar({ status: "disconnected" }));
+      new import_obsidian2.Notice(
+        "Havemind: connection reset. Paste a new invitation or pairing token to connect."
+      );
+    } catch (error51) {
+      new import_obsidian2.Notice(
+        `Havemind: could not reset the connection \u2014 ${error51 instanceof Error ? error51.message : "unexpected error"}`
+      );
+    } finally {
+      this.resetInFlight = false;
+      this.onboardingView?.refresh();
     }
   }
   /**
