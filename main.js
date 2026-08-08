@@ -24655,8 +24655,6 @@ var HavemindPlugin = class extends import_obsidian2.Plugin {
     this.syncState = null;
     this.activityLogUnsubscribe?.();
     this.activityLogUnsubscribe = null;
-    this.app.workspace.detachLeavesOfType(HAVEMIND_ACTIVITY_VIEW);
-    this.app.workspace.detachLeavesOfType(HAVEMIND_ONBOARDING_VIEW);
   }
   openConnectView() {
     this.connectionActive = false;
