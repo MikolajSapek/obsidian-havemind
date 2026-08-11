@@ -187,6 +187,26 @@
   stroke-width: 1.75;
 }
 
+/*
+ * Keyboard focus. Every control here is created by the plugin, so nothing else
+ * draws a focus ring for it — a keyboard user would otherwise have no idea where
+ * they are. One shared accent ring keeps the panel, the modal and the status bar
+ * item consistent. `:focus-visible` only, so a mouse click never leaves a ring
+ * behind. Selectors stay inside the plugin's own class prefixes — no global
+ * Obsidian element is ever restyled. Rows are not listed because a row is not
+ * itself focusable: each one delegates to the buttons it contains, which are.
+ */
+.havemind-view button:focus-visible,
+.havemind-view a:focus-visible,
+.havemind-view input:focus-visible,
+.havemind-view textarea:focus-visible,
+.havemind-view select:focus-visible,
+.havemind-status-bar:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
 /* =========================================================================
    4. Connection status indicator
    One line: glyph (or dot) + word. Semantic colour is set inline from
@@ -800,4 +820,68 @@
   font-size: var(--font-ui-smaller);
   border-left: 2px solid var(--havemind-bad);
   background: hsla(var(--color-red-hsl), 0.07);
+}
+
+/* ------------------------------------------------------------------------- */
+/* F6 author overlay (specs/001-mvp.md)                                      */
+/*                                                                           */
+/* Both surfaces set `--havemind-overlay-color` to one of the shared          */
+/* `--havemind-author-*` tokens declared at the top of this file, so a person  */
+/* is the same colour here, in the roster and in the Activity log. Colour is   */
+/* never the only signal: the editor mark carries an underline and the reading */
+/* block a left border, and both carry the author's name in `title` plus       */
+/* `aria-label`. Every value below is an Obsidian variable or derived from the */
+/* overlay custom property — no literal colours.                              */
+/* ------------------------------------------------------------------------- */
+
+/* Live Preview: one attributed span inside the editor. */
+.havemind-author-mark {
+  border-bottom: 2px solid var(--havemind-overlay-color, var(--text-faint));
+  /* Keeps the underline off the glyphs so text stays as legible as it was. */
+  padding-bottom: 1px;
+}
+
+/* Reading view: one attributed block. */
+.havemind-author-block {
+  position: relative;
+  padding-left: var(--size-4-2);
+}
+
+/*
+ * The colour bar is drawn as a pseudo-element: decorative by construction, so
+ * assistive technology has no extra node to announce beside the name that the
+ * block's own title/aria-label already carries.
+ */
+.havemind-author-block::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--havemind-overlay-color, var(--text-faint));
+}
+
+/* A brief settle after the marker appears; suppressed under reduced motion by
+   the overlay model, which simply omits the animate class. */
+.havemind-author-mark-animate,
+.havemind-author-block-animate {
+  animation: havemind-author-settle 240ms ease-out;
+}
+
+@keyframes havemind-author-settle {
+  from {
+    opacity: 0.55;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .havemind-author-mark-animate,
+  .havemind-author-block-animate {
+    animation: none;
+  }
 }
