@@ -18458,6 +18458,66 @@ function createRequestUrlFn() {
   };
 }
 
+// src/sync/config-normalize.ts
+var GRAPH_SETTINGS_PATH = ".obsidian/graph.json";
+var GRAPH_VOLATILE_KEYS = /* @__PURE__ */ new Set([
+  "scale",
+  "close",
+  "collapse-filter",
+  "collapse-color-groups",
+  "collapse-display",
+  "collapse-forces"
+]);
+var JSON_INDENT = 2;
+function normalizeSeparators2(path) {
+  return path.replace(/\\/gu, "/");
+}
+function hasVolatileConfigFields(path) {
+  return normalizeSeparators2(path) === GRAPH_SETTINGS_PATH;
+}
+function parseConfigObject(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text.replace(/^\uFEFF/u, ""));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed;
+}
+function pickKeys(source, keep) {
+  const result = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (keep(key)) result[key] = value;
+  }
+  return result;
+}
+function normalizeConfigContent(path, text) {
+  if (!hasVolatileConfigFields(path)) return text;
+  const parsed = parseConfigObject(text);
+  if (parsed === null) return text;
+  return JSON.stringify(
+    pickKeys(parsed, (key) => !GRAPH_VOLATILE_KEYS.has(key)),
+    null,
+    JSON_INDENT
+  );
+}
+function mergeConfigContent(path, localText, remoteText) {
+  if (!hasVolatileConfigFields(path)) return remoteText;
+  const remote = parseConfigObject(remoteText);
+  if (remote === null) return remoteText;
+  const local = localText === null ? null : parseConfigObject(localText);
+  const localVolatile = local === null ? {} : pickKeys(local, (key) => GRAPH_VOLATILE_KEYS.has(key));
+  const remoteSemantic = pickKeys(
+    remote,
+    (key) => !GRAPH_VOLATILE_KEYS.has(key)
+  );
+  return `${JSON.stringify({ ...localVolatile, ...remoteSemantic }, null, JSON_INDENT)}
+`;
+}
+
 // src/obsidian/vault-adapter.ts
 var RESERVED_TOP_LEVEL_DIRECTORIES = /* @__PURE__ */ new Set([CONFLICT_FOLDER]);
 var SYNCABLE_BINARY_EXTENSIONS = [
@@ -18623,7 +18683,9 @@ var VaultChangeObserver = class {
       if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return null;
       return { content: bytesToBase642(bytes), contentHash: await hashBlob(bytes) };
     }
-    const content = normalizeContent(await this.options.vault.readText(readPath));
+    const content = normalizeContent(
+      normalizeConfigContent(canonicalPath, await this.options.vault.readText(readPath))
+    );
     return { content, contentHash: await sha256Hex2(content) };
   }
   async commitCreate(readPath, classified) {
@@ -19569,6 +19631,9 @@ var ParentFolderOccupiedError = class extends Error {
   }
 };
 var MAX_CONFLICT_BASENAME_LENGTH = 60;
+function resolvesLastWriterWins(path) {
+  return isSyncableConfigPath(path);
+}
 var VaultApplyAdapter = class {
   constructor(options) {
     __publicField(this, "files");
@@ -19646,9 +19711,10 @@ var VaultApplyAdapter = class {
       return this.applyRemoteBinary(event, decoded, fileId, origin);
     }
     const text = decoded.content ?? "";
+    const lastWriterWins = resolvesLastWriterWins(decoded.path);
     if (decoded.operation === "rename" && decoded.previousPath !== null && this.files.fileIdAtPath(decoded.previousPath) === fileId) {
       const previousOnDisk = await this.files.readByPath(decoded.previousPath);
-      if (previousOnDisk !== null) {
+      if (previousOnDisk !== null && !lastWriterWins) {
         const base = this.files.baseHashFor(fileId);
         const previousHash = await this.hashContent(previousOnDisk);
         if (base === null || previousHash !== base) {
@@ -19684,8 +19750,13 @@ var VaultApplyAdapter = class {
         });
         return "noop";
       }
-      await this.writeConflict(event, decoded);
-      return "conflict";
+      if (!lastWriterWins) {
+        await this.writeConflict(event, decoded);
+        return "conflict";
+      }
+      await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+      await this.files.forgetBaseHash(owner);
+      await this.files.forgetBaseContent(owner);
     }
     if (onDisk !== null) {
       if (contentMatches(onDisk, text)) {
@@ -19719,8 +19790,10 @@ var VaultApplyAdapter = class {
         if (merged !== null) {
           return merged;
         }
-        await this.writeConflict(event, decoded);
-        return "conflict";
+        if (!lastWriterWins) {
+          await this.writeConflict(event, decoded);
+          return "conflict";
+        }
       }
     }
     const contentHash = await this.hashContent(text);
@@ -19733,7 +19806,7 @@ var VaultApplyAdapter = class {
       revisionId: event.revision.revisionId
     });
     const preWriteOnDisk = await this.files.readByPath(decoded.path);
-    if (preWriteOnDisk !== null && !contentMatches(preWriteOnDisk, text)) {
+    if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, text)) {
       const preWriteBase = this.files.baseHashFor(fileId);
       const preWriteHash = await this.hashContent(preWriteOnDisk);
       if (preWriteBase === null || preWriteHash !== preWriteBase) {
@@ -19757,7 +19830,7 @@ var VaultApplyAdapter = class {
     try {
       await this.files.writeByPath(decoded.path, text);
     } catch (error51) {
-      if (error51 instanceof ParentFolderOccupiedError) {
+      if (error51 instanceof ParentFolderOccupiedError && !lastWriterWins) {
         await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
         await this.writeConflict(event, decoded);
         return "conflict";
@@ -19871,9 +19944,10 @@ var VaultApplyAdapter = class {
     const bytes = decoded.binaryContent ?? new Uint8Array(0);
     const incomingHash = await hashBlob(bytes);
     const incomingBase64 = bytesToBase642(bytes);
+    const lastWriterWins = resolvesLastWriterWins(decoded.path);
     if (decoded.operation === "rename" && decoded.previousPath !== null && this.files.fileIdAtPath(decoded.previousPath) === fileId) {
       const previousOnDisk = await this.files.readBinaryByPath(decoded.previousPath);
-      if (previousOnDisk !== null) {
+      if (previousOnDisk !== null && !lastWriterWins) {
         const base = this.files.baseHashFor(fileId);
         const previousHash = await hashBlob(previousOnDisk);
         if (base === null || previousHash !== base) {
@@ -19906,8 +19980,13 @@ var VaultApplyAdapter = class {
         });
         return "noop";
       }
-      await this.writeConflict(event, decoded);
-      return "conflict";
+      if (!lastWriterWins) {
+        await this.writeConflict(event, decoded);
+        return "conflict";
+      }
+      await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+      await this.files.forgetBaseHash(owner);
+      await this.files.forgetBaseContent(owner);
     }
     if (onDisk !== null) {
       if (bytesEqual(onDisk, bytes)) {
@@ -19925,11 +20004,11 @@ var VaultApplyAdapter = class {
       }
       const base = this.files.baseHashFor(fileId);
       const onDiskHash = await hashBlob(onDisk);
-      if (base === null || onDiskHash !== base) {
+      if (!lastWriterWins && (base === null || onDiskHash !== base)) {
         await this.writeConflict(event, decoded);
         return "conflict";
       }
-      if (!await this.isCausalFastForward(fileId, event)) {
+      if (!lastWriterWins && !await this.isCausalFastForward(fileId, event)) {
         await this.writeConflict(event, decoded);
         return "conflict";
       }
@@ -19943,7 +20022,7 @@ var VaultApplyAdapter = class {
       revisionId: event.revision.revisionId
     });
     const preWriteOnDisk = await this.files.readBinaryByPath(decoded.path);
-    if (preWriteOnDisk !== null && !bytesEqual(preWriteOnDisk, bytes)) {
+    if (preWriteOnDisk !== null && !lastWriterWins && !bytesEqual(preWriteOnDisk, bytes)) {
       const preWriteBase = this.files.baseHashFor(fileId);
       const preWriteHash = await hashBlob(preWriteOnDisk);
       if (preWriteBase === null || preWriteHash !== preWriteBase) {
@@ -19955,7 +20034,7 @@ var VaultApplyAdapter = class {
     try {
       await this.files.writeBinaryByPath(decoded.path, bytes);
     } catch (error51) {
-      if (error51 instanceof ParentFolderOccupiedError) {
+      if (error51 instanceof ParentFolderOccupiedError && !lastWriterWins) {
         await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
         await this.writeConflict(event, decoded);
         return "conflict";
@@ -19973,6 +20052,13 @@ var VaultApplyAdapter = class {
     });
     return "applied";
   }
+  /**
+   * The runner's separate open-BUFFER divergence path: the incoming revision is
+   * preserved as a conflict copy without touching the live file. Unreachable for
+   * an allowlisted `.obsidian/` settings file, which is why it needs no
+   * last-writer-wins branch — Obsidian never opens a hidden config file as an
+   * editor buffer, so `openBuffers` can never report one for a config fileId.
+   */
   async recordConflict(event) {
     const decoded = await this.resolveRevision(event);
     await this.writeConflict(event, decoded);
@@ -20114,7 +20200,9 @@ function createVaultFilePort(options) {
     async readByPath(path) {
       if (isSyncableConfigPath(path)) {
         if (!await vault.adapter.exists(path)) return null;
-        return canonicalizeMarkdown(await vault.adapter.read(path));
+        return canonicalizeMarkdown(
+          normalizeConfigContent(path, await vault.adapter.read(path))
+        );
       }
       const existing = vault.getAbstractFileByPath(path);
       if (existing === null) return null;
@@ -20144,7 +20232,12 @@ function createVaultFilePort(options) {
     recordConflictArtifactPath: (revisionId, path) => state.recordConflictArtifactPath(revisionId, path),
     async writeByPath(path, content) {
       if (isSyncableConfigPath(path)) {
-        await writeConfigText(vault.adapter, path, content);
+        const local = await vault.adapter.exists(path) ? await vault.adapter.read(path) : null;
+        await writeConfigText(
+          vault.adapter,
+          path,
+          mergeConfigContent(path, local, content)
+        );
         configApply?.applied(path);
         return;
       }
@@ -22923,7 +23016,11 @@ async function readEligibleContent(vault, readPath, kind) {
     if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return "too-large";
     return { content: bytesToBase642(bytes) };
   }
-  return { content: normalizeContent2(await vault.readText(readPath)) };
+  return {
+    content: normalizeContent2(
+      normalizeConfigContent(readPath, await vault.readText(readPath))
+    )
+  };
 }
 async function reconcileVaultState(options) {
   const { observer, repository, vault } = options;
