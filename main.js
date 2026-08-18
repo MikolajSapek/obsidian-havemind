@@ -24560,11 +24560,20 @@ function renderGettingStarted(content, model) {
     body.createEl("span", { text: step.text });
     if (step.docRef) {
       body.createEl("span", { text: " " });
+      const url2 = step.docRef.url;
       const link = body.createEl("a", {
         text: step.docRef.label,
-        attr: { href: step.docRef.url, target: "_blank", rel: "noopener" }
+        // `external-link` is what Obsidian's own click handling keys on; without
+        // it a bare href inside a plugin view is inert. `target`/`rel` keep the
+        // element correct as plain HTML too.
+        attr: { href: url2, target: "_blank", rel: "noopener" }
       });
       link.addClass("havemind-step-link");
+      link.addClass("external-link");
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        window.open(url2, "_blank");
+      });
     }
   }
   wrap.createDiv({ text: model.footnote }).addClass("havemind-hint");
