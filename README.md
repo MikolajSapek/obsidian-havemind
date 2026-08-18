@@ -24,28 +24,13 @@ Real-time, self-hosted sync for a shared vault — one brain for a team and thei
 - **Appearance settings, from an explicit allowlist.** Theme CSS, snippets, hotkeys, and appearance, app, and graph settings mirror between devices. Plugin code and plugin state are never included.
 - **Multiple isolated vaults on one server.** A single self-hosted server can host several separate vaults, each isolated from the others.
 
-## Screenshots
+## Screenshot
 
-### Activity panel and authorship
+Graph colour groups are part of the synced appearance allowlist, so the graph
+looks the same on every device in the vault — as do themes, CSS snippets and
+hotkeys. Plugin code and plugin state never sync.
 
-Every revision is attributed. The Activity panel shows who changed what, each
-author keeps a stable colour, and any earlier revision restores in one click.
-
-<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-activity.png" alt="The Havemind Activity panel listing revisions by author, with the authorship overlay colouring edited text in the note beside it" width="100%">
-
-### Connecting to a vault
-
-There is nothing to sign up for. The panel walks through connecting to a
-self-hosted server and pairing with a code the owner approves.
-
-<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-connect.png" alt="The Havemind connect screen showing the getting-started steps, the server URL field and the pairing token field" width="100%">
-
-### Sync status
-
-The status bar reports the live sync state, and appearance settings such as
-graph colour groups mirror across devices.
-
-<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-status.png" alt="The Obsidian status bar showing Havemind synced, with the graph view open and colour groups matching across two devices" width="100%">
+<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-graph.png" alt="Obsidian's graph view with a colour group applied, mirrored from another device in the same Havemind vault" width="100%">
 
 ## Getting started
 
