@@ -72,6 +72,20 @@ people who trust each other, sharing one vault, on their own hardware.**
   every syncing device.
 - **Licence.** Apache-2.0, source fully public.
 
+### What the plugin accesses, and why
+
+- **Every file path in the vault.** Syncing requires knowing what exists, so
+  the plugin enumerates the vault to pair local files with remote revisions and
+  to detect renames. Paths and content leave your device only for files that
+  actually sync, and only to your own server.
+- **The clipboard, on one button.** "Copy" in the invitation panel writes the
+  invitation to your clipboard. The plugin never reads the clipboard.
+- **Never `.obsidian/plugins/`.** Plugin code, plugin state and plugin secrets
+  are excluded in full, enforced at two independent layers.
+- **Release artifacts are attested.** `main.js` and `styles.css` carry GitHub
+  build provenance, so you can verify they were built by CI from this
+  repository rather than uploaded by hand.
+
 ## Getting started
 
 1. **Stand up a server.** Follow the
