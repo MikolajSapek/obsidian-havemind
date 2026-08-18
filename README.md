@@ -57,6 +57,11 @@ people who trust each other, sharing one vault, on their own hardware.**
 - **Survives crashes.** The outbox is durable and fails closed: a corrupted
   state file is quarantined for recovery, never silently emptied.
 
+<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-authorship.png" alt="Two people editing one note: each line underlined in its author's colour, an Activity list showing who changed what with a Restore action, and a connected-and-synced status" width="100%">
+
+<sub>Diagram of the authorship model, drawn with the plugin's own author colours
+— not a screen capture.</sub>
+
 ## Requirements and disclosures
 
 - **Network use.** The plugin talks to exactly one remote service: the Havemind
