@@ -57,8 +57,6 @@ people who trust each other, sharing one vault, on their own hardware.**
 - **Survives crashes.** The outbox is durable and fails closed: a corrupted
   state file is quarantined for recovery, never silently emptied.
 
-<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-graph.png" alt="Obsidian's graph view with a colour group applied, mirrored from another device in the same Havemind vault" width="100%">
-
 ## Requirements and disclosures
 
 - **Network use.** The plugin talks to exactly one remote service: the Havemind
