@@ -24479,7 +24479,7 @@ var ConflictResolveModal = class extends import_obsidian9.Modal {
 var import_obsidian12 = require("obsidian");
 
 // src/runtime/getting-started-render.ts
-var SELF_HOSTING_DOC_PATH = "docs/self-hosting.md";
+var SELF_HOSTING_DOC_PATH = "https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md";
 function buildGettingStartedViewModel() {
   return {
     title: "Getting started",
@@ -24562,7 +24562,7 @@ function renderGettingStarted(content, model) {
       body.createEl("span", { text: " " });
       const link = body.createEl("a", {
         text: step.docRef.label,
-        attr: { href: step.docRef.url }
+        attr: { href: step.docRef.url, target: "_blank", rel: "noopener" }
       });
       link.addClass("havemind-step-link");
     }

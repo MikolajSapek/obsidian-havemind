@@ -26,11 +26,26 @@ Real-time, self-hosted sync for a shared vault — one brain for a team and thei
 
 ## Screenshots
 
-<!-- screenshot: Activity panel with authorship overlay -->
-<!-- screenshot: Connect screen with the getting-started tutorial -->
-<!-- screenshot: status bar Synced + graph colours synced across devices -->
+### Activity panel and authorship
 
-Screenshots coming shortly.
+Every revision is attributed. The Activity panel shows who changed what, each
+author keeps a stable colour, and any earlier revision restores in one click.
+
+<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-activity.png" alt="The Havemind Activity panel listing revisions by author, with the authorship overlay colouring edited text in the note beside it" width="100%">
+
+### Connecting to a vault
+
+There is nothing to sign up for. The panel walks through connecting to a
+self-hosted server and pairing with a code the owner approves.
+
+<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-connect.png" alt="The Havemind connect screen showing the getting-started steps, the server URL field and the pairing token field" width="100%">
+
+### Sync status
+
+The status bar reports the live sync state, and appearance settings such as
+graph colour groups mirror across devices.
+
+<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-status.png" alt="The Obsidian status bar showing Havemind synced, with the graph view open and colour groups matching across two devices" width="100%">
 
 ## Getting started
 
