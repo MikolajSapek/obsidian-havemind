@@ -1,0 +1,89 @@
+name: Release
+
+# This is the distribution repository: it carries the built three-file plugin
+# artifact, not the source. The monorepo (MikolajSapek/havemind) builds and
+# attests the same bundle, but a consumer of THIS repo cannot verify that
+# attestation — it is recorded against the monorepo. So the release that people
+# actually install is attested here as well, against the repo it is served from.
+#
+# Triggered only by a bare SemVer tag (no `v` prefix), matching manifest.json.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  # `id-token` signs the provenance claim with the workflow's OIDC identity,
+  # `attestations` records it.
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The tag is the version users install. If it disagrees with the manifest,
+      # BRAT and the community catalogue resolve a different build than the tag
+      # claims — so fail before publishing rather than shipping the mismatch.
+      - name: Tag matches manifest.json version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MANIFEST="$(node -p "require('./manifest.json').version")"
+          BETA="$(node -p "require('./manifest-beta.json').version")"
+          if [ "$TAG" != "$MANIFEST" ] || [ "$TAG" != "$BETA" ]; then
+            echo "FAIL: tag=$TAG manifest=$MANIFEST manifest-beta=$BETA"; exit 1
+          fi
+          echo "PASS: tag, manifest and manifest-beta all say $TAG"
+
+      - name: versions.json carries this release
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MIN="$(node -p "require('./manifest.json').minAppVersion")"
+          ENTRY="$(node -p "require('./versions.json')['${TAG}'] ?? ''")"
+          if [ "$ENTRY" != "$MIN" ]; then
+            echo "FAIL: versions.json['$TAG']='$ENTRY', manifest minAppVersion='$MIN'"; exit 1
+          fi
+          echo "PASS: versions.json['$TAG'] = $MIN"
+
+      - name: Three-file artifact present
+        run: |
+          for f in main.js manifest.json styles.css; do
+            [ -s "$f" ] || { echo "FAIL: $f missing or empty"; exit 1; }
+          done
+          echo "PASS: main.js, manifest.json and styles.css all present"
+
+      # The bundle is committed here rather than built here, so re-run the
+      # monorepo's secret scan on what is actually about to be published.
+      - name: No secret or private-infra markers in the bundle
+        run: |
+          if grep -nE '\.ts\.net|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|refresh_token|BEGIN [A-Z]* PRIVATE KEY|invitation_secret' main.js styles.css; then
+            echo "FAIL: secret-like or private-infra content in the artifact"; exit 1
+          fi
+          echo "PASS: no secret or private-infra markers"
+
+      - name: Attest build provenance for the release artifact
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            main.js
+            styles.css
+
+      - name: Create GitHub Release with three-file artifact
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            main.js
+            manifest.json
+            styles.css
