@@ -4,12 +4,11 @@
 
 # Havemind
 
-### One shared brain for your team, on hardware you own.
+### One shared brain for a small trusted circle, on hardware you own.
 
-Your team's knowledge is scattered across private vaults, and knowledge nobody
-else can reach is knowledge nobody can build on. Havemind puts it in one place:
-a single Obsidian vault, shared live between your devices, on a server you host
-yourself.
+Knowledge scattered across private vaults is knowledge nobody else can build
+on. Havemind puts it in one place: a single Obsidian vault, shared live between
+your devices, on a server you host yourself.
 
 Edits arrive in about a second. Every line remembers who wrote it. Nothing is
 ever silently overwritten.
