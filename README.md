@@ -4,17 +4,17 @@
 
 # Havemind
 
-**Two people, one vault, no cloud.** Havemind syncs a shared Obsidian vault
-between your own devices in about a second, over a server you host yourself —
-and records who wrote every line.
+### One shared brain for your team, on hardware you own.
 
-No account. No subscription. No third party holding your notes.
+Your team's knowledge is scattered across private vaults, and knowledge nobody
+else can reach is knowledge nobody can build on. Havemind puts it in one place:
+a single Obsidian vault, shared live between your devices, on a server you host
+yourself.
 
-> [!IMPORTANT]
-> Note content is stored **unencrypted** on your server, so whoever controls
-> that machine can read the vault. Run it on hardware you trust, keep it
-> tailnet-only, and read [Security model](#security-model) before connecting a
-> vault that matters.
+Edits arrive in about a second. Every line remembers who wrote it. Nothing is
+ever silently overwritten.
+
+**No account. No subscription. No third party holding your notes.**
 
 ## Why this exists
 
@@ -23,8 +23,10 @@ Obsidian Sync is excellent, but it is someone else's server. File-sync tools
 the same note produces a silent overwrite or a pile of conflicted copies, and
 nothing tells you who changed what.
 
-Havemind is built for the small case that neither solves well — **two or three
-people who trust each other, sharing one vault, on their own hardware.**
+Havemind is built for the case neither solves well — **a small circle who trust
+each other, sharing one vault, on their own hardware.** And not just people:
+point your AI assistants at the same vault and every human and every agent
+works from one continuously-synced context, with full authorship on all of it.
 
 | | Obsidian Sync | File sync | Havemind |
 |---|---|---|---|
@@ -66,6 +68,13 @@ restore of any earlier revision.</sub></p>
 
 ## Requirements and disclosures
 
+> [!IMPORTANT]
+> **No end-to-end encryption.** Note content is stored unencrypted on your
+> server, so whoever controls that machine can read the vault. That is the
+> trade for a server with no moving parts you don't own — run it on hardware
+> you trust, keep it off the public internet, and see
+> [Security model](#security-model) for the full picture.
+
 - **Network use.** The plugin talks to exactly one remote service: the Havemind
   server you or a peer self-hosts, at the URL you enter in settings. No cloud
   backend, no CDN, no other host.
@@ -93,13 +102,12 @@ restore of any earlier revision.</sub></p>
 
 ## Getting started
 
-1. **Stand up a server.** Follow the
+1. **Install the plugin.** In Obsidian: **Settings → Community plugins →
+   Browse**, search for **Havemind**, install and enable it.
+2. **Stand up a server.** Follow the
    [self-hosting guide](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md)
-   (Docker Compose + Tailscale). Or get a pairing token from whoever runs yours.
-2. **Install the plugin.** Until it lands in the community catalogue, install
-   [BRAT](https://github.com/TfTHacker/obsidian42-brat), run **BRAT: Add a beta
-   plugin**, and paste `https://github.com/MikolajSapek/obsidian-havemind`.
-   BRAT keeps it updated automatically.
+   (Docker Compose + Tailscale) — or skip this entirely and get a pairing token
+   from whoever already runs one.
 3. **Connect.** Open the Havemind panel and paste your server URL and token.
 4. **Invite someone.** Run **Create connection (owner)** to mint an invitation.
    The joining device shows a 6-digit code; they read it to you aloud, you
