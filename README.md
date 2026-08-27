@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/banner-dark.png">
-    <img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/banner.png" alt="Havemind — one shared brain for your team and their AIs" width="100%">
-  </picture>
+  <img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/banner.png" alt="Havemind, one shared brain for your team and their AIs" width="100%">
 </p>
 
 # Havemind
