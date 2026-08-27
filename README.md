@@ -1,8 +1,23 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/banner-dark.png">
+    <img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/banner.png" alt="Havemind — one shared brain for your team and their AIs" width="100%">
+  </picture>
+</p>
+
 # Havemind
 
 Private, self-hosted, real-time sync for a shared Obsidian vault. Havemind is
 for a small trusted circle that wants to keep Markdown data on hardware it
 controls, rather than in a third-party cloud.
+
+## What it looks like
+
+Every change carries its author, so you can see who wrote which line and when.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/screenshot-activity.png" alt="The Havemind pane showing the activity feed: each revision listed with its author, the file it touched, and the time it arrived" width="420">
+</p>
 
 ## Install
 
