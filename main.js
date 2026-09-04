@@ -1,4 +1,4 @@
-/* Havemind — Apache-2.0 */
+/* Havemind, Apache-2.0 */
 "use strict";
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -37,7 +37,7 @@ __export(main_exports, {
   renderSendQueueSection: () => renderSendQueueSection
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian16 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 
 // ../../packages/protocol/dist/appearance-scope.js
 var OBSIDIAN_PREFIX = ".obsidian/";
@@ -45,7 +45,7 @@ var ALLOW_EXACT = /* @__PURE__ */ new Set([
   ".obsidian/appearance.json",
   ".obsidian/app.json",
   ".obsidian/core-plugins.json",
-  // Graph view settings, node colour groups included — a stated user requirement.
+  // Graph view settings, node colour groups included, a stated user requirement.
   ".obsidian/graph.json",
   ".obsidian/hotkeys.json"
 ]);
@@ -14805,7 +14805,7 @@ var opaqueBlobReceiptSchema = external_exports.object({
    * protected header. Carried on the receipt so the client's apply side can
    * prove whether an incoming revision is a causal fast-forward from its local
    * head (rule 3, no silent overwrite of a concurrent fork). The server merely
-   * relays the metadata it already stored — it never computes lineage, so the
+   * relays the metadata it already stored, it never computes lineage, so the
    * opaque boundary is intact. Optional for backward compatibility: receipts
    * committed before this field existed decode with no parents, in which case
    * apply falls back to its pre-existing best-effort clean apply.
@@ -16234,7 +16234,7 @@ function activityEntriesToRecords(entries, roster) {
       actor: author,
       timestamp: entry.timestamp,
       content: entry.hasContent ? "" : null,
-      // Non-empty placeholder for the same reason as vaultId above — the feed
+      // Non-empty placeholder for the same reason as vaultId above, the feed
       // never tracks a real content hash, but RevisionDag rejects an empty
       // blobHash. Keyed by revisionId so distinct entries stay distinct.
       blobHash: `feed:${entry.revisionId}`,
@@ -16358,7 +16358,7 @@ function buildAuthorDecorations(overlay, docLength) {
           title: segment.tooltip,
           "aria-label": segment.ariaLabel,
           "data-havemind-author": segment.author.displayName,
-          // The token name only — the concrete light/dark value lives in
+          // The token name only, the concrete light/dark value lives in
           // `styles.css`, never in the note or the decoration.
           style: `--havemind-overlay-color: var(${segment.colorToken});`
         }
@@ -16610,7 +16610,7 @@ var DurableSyncState = class {
      * enqueue/requeue, on load rehydration, and on legacy-blob migration; pruned
      * on receipt/discard/eviction. A revisionId absent here keeps its bytes inline
      * (the fallback path), so the disk form only ever strips a payload the store
-     * actually holds — never one that would then be irrecoverable.
+     * actually holds, never one that would then be irrecoverable.
      */
     __publicField(this, "externalized", /* @__PURE__ */ new Set());
     __publicField(this, "cache", null);
@@ -16619,7 +16619,7 @@ var DurableSyncState = class {
      * outbox (the queue container itself could not be read), no usable `.bak`
      * existed, and the raw bytes were preserved to a sidecar for manual recovery
      * (GAP-1). It is a purely OBSERVABLE signal (see {@link isRecoveryRequired}),
-     * never a save lock — the instance resumes from a clean, writable empty state
+     * never a save lock, the instance resumes from a clean, writable empty state
      * and the primary is rewritten so a restart never re-locks. Surfaced to the UI
      * so the user sees "local queue needs recovery" rather than silently assuming
      * the queue drained. A salvageable corruption (readable outbox, only a
@@ -16631,7 +16631,7 @@ var DurableSyncState = class {
      * De-dupes concurrent cold-cache loads. Without it, two callers that both find
      * a null cache each `await persist.load()`; the later resolution re-parses the
      * on-disk blob and clobbers any cache mutation the first caller made during the
-     * await (an enqueued revision, an advanced cursor) — a silent dropped push at
+     * await (an enqueued revision, an advanced cursor), a silent dropped push at
      * connect (rule 3). All concurrent callers share this single in-flight load.
      */
     __publicField(this, "loadPromise", null);
@@ -16641,7 +16641,7 @@ var DurableSyncState = class {
      * writes it back (`mutate`) as a `{ ...state, field }` spread, with `await`
      * points in between. On a WARM cache `ensureLoaded` reads synchronously, so
      * two sections that overlap each capture the SAME snapshot and the later
-     * `mutate` silently drops the earlier one's write — a lost update. In the
+     * `mutate` silently drops the earlier one's write, a lost update. In the
      * two-device sync loop this dropped a file's base CONTENT while keeping its
      * base HASH, which then made the three-way merge (it needs the ancestor
      * content) fail and spawn a SPURIOUS conflict copy (rule 3: zero silent
@@ -16749,7 +16749,7 @@ var DurableSyncState = class {
    * Returns a copy of `envelopes` trimmed to the byte budget (MAJOR 4). Object
    * key order is insertion order, so iterating from the front evicts the OLDEST
    * stashes until the summed decoded payload bytes fit. A single stash larger
-   * than the whole budget is evicted too — its row survives and Retry re-commits
+   * than the whole budget is evicted too, its row survives and Retry re-commits
    * from disk, which is the only recovery once the bytes are dropped.
    */
   evictStashesOverBudget(envelopes) {
@@ -16782,7 +16782,7 @@ var DurableSyncState = class {
    * a failed-to-queue row has no stashed envelope (it never reached the outbox),
    * so `requeueQuarantined` is inert for it. Retry instead re-triggers the
    * commit chain for the path from disk (MAJOR 2, routed by the caller via
-   * {@link parseFailedToQueuePath}) — the on-disk content is the source of truth.
+   * {@link parseFailedToQueuePath}), the on-disk content is the source of truth.
    */
   async recordFailedToQueue(path) {
     return this.runExclusive(async () => {
@@ -16924,7 +16924,7 @@ var DurableSyncState = class {
   /**
    * Outbox items paired with their enqueue time (SND-01), read synchronously
    * against the warm cache. A missing `enqueuedAt` (legacy blob) is reported as
-   * 0 — "very old" — so a pre-upgrade item still counts as waiting. The runner
+   * 0, "very old", so a pre-upgrade item still counts as waiting. The runner
    * always warms the cache before it pushes, so the panel's synchronous read
    * finds a populated cache once connected; a cold cache reports no ages.
    */
@@ -16950,7 +16950,7 @@ var DurableSyncState = class {
    * Retry a quarantined send (SND-01): re-enqueue its stashed envelope through
    * the normal outbox machinery (fresh enqueue time), then drop it from the
    * quarantine and the stash. Returns true when it re-enqueued, false when
-   * nothing is stashed for `revisionId` — already requeued/discarded, or the
+   * nothing is stashed for `revisionId`, already requeued/discarded, or the
    * stash was evicted under the byte budget (MAJOR 4). A false return leaves the
    * quarantine row intact so the caller can degrade Retry to a re-commit from
    * disk; a double click cannot double-enqueue because the second call finds no
@@ -16976,7 +16976,7 @@ var DurableSyncState = class {
   }
   /**
    * Permanently drop a quarantined send (SND-01): remove it from the quarantine
-   * and forget its stashed envelope. Idempotent — dropping an unknown id is a
+   * and forget its stashed envelope. Idempotent, dropping an unknown id is a
    * no-op.
    */
   async discardQuarantined(revisionId) {
@@ -17043,7 +17043,7 @@ var DurableSyncState = class {
    * Parse the loaded primary blob into the cache (GAP-1 fail-closed policy). A
    * mutation may have populated the cache while the load was in flight (e.g. an
    * enqueue that awaited this same shared promise and then wrote); never clobber
-   * it — re-check `this.cache === null` before each assignment.
+   * it, re-check `this.cache === null` before each assignment.
    *
    *  - ABSENT (null/undefined): a clean first run → empty, writable state.
    *  - OK: the parsed state (with bad outbox envelopes quarantined, not nuked).
@@ -17099,7 +17099,7 @@ var DurableSyncState = class {
    * i.e. the store durably holds the bytes), the inline `payloadBase64` is
    * replaced by `''` and marked `payloadExternalized: true`. A payload NOT in the
    * set (legacy, or an inline-fallback under an unavailable store) is written
-   * inline unchanged — so the disk form only ever strips bytes the store actually
+   * inline unchanged, so the disk form only ever strips bytes the store actually
    * holds, never bytes that would then be irrecoverable. Returns `state` itself
    * when nothing is externalized (the legacy path), so behaviour is identical to
    * before when no payload store is configured.
@@ -17129,7 +17129,7 @@ var DurableSyncState = class {
   /**
    * Fallible payload-store write. Returns true when the bytes are durably in the
    * store (so the caller marks the id externalized and the disk form strips it),
-   * false when there is no store or the write threw (keep the payload inline —
+   * false when there is no store or the write threw (keep the payload inline,
    * the graceful mobile/unavailable fallback).
    */
   async safePutPayload(revisionId, payloadBase64) {
@@ -17499,7 +17499,7 @@ function parseConflictCopyName(name) {
   }
   return null;
 }
-var MANUAL_HINT = "Target unknown \u2014 open files manually.";
+var MANUAL_HINT = "Target unknown, open files manually.";
 function listConflictCopies(port) {
   const notes = port.listNoteFiles();
   const copies = [];
@@ -17943,7 +17943,7 @@ function restoreActivityEntry(options) {
       now: options.now,
       newRevisionId: options.newRevisionId,
       // Non-cryptographic: this hash only feeds the in-memory Activity DAG's
-      // append validation for this restore call — never the server, never
+      // append validation for this restore call, never the server, never
       // durable sync state, never a security boundary.
       hashContent: nonCryptoHash
     });
@@ -18178,7 +18178,7 @@ var LABELS = {
   "reset-required": "Reset required"
 };
 var RESET_REQUIRED_DETAIL = "The stored connection data is incomplete or unreadable. Reset the connection and pair this device again.";
-var NO_E2EE_NOTE = "Private Tailscale network only \u2014 no end-to-end encryption.";
+var NO_E2EE_NOTE = "Private Tailscale network only, no end-to-end encryption.";
 var PANE_NETWORK_NOTE = "Private Tailscale network \xB7 Encrypted in transit";
 var DEFERRED_DETAIL = "A change waits for an open note to settle before applying.";
 function connectionStatusFromCycle(status) {
@@ -18201,7 +18201,7 @@ function formatStatusBar(input) {
   const text = `Havemind: ${LABELS[input.status]}`;
   const format = input.formatTimestamp ?? defaultFormatTimestamp2;
   const lastSync = input.lastSyncedAt === void 0 ? "Last sync: not yet." : `Last sync: ${format(input.lastSyncedAt)}.`;
-  return { text, tooltip: `${text} \u2014 ${lastSync} ${NO_E2EE_NOTE}` };
+  return { text, tooltip: `${text}, ${lastSync} ${NO_E2EE_NOTE}` };
 }
 var MONTH_ABBREVIATIONS = "JanFebMarAprMayJunJulAugSepOctNovDec";
 function twoDigits(value) {
@@ -18259,13 +18259,13 @@ var PANEL_STYLES = {
   },
   conflict: {
     icon: "alert-triangle",
-    label: "Conflict \u2014 see Havemind Conflicts",
+    label: "Conflict, see Havemind Conflicts",
     colorToken: "--text-warning",
     spin: false,
     showForm: false
   },
   // Nothing is wrong and nothing needs doing, so this is muted rather than a
-  // warning — and it never mentions the Conflicts folder, which stays empty.
+  // warning, and it never mentions the Conflicts folder, which stays empty.
   deferred: {
     icon: "clock",
     label: "Waiting to apply",
@@ -18388,15 +18388,20 @@ function classifyConfigApplyEffect(path) {
   }
   return "reload-notice";
 }
-var CONFIG_RELOAD_NOTICE = "Havemind: settings synced \u2014 reload Obsidian to apply them.";
+var CONFIG_RELOAD_NOTICE = "Havemind: settings synced, reload Obsidian to apply them.";
 var CONFIG_APPLY_BATCH_MS = 250;
 function createConfigApplyReloader(options) {
-  const schedule = options.schedule ?? ((run, delayMs) => void window.setTimeout(run, delayMs));
+  const schedule = options.schedule ?? ((run, delayMs) => {
+    const timer = window.setTimeout(run, delayMs);
+    return () => window.clearTimeout(timer);
+  });
   const warn = options.warn ?? ((message) => console.warn(message));
   const batchMs = options.batchMs ?? CONFIG_APPLY_BATCH_MS;
   let cssPending = false;
   let noticePending = false;
   let armed = false;
+  let disposed = false;
+  let cancellation = null;
   const runGuarded = (label, effect) => {
     try {
       effect();
@@ -18405,7 +18410,9 @@ function createConfigApplyReloader(options) {
     }
   };
   const flush = () => {
+    if (disposed) return;
     armed = false;
+    cancellation = null;
     const css = cssPending;
     const notice = noticePending;
     cssPending = false;
@@ -18420,6 +18427,7 @@ function createConfigApplyReloader(options) {
   };
   return {
     applied(path) {
+      if (disposed) return;
       if (classifyConfigApplyEffect(path) === "css-reload") {
         cssPending = true;
       } else {
@@ -18427,7 +18435,28 @@ function createConfigApplyReloader(options) {
       }
       if (armed) return;
       armed = true;
-      schedule(flush, batchMs);
+      let fired = false;
+      const scheduled = schedule(() => {
+        fired = true;
+        cancellation = null;
+        flush();
+      }, batchMs);
+      if (typeof scheduled === "function") {
+        if (!fired && !disposed) {
+          cancellation = scheduled;
+        } else {
+          scheduled();
+        }
+      }
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      armed = false;
+      cssPending = false;
+      noticePending = false;
+      cancellation?.();
+      cancellation = null;
     }
   };
 }
@@ -18518,7 +18547,9 @@ function mergeConfigContent(path, localText, remoteText) {
 }
 
 // src/obsidian/vault-adapter.ts
-var RESERVED_TOP_LEVEL_DIRECTORIES = /* @__PURE__ */ new Set([CONFLICT_FOLDER]);
+var RESERVED_TOP_LEVEL_DIRECTORIES = new Set(
+  [CONFLICT_FOLDER].map((name) => name.toLowerCase())
+);
 var SYNCABLE_BINARY_EXTENSIONS = [
   "png",
   "jpg",
@@ -18588,7 +18619,7 @@ function eligibleKind(canonicalPath) {
     return null;
   }
   const [top] = segments;
-  if (top === void 0 || RESERVED_TOP_LEVEL_DIRECTORIES.has(top)) {
+  if (top === void 0 || RESERVED_TOP_LEVEL_DIRECTORIES.has(top.toLowerCase())) {
     return null;
   }
   return kind;
@@ -18653,7 +18684,7 @@ var VaultChangeObserver = class {
    * canonical (forward-slash, NFC) form matches Obsidian's own path index, so it
    * is tried first; the caller's original path is a belt-and-braces fallback for
    * an exotic filesystem where only the raw form resolves. Returns `null` when
-   * NEITHER variant exists on disk — a genuine miss. Reading via the original
+   * NEITHER variant exists on disk, a genuine miss. Reading via the original
    * (possibly backslash) path alone would miss on real Obsidian and either drop a
    * live edit or read '' and push a phantom empty file over the peer's copy.
    */
@@ -18668,9 +18699,9 @@ var VaultChangeObserver = class {
    * Reads a file's content and content hash according to its sync kind: markdown
    * is canonicalised text hashed with SHA-256; a binary attachment is read as raw
    * bytes, carried as base64 in `content`, and hashed over the RAW bytes
-   * (`hashBlob`) — never a canonicalised form (F9). The read uses the canonical
+   * (`hashBlob`), never a canonicalised form (F9). The read uses the canonical
    * path first, falling back to the original (FINDING 3). Returns `null` when the
-   * file resolves at neither path (a genuine miss — never push a phantom '') or
+   * file resolves at neither path (a genuine miss, never push a phantom '') or
    * when a binary file is over {@link MAX_BINARY_FILE_BYTES} (excluded, not an
    * error).
    */
@@ -19512,7 +19543,7 @@ function createOutboxPayloadStore(plugin) {
 }
 
 // src/runtime/adapters/scheduler-hooks.ts
-function createSchedulerHooks(plugin, target = window) {
+function createSchedulerHooks(plugin, target = window, visibility) {
   return {
     onFocus(run) {
       target.addEventListener("focus", run);
@@ -19521,6 +19552,17 @@ function createSchedulerHooks(plugin, target = window) {
     onOnline(run) {
       target.addEventListener("online", run);
       return () => target.removeEventListener("online", run);
+    },
+    onVisible(run) {
+      const source = visibility ?? (typeof document === "undefined" ? void 0 : document);
+      if (source === void 0) {
+        return () => void 0;
+      }
+      const listener = () => {
+        if (source.visibilityState !== "hidden") run();
+      };
+      source.addEventListener("visibilitychange", listener);
+      return () => source.removeEventListener("visibilitychange", listener);
     },
     setInterval(run, ms) {
       const id = window.setInterval(run, ms);
@@ -19531,7 +19573,8 @@ function createSchedulerHooks(plugin, target = window) {
 }
 function createBackoffScheduler() {
   return (callback, delayMs) => {
-    window.setTimeout(callback, delayMs);
+    const timer = window.setTimeout(callback, delayMs);
+    return () => window.clearTimeout(timer);
   };
 }
 
@@ -19672,7 +19715,7 @@ var VaultApplyAdapter = class {
    * The per-file lock key: the file's canonical collision key, so remote apply
    * and the local producer (which keys on the same collision key) share ONE
    * critical section per file. Falls back to the raw path for a non-syncable
-   * path (never reached in practice — apply only sees syncable revisions).
+   * path (never reached in practice, apply only sees syncable revisions).
    */
   lockKey(path) {
     const classified = classifyVaultPath(path);
@@ -19852,7 +19895,7 @@ var VaultApplyAdapter = class {
    * before any conflict copy. Returns `'applied'` when it merged and wrote the
    * combined content in place, or `null` when no merge is possible (no shared
    * base, the ancestor text is not locally persisted, the stored ancestor no
-   * longer matches the base hash, or the changes overlap) — the caller then
+   * longer matches the base hash, or the changes overlap), the caller then
    * writes a conflict copy.
    *
    * ANCESTOR is the locally-persisted base content; LOCAL is the current on-disk
@@ -19861,7 +19904,7 @@ var VaultApplyAdapter = class {
    * content is deliberately NOT adopted into the producer mapping: it is a NEW
    * local revision this device authored, so letting the reflected vault write
    * flow through the normal local-edit path pushes the merged result to the peer
-   * (who converges by content-equality — no ping-pong).
+   * (who converges by content-equality, no ping-pong).
    */
   async tryMergeApply(event, decoded, fileId, onDisk, incoming, base, origin) {
     if (base === null) {
@@ -19904,12 +19947,12 @@ var VaultApplyAdapter = class {
    * revision is either provably a fast-forward from this device's current
    * head for `fileId`, or when causality simply cannot be evaluated because
    * the incoming revision carries no `parentRevisionIds` at all (a transport
-   * that does not yet surface causal parentage — see `RemoteRevision`).
+   * that does not yet surface causal parentage, see `RemoteRevision`).
    *
    * When `parentRevisionIds` IS present, this only returns true if a
    * `producerSync` is wired with `localHeadFor`, that lookup resolves to a
    * known (non-null) local head, AND the incoming revision's parents include
-   * it — i.e. the peer built its revision directly on top of (or through)
+   * it, i.e. the peer built its revision directly on top of (or through)
    * what we last knew. Any missing piece there means causality cannot be
    * established, so this fails SAFE (false) rather than risk a silent
    * overwrite of a concurrent peer edit.
@@ -19934,7 +19977,7 @@ var VaultApplyAdapter = class {
    * `applyRemote` above but operates on RAW bytes: comparison and base hashing
    * use `hashBlob`/byte-equality (never `canonicalizeMarkdown`), writes go
    * through the byte vault API, and any conflict artifact keeps the original
-   * file extension. Every data-safety invariant is preserved — diverged on-disk
+   * file extension. Every data-safety invariant is preserved, diverged on-disk
    * bytes become a conflict artifact, never an overwrite (rule 3); the base
    * advances only on a clean apply or convergence, never on a divergence.
    */
@@ -20054,7 +20097,7 @@ var VaultApplyAdapter = class {
    * The runner's separate open-BUFFER divergence path: the incoming revision is
    * preserved as a conflict copy without touching the live file. Unreachable for
    * an allowlisted `.obsidian/` settings file, which is why it needs no
-   * last-writer-wins branch — Obsidian never opens a hidden config file as an
+   * last-writer-wins branch, Obsidian never opens a hidden config file as an
    * editor buffer, so `openBuffers` can never report one for a config fileId.
    */
   async recordConflict(event) {
@@ -20350,6 +20393,8 @@ var SyncRunner = class {
     __publicField(this, "failureCount", 0);
     __publicField(this, "cycleCounter", 0);
     __publicField(this, "stopped", false);
+    /** Cancellable retry timers still waiting to re-enter the sync loop. */
+    __publicField(this, "pendingBackoffCancellations", /* @__PURE__ */ new Set());
     /**
      * The server head observed on the FIRST pull after this runner was built (a
      * runner is rebuilt per connection). Every remote event at or below it belongs
@@ -20376,7 +20421,7 @@ var SyncRunner = class {
    *
    * A stopped runner is inert: it issues no push/pull. This is what guarantees
    * that after a reconnect (or teardown) the previous connection's runner can
-   * never ship a stale-identity revision — its own backoff timer may still fire,
+   * never ship a stale-identity revision, its own backoff timer may still fire,
    * but the trigger it drives is a no-op. Only the freshly-built runner, whose
    * transport already carries the current identity, ever pushes after reconnect.
    */
@@ -20399,6 +20444,10 @@ var SyncRunner = class {
    */
   stop() {
     this.stopped = true;
+    for (const cancel of this.pendingBackoffCancellations) {
+      cancel();
+    }
+    this.pendingBackoffCancellations.clear();
   }
   async loop() {
     let result;
@@ -20665,9 +20714,23 @@ var SyncRunner = class {
     );
     const half = ceiling / 2;
     const delayMs = half + this.options.random() * half;
-    this.options.scheduler(() => {
+    const scheduledTimer = {};
+    let fired = false;
+    const scheduled = this.options.scheduler(() => {
+      fired = true;
+      if (scheduledTimer.cancellation !== void 0) {
+        this.pendingBackoffCancellations.delete(scheduledTimer.cancellation);
+      }
       void this.trigger();
     }, delayMs);
+    if (typeof scheduled !== "function") return;
+    const cancellation = scheduled;
+    scheduledTimer.cancellation = cancellation;
+    if (!fired && !this.stopped) {
+      this.pendingBackoffCancellations.add(cancellation);
+    } else if (this.stopped) {
+      cancellation();
+    }
   }
 };
 function isAuthDenied(error51) {
@@ -20713,6 +20776,9 @@ var HavemindSyncController = class {
     __publicField(this, "lastSyncedAt");
     __publicField(this, "consecutiveFailures", 0);
     __publicField(this, "lastObservedCycleId", 0);
+    __publicField(this, "cleanupDone", false);
+    /** Disposer for the visibility listener registered in `start()`. */
+    __publicField(this, "disposeVisible", null);
     this.options = options;
     this.now = options.now ?? Date.now;
     this.scheduler = new SyncScheduler({
@@ -20726,11 +20792,20 @@ var HavemindSyncController = class {
   start() {
     this.scheduler.start();
     this.options.wake?.start();
+    this.disposeVisible ?? (this.disposeVisible = this.options.hooks.onVisible(() => {
+      this.options.wake?.resume?.();
+    }));
   }
   stop() {
     this.scheduler.stop();
+    this.disposeVisible?.();
+    this.disposeVisible = null;
     this.options.wake?.stop();
     this.options.runner.stop?.();
+    if (!this.cleanupDone) {
+      this.cleanupDone = true;
+      this.options.onStop?.();
+    }
   }
   /**
    * Reacts to a push-connectivity transition by flipping the periodic poll
@@ -20752,7 +20827,7 @@ var HavemindSyncController = class {
     this.observeCycle(result);
   }
   /**
-   * Derives the indicator from the LATEST cycle outcome — never a sticky flag.
+   * Derives the indicator from the LATEST cycle outcome, never a sticky flag.
    * Called for every completed cycle: both the ones this controller triggers and
    * the ones the runner drives itself through backoff (wired via the runner's
    * `onCycleComplete`). A single transient failure shows a brief retrying state
@@ -20798,7 +20873,7 @@ var RequestUrlTransportError = class extends Error {
     super(message);
     __publicField(this, "reason", reason);
     __publicField(this, "name", "RequestUrlTransportError");
-    /** True on HTTP 401 — the session was refused; the loop must stop, not retry. */
+    /** True on HTTP 401, the session was refused; the loop must stop, not retry. */
     __publicField(this, "authDenied");
     /**
      * True on a whole-request 4xx the same bytes will never satisfy (400 bad
@@ -20994,9 +21069,17 @@ var WakeSubscription = class {
     /** null until the first edge is emitted, so the very first state is reported. */
     __publicField(this, "connected", null);
     __publicField(this, "runPromise", Promise.resolve());
+    __publicField(this, "resolveStopSignal");
+    /** Resolves on stop so the loop does not await an opaque requestUrl promise. */
+    __publicField(this, "stopSignal", new Promise((resolve) => {
+      this.resolveStopSignal = resolve;
+    }));
+    /** The one settle/backoff timer the serial wake loop may currently await. */
+    __publicField(this, "pendingDelay", null);
     this.options = {
       scheduler: options.scheduler ?? ((callback, delayMs) => {
-        setTimeout(callback, delayMs);
+        const timer = setTimeout(callback, delayMs);
+        return () => clearTimeout(timer);
       }),
       random: options.random ?? Math.random,
       baseBackoffMs: options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS2,
@@ -21014,14 +21097,39 @@ var WakeSubscription = class {
     this.runPromise = this.runLoop();
   }
   /**
+   * Re-arms the loop after the host app was suspended (mobile backgrounding, a
+   * slept laptop). Releases the pending backoff/settle delay so the loop retries
+   * at once instead of waiting the delay out, and clears the accumulated failure
+   * count so the return does not inherit a grown backoff.
+   *
+   * Deliberately does NOT touch `stopped`: after `stop()` this is inert, and it
+   * is a re-arm rather than an alternative entry point, so it never starts a loop
+   * `start()` has not armed.
+   */
+  resume() {
+    if (this.stopped || !this.started) {
+      return;
+    }
+    this.failureCount = 0;
+    const pending = this.pendingDelay;
+    this.pendingDelay = null;
+    pending?.cancel();
+    pending?.resolve();
+  }
+  /**
    * Quiesces the subscription permanently: no further long-poll is issued (a poll
    * already in flight resolves and the loop then exits before re-issuing).
    * Idempotent.
    */
   stop() {
     this.stopped = true;
+    this.resolveStopSignal();
+    const pending = this.pendingDelay;
+    this.pendingDelay = null;
+    pending?.cancel();
+    pending?.resolve();
   }
-  /** Resolves once the loop has fully stopped — a teardown/test synchronisation aid. */
+  /** Resolves once the loop has fully stopped, a teardown/test synchronisation aid. */
   async whenStopped() {
     await this.runPromise;
   }
@@ -21030,13 +21138,17 @@ var WakeSubscription = class {
       let sentCursor;
       let resolvedCursor;
       try {
-        sentCursor = await this.options.loadCursor();
+        const loadedCursor = await this.awaitOrStop(this.options.loadCursor());
+        if (loadedCursor === null) return;
+        sentCursor = loadedCursor;
         if (this.pendingSyncFromCursor !== null && sentCursor <= this.pendingSyncFromCursor) {
           await this.settleDelay();
           continue;
         }
         this.pendingSyncFromCursor = null;
-        resolvedCursor = await this.pollOnce(sentCursor);
+        const polledCursor = await this.awaitOrStop(this.pollOnce(sentCursor));
+        if (polledCursor === null) return;
+        resolvedCursor = polledCursor;
       } catch (error51) {
         if (this.stopped) {
           return;
@@ -21064,9 +21176,7 @@ var WakeSubscription = class {
   }
   /** Bounded pause between re-checks while a fired wake settles. */
   settleDelay() {
-    return new Promise((resolve) => {
-      this.options.scheduler(() => resolve(), this.options.settleDelayMs);
-    });
+    return this.waitForDelay(this.options.settleDelayMs);
   }
   async pollOnce(cursor) {
     const token = await this.options.getAuthToken();
@@ -21088,6 +21198,14 @@ var WakeSubscription = class {
     }
     return body.cursor;
   }
+  /** Lets teardown detach from an unabortable Obsidian requestUrl call promptly. */
+  async awaitOrStop(operation) {
+    if (this.stopped) return null;
+    return Promise.race([
+      operation,
+      this.stopSignal.then(() => null)
+    ]);
+  }
   backoff() {
     this.failureCount += 1;
     const ceiling = Math.min(
@@ -21096,8 +21214,28 @@ var WakeSubscription = class {
     );
     const half = ceiling / 2;
     const delayMs = half + this.options.random() * half;
+    return this.waitForDelay(delayMs);
+  }
+  /** Schedules one cancellable pause and releases it promptly on stop(). */
+  waitForDelay(delayMs) {
     return new Promise((resolve) => {
-      this.options.scheduler(() => resolve(), delayMs);
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (this.pendingDelay?.resolve === finish) {
+          this.pendingDelay = null;
+        }
+        resolve();
+      };
+      const scheduled = this.options.scheduler(finish, delayMs);
+      const cancel = typeof scheduled === "function" ? scheduled : () => void 0;
+      this.pendingDelay = { cancel, resolve: finish };
+      if (settled) this.pendingDelay = null;
+      if (this.stopped) {
+        cancel();
+        finish();
+      }
     });
   }
   setConnected(next) {
@@ -21121,7 +21259,7 @@ var PUSH_CONNECTED_INTERVAL_MS = 6e4;
 function buildSyncController(plugin, connection, onStatus, hooks, producerSync, fileApplyLock) {
   const state = new DurableSyncState({
     persist: createPersistPort(plugin),
-    // Arch P1: keep large outbox payload bytes out of `data.json`. Best-effort —
+    // Arch P1: keep large outbox payload bytes out of `data.json`. Best-effort,
     // degrades to inline when IndexedDB is unavailable (see the factory).
     payloadStore: createOutboxPayloadStore(plugin)
   });
@@ -21140,6 +21278,14 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
       }
     }
   });
+  const configApply = createConfigApplyReloader({
+    triggerCssChange: () => {
+      plugin.app.workspace.trigger?.("css-change");
+    },
+    notify: (message) => {
+      new import_obsidian4.Notice(message);
+    }
+  });
   const vault = new VaultApplyAdapter({
     files: createVaultFilePort({
       vault: plugin.app.vault,
@@ -21148,14 +21294,7 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
       // receiving device restarted Obsidian, because Obsidian caches its config
       // in memory and the plugin never signalled a reload. `css-change` is the
       // documented workspace event that makes it re-read snippets and themes.
-      configApply: createConfigApplyReloader({
-        triggerCssChange: () => {
-          plugin.app.workspace.trigger?.("css-change");
-        },
-        notify: (message) => {
-          new import_obsidian4.Notice(message);
-        }
-      })
+      configApply
     }),
     conflictFolder: CONFLICT_FOLDER,
     resolveRevision: connection.resolveRevision,
@@ -21165,7 +21304,7 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
     // read compare on equal terms. Never the raw token digest below.
     hashContent: (content) => hashPlaintext(content),
     // FIX 1: a genuinely applied remote revision (never 'noop'/'conflict')
-    // reaches the Activity feed too, attributed to `remote` — previously only
+    // reaches the Activity feed too, attributed to `remote`, previously only
     // the local-change wrapper ever recorded an entry, so the other device's
     // edits never showed up.
     ...hooks?.onRemoteActivity === void 0 ? {} : {
@@ -21181,7 +21320,7 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
     // re-attributed, or given a fresh fileId.
     ...producerSync === void 0 ? {} : { producerSync },
     // MRG-05: signal a debounced auto-repair sweep whenever a NEW conflict copy
-    // lands (never on an idempotent rewrite — no self-retrigger).
+    // lands (never on an idempotent rewrite, no self-retrigger).
     ...hooks?.onConflictWritten === void 0 ? {} : { onConflictWritten: hooks.onConflictWritten },
     // TOCTOU close (rule 3): the SAME per-file lock the push producer holds, so
     // a local write can never land and be clobbered between apply's read and its
@@ -21222,6 +21361,7 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
     hooks: createSchedulerHooks(plugin),
     intervalMs: connection.intervalMs ?? DEFAULT_INTERVAL_MS,
     onStatus,
+    onStop: () => configApply.dispose(),
     // Push is optional: omit `wake` entirely on the poll-only fallback path so
     // the controller never tries to start a subscription that failed to build.
     ...wake === void 0 ? {} : { wake, pushConnectedIntervalMs: PUSH_CONNECTED_INTERVAL_MS }
@@ -21569,7 +21709,7 @@ var OnboardingController = class {
   /**
    * The device's rejoin secret, persisted at confirmInvitation. If a redemption
    * that began before this feature is resumed without a stored secret, mint and
-   * persist a fresh one — the server stores whatever hash it receives, so this
+   * persist a fresh one, the server stores whatever hash it receives, so this
    * still provisions a valid rejoin capability for the device.
    */
   async requireRejoinSecret() {
@@ -22422,7 +22562,7 @@ async function resolveConnectedVault(plugin) {
 // src/runtime/adapters/config-poll.ts
 var CONFIG_POLL_INTERVAL_MS = 5e3;
 var CONFIG_POLL_FAILURE_NOTICE_EVERY = 10;
-var CONFIG_POLL_FAILURE_NOTICE = "Havemind: config sync ran into repeated errors \u2014 see console.";
+var CONFIG_POLL_FAILURE_NOTICE = "Havemind: config sync ran into repeated errors, see console.";
 function describeConfigPollFailure(error51) {
   return error51 instanceof Error ? `reason=${error51.name}` : `reason=${typeof error51}`;
 }
@@ -22542,15 +22682,47 @@ function parseProducerStateResult(raw) {
 }
 
 // src/runtime/connect-driver.ts
+var CANCELLED = /* @__PURE__ */ Symbol("cancelled");
+function awaitOrCancel(operation, signal) {
+  if (signal === void 0) return operation;
+  if (signal.aborted) return Promise.resolve(CANCELLED);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      resolve(CANCELLED);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error51) => {
+        cleanup();
+        reject(error51);
+      }
+    );
+  });
+}
 async function driveToConnected(options) {
   let state = { phase: "idle" };
   for (let step = 0; step < options.maxSteps; step += 1) {
-    state = await options.controller.resume();
+    const resumed = await awaitOrCancel(
+      options.controller.resume(),
+      options.signal
+    );
+    if (resumed === CANCELLED) return { phase: "cancelled" };
+    state = resumed;
     if (state.phase === "connected" || state.phase === "rejected") {
       return state;
     }
     if (state.phase === "pending-approval") {
-      await options.sleep(options.pollIntervalMs);
+      const slept = await awaitOrCancel(
+        options.sleep(options.pollIntervalMs),
+        options.signal
+      );
+      if (slept === CANCELLED) return { phase: "cancelled" };
     }
   }
   return state;
@@ -22607,7 +22779,7 @@ var AccessTokenError = class extends Error {
     super(message);
     __publicField(this, "name", "AccessTokenError");
     /**
-     * True when the server refused the credential (HTTP 401) — a terminal state
+     * True when the server refused the credential (HTTP 401), a terminal state
      * that must halt the sync loop until the user reconnects, never a retry. A
      * missing token or a transient 5xx/network failure is not auth-denied.
      */
@@ -22694,7 +22866,7 @@ var RefreshTokenAccessProvider = class {
    * Returns the in-flight pair to present: a persisted record that matches the
    * current refresh token (a replay), or a freshly minted pair that is
    * persisted before it is returned. A stored record whose `refreshToken` does
-   * not match the current token is never replayed — it is overwritten by the
+   * not match the current token is never replayed, it is overwritten by the
    * fresh pair.
    */
   async resolvePendingRotation(refreshToken) {
@@ -22773,7 +22945,7 @@ function createRemoteApplyProducerSync(getProducer) {
         contentHash,
         // Carry the binary discriminator into the durable producer mapping so a
         // RECEIVED binary is persisted (and rebased) as binary, never markdown.
-        // Absent/markdown is omitted — an absent contentKind already means
+        // Absent/markdown is omitted, an absent contentKind already means
         // markdown, keeping the mapping shape unchanged for text notes.
         ...contentKind === "binary" ? { contentKind: "binary" } : {},
         fileId,
@@ -22843,8 +23015,8 @@ var OutboxLocalChangeRepository = class {
     return (await this.options.store.load()).mappings;
   }
   /**
-   * This device's current head revisionId for `fileId` — the last revision it
-   * authored locally or adopted from a remote apply — or null if none is
+   * This device's current head revisionId for `fileId`, the last revision it
+   * authored locally or adopted from a remote apply, or null if none is
    * known. Read by the apply side's causal apply-vs-conflict decision (rule 3)
    * to tell a fast-forward (the incoming revision descends from this head)
    * from a concurrent divergence that must never be silently overwritten.
@@ -23224,20 +23396,20 @@ var CommitPathRecovery = class {
   /**
    * Handle a commit-path failure for `path`. The first failure re-arms; a
    * second consecutive failure records a durable failed-to-queue entry. Never
-   * throws — recovery must not itself wedge the change loop.
+   * throws, recovery must not itself wedge the change loop.
    */
   async onCommitFailure(path) {
     if (!this.rearmed.has(path)) {
       this.rearmed.add(path);
       this.deps.notify(
-        `A change to ${path} could not be queued \u2014 will retry.`
+        `A change to ${path} could not be queued, will retry.`
       );
       this.deps.rearm(path);
       return;
     }
     this.rearmed.delete(path);
     this.deps.notify(
-      `A change to ${path} could not be queued \u2014 see the Havemind panel.`
+      `A change to ${path} could not be queued, see the Havemind panel.`
     );
     await this.deps.recordFailedToQueue(path);
   }
@@ -23293,7 +23465,7 @@ var ModifyDebouncer = class {
     /**
      * Set by `dispose()`. Once torn down the debouncer is inert: a late vault
      * event or a commit-recovery re-arm reaching `trigger()` must not schedule a
-     * fresh timer against a producer that no longer exists — its settle would run
+     * fresh timer against a producer that no longer exists, its settle would run
      * `onSettled` on a torn-down producer and a stale save could clobber the next
      * producer's `data.json` after a re-pair.
      */
@@ -23328,7 +23500,7 @@ var ModifyDebouncer = class {
    * Cancels the pending settle for a single `path`, if any. Called when a
    * rename or delete for that path fires: those events carry their own content
    * (or tombstone) immediately, so a later settled modify for the same path
-   * would resolve against a file that has moved or gone — reading '' for the
+   * would resolve against a file that has moved or gone, reading '' for the
    * missing path and pushing a phantom empty create. A no-op when nothing is
    * pending for `path`.
    */
@@ -23342,7 +23514,7 @@ var ModifyDebouncer = class {
   /**
    * Cancels every pending settle and marks the debouncer disposed. Called on
    * producer teardown/unload. After this the invariant holds unconditionally: no
-   * settle can fire against the torn-down producer — both because every pending
+   * settle can fire against the torn-down producer, both because every pending
    * timer is cleared here AND because `trigger()` is now inert, so even a re-arm
    * or a late vault event arriving after teardown cannot schedule a new one.
    */
@@ -23401,7 +23573,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     // artifact. A rename also forgets the stale owner of the previous path.
     //
     // DATA-SAFETY (rule 3): the base is SEEDED only on first authorship and is
-    // NEVER advanced by a local push — advancing it here reopened the silent-
+    // NEVER advanced by a local push, advancing it here reopened the silent-
     // overwrite window (a concurrent peer revision matching the just-authored
     // base slips past the on-disk guard). The single source of truth for that
     // rule lives in `local-base-lifecycle.ts`, shared with the integration
@@ -23465,7 +23637,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
           return;
         }
         new import_obsidian6.Notice(
-          "Havemind: a change could not be queued \u2014 see the Havemind panel."
+          "Havemind: a change could not be queued, see the Havemind panel."
         );
       }
     );
@@ -23475,7 +23647,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     hooks.onLocalActivity({
       // The real revision id the outbox repository generated and enqueued
       // (`OutboxLocalChangeRepository.commitLocalChange`'s `built.revisionId`,
-      // surfaced here as `op.revisionId`) — never `op.operationId`, which is
+      // surfaced here as `op.revisionId`), never `op.operationId`, which is
       // only a client-side idempotency key and would break restore + the
       // local-push/remote-echo dedup in `ActivityLog`. Falls back to the
       // operationId only when no revision was created (a delete of a file
@@ -23601,7 +23773,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       disposeListeners();
     },
     // MAJOR 2: a failed-to-queue row has no stashed envelope, so its Retry
-    // re-runs the commit chain against the current on-disk content — routed
+    // re-runs the commit chain against the current on-disk content, routed
     // through the SAME debouncer trigger the bounded re-arm uses. Tri-state
     // (FINDING 1): `file-missing` when the file is gone (drop the row),
     // `unavailable` when the debouncer no-op'd the re-arm because it was disposed
@@ -23729,7 +23901,7 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     // Tearing the producer's vault listeners down on stop is critical: a re-pair
     // (or reconnect) calls stop() on the previous handle before starting a new
     // one, and without this the prior-session observer stays attached and keeps
-    // enqueuing revisions stamped with the OLD identity alongside the new one —
+    // enqueuing revisions stamped with the OLD identity alongside the new one,
     // the exact mix of accepted (current identity) and 403-rejected (stale
     // identity) pushes. Disposing here guarantees exactly one live producer.
     stop: () => {
@@ -23749,7 +23921,7 @@ var APPROVAL_POLL_INTERVAL_MS = 5e3;
 var MAX_CONNECT_STEPS = 720;
 var OWNER_DEVICE_LABEL = "Havemind owner device";
 var INVITEE_DEVICE_LABEL = "Havemind device";
-async function startHavemindConnection(plugin, onStatus, hooks) {
+async function startHavemindConnection(plugin, onStatus, hooks, signal) {
   const gate = await evaluateOwnerConnection(plugin);
   if (gate.kind === "reset-required") {
     try {
@@ -23776,7 +23948,8 @@ async function startHavemindConnection(plugin, onStatus, hooks) {
     controller: onboarding,
     sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
     pollIntervalMs: APPROVAL_POLL_INTERVAL_MS,
-    maxSteps: MAX_CONNECT_STEPS
+    maxSteps: MAX_CONNECT_STEPS,
+    ...signal === void 0 ? {} : { signal }
   });
   if (!isConnectedOnboardingState(connectedState)) {
     onStatus("disconnected", HAVEMIND_STATUS_DISCONNECTED);
@@ -23865,11 +24038,12 @@ async function connectAsInvitee(plugin, envelope, options) {
     controller: onboarding,
     sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
     pollIntervalMs: APPROVAL_POLL_INTERVAL_MS,
-    maxSteps: MAX_CONNECT_STEPS
+    maxSteps: MAX_CONNECT_STEPS,
+    ...options.signal === void 0 ? {} : { signal: options.signal }
   });
   if (state.phase === "rejected") {
     options.report(
-      "This invitation is no longer valid \u2014 ask the owner for a new one."
+      "This invitation is no longer valid, ask the owner for a new one."
     );
     options.onInvitationRejected?.();
     return null;
@@ -23915,7 +24089,7 @@ var ApproveDeviceError = class extends Error {
     }
   }
 };
-var LOCKED_MESSAGE = "Too many incorrect codes. This invitation is now invalid \u2014 create a new one.";
+var LOCKED_MESSAGE = "Too many incorrect codes. This invitation is now invalid, create a new one.";
 var MESSAGE_BY_CODE = {
   FORBIDDEN: "You are not the owner of this vault, so you cannot approve here.",
   NOT_FOUND: "No pending device is waiting for this invitation.",
@@ -23956,7 +24130,7 @@ function describeFailure(status, json2) {
     const remaining = attemptsRemaining ?? 0;
     const plural = remaining === 1 ? "attempt" : "attempts";
     return new ApproveDeviceError(
-      `Incorrect code \u2014 ${remaining} ${plural} left.`,
+      `Incorrect code, ${remaining} ${plural} left.`,
       { attemptsRemaining: remaining }
     );
   }
@@ -24125,7 +24299,7 @@ async function createInvitationForOwner(plugin, options) {
     saveRefreshToken: (value) => secrets.saveRefreshToken(value),
     generateRotationId: generateRotationIdValue,
     generateSuccessorToken: generateRefreshTokenValue,
-    // GAP-5: durable in-flight rotation persistence. Connect-safe — the
+    // GAP-5: durable in-flight rotation persistence. Connect-safe, the
     // provider swallows any load/save/clear failure and degrades to
     // in-memory-only, so a SecretStorage outage never aborts connect or sync.
     loadPendingRotation: () => secrets.getPendingRotation(),
@@ -24161,7 +24335,7 @@ async function approvePendingDeviceForOwner(plugin, options) {
     saveRefreshToken: (value) => secrets.saveRefreshToken(value),
     generateRotationId: generateRotationIdValue,
     generateSuccessorToken: generateRefreshTokenValue,
-    // GAP-5: durable in-flight rotation persistence. Connect-safe — the
+    // GAP-5: durable in-flight rotation persistence. Connect-safe, the
     // provider swallows any load/save/clear failure and degrades to
     // in-memory-only, so a SecretStorage outage never aborts connect or sync.
     loadPendingRotation: () => secrets.getPendingRotation(),
@@ -24222,7 +24396,7 @@ async function requestRejoinGrantForOwner(plugin, options) {
     saveRefreshToken: (value) => secrets.saveRefreshToken(value),
     generateRotationId: generateRotationIdValue,
     generateSuccessorToken: generateRefreshTokenValue,
-    // GAP-5: durable in-flight rotation persistence. Connect-safe — the
+    // GAP-5: durable in-flight rotation persistence. Connect-safe, the
     // provider swallows any load/save/clear failure and degrades to
     // in-memory-only, so a SecretStorage outage never aborts connect or sync.
     loadPendingRotation: () => secrets.getPendingRotation(),
@@ -24255,7 +24429,7 @@ async function revokeMembershipForOwner(plugin, options) {
     saveRefreshToken: (value) => secrets.saveRefreshToken(value),
     generateRotationId: generateRotationIdValue,
     generateSuccessorToken: generateRefreshTokenValue,
-    // GAP-5: durable in-flight rotation persistence. Connect-safe — the
+    // GAP-5: durable in-flight rotation persistence. Connect-safe, the
     // provider swallows any load/save/clear failure and degrades to
     // in-memory-only, so a SecretStorage outage never aborts connect or sync.
     loadPendingRotation: () => secrets.getPendingRotation(),
@@ -24368,30 +24542,8 @@ function browserClipboardCopyDeps() {
   };
 }
 
-// src/ui/activity-view.ts
+// src/ui/conflict-modal.ts
 var import_obsidian8 = require("obsidian");
-
-// src/runtime/activity-render.ts
-function defaultFormatTimestamp3(timestamp) {
-  return new Date(timestamp).toISOString();
-}
-function buildActivityViewModel(records, options = {}) {
-  const format = options.formatTimestamp ?? defaultFormatTimestamp3;
-  const rows = buildActivityFeed(records).map(
-    (entry) => ({
-      revisionId: entry.revisionId,
-      fileId: entry.fileId,
-      label: `${entry.kind} \xB7 ${entry.path} \xB7 ${entry.actorLabel}`,
-      headline: `${entry.actorLabel} ${entry.kind}`,
-      pathLabel: entry.path,
-      timestamp: entry.timestamp,
-      timeLabel: format(entry.timestamp),
-      colorToken: entry.actorId === null ? INITIAL_IMPORT_COLOR_TOKEN : authorColorToken(entry.actorId),
-      canRestore: entry.canRestore
-    })
-  );
-  return { empty: rows.length === 0, rows };
-}
 
 // src/ui/primitives.ts
 var import_obsidian7 = require("obsidian");
@@ -24469,89 +24621,7 @@ function armedButton(parent, label, confirmLabel, cls, onConfirm) {
   });
 }
 
-// src/ui/activity-section.ts
-var EMPTY_ACTIVITY_TEXT = "No activity yet. Connect to a vault to see changes as they happen.";
-function renderActivityRows(content, options) {
-  const model = buildActivityViewModel(options.feed, {
-    formatTimestamp: formatActivityTime
-  });
-  if (model.empty) {
-    const empty = content.createDiv({ text: EMPTY_ACTIVITY_TEXT });
-    empty.addClass("havemind-empty");
-    return 0;
-  }
-  const rows = options.limit === void 0 ? model.rows : model.rows.slice(0, options.limit);
-  for (const row of rows) {
-    const entry = content.createDiv();
-    entry.addClass("havemind-activity-row");
-    const text = entry.createDiv();
-    text.addClass("havemind-activity-main");
-    text.addClass("havemind-activity-copy");
-    text.createDiv({ text: row.headline }).addClass("havemind-activity-who");
-    const path = text.createDiv({ text: row.pathLabel });
-    path.addClass("havemind-hint");
-    path.addClass("havemind-activity-path");
-    entry.style.setProperty("--havemind-row-color", `var(${row.colorToken})`);
-    const trail = entry.createDiv();
-    trail.addClass("havemind-activity-trail");
-    if (row.canRestore && options.onRestore) {
-      const restore = trail.createEl("button", { text: "Restore" });
-      restore.addClass("havemind-activity-action");
-      restore.onClickEvent(() => options.onRestore?.(row.revisionId));
-    }
-    const time3 = trail.createEl("span", { text: row.timeLabel });
-    time3.addClass("havemind-activity-time");
-  }
-  return model.rows.length;
-}
-
-// src/ui/view-types.ts
-var HAVEMIND_ACTIVITY_VIEW = "havemind-activity";
-var HAVEMIND_ONBOARDING_VIEW = "havemind-onboarding";
-
-// src/ui/activity-view.ts
-var HavemindActivityView = class extends import_obsidian8.ItemView {
-  constructor(leaf, options = {}) {
-    super(leaf);
-    __publicField(this, "options");
-    this.options = options;
-  }
-  getDisplayText() {
-    return "Havemind activity";
-  }
-  getIcon() {
-    return "hexagon";
-  }
-  getViewType() {
-    return HAVEMIND_ACTIVITY_VIEW;
-  }
-  onOpen() {
-    this.render();
-  }
-  onClose() {
-    this.options.onClosed?.();
-  }
-  /** Re-renders from the live feed — called when the activity log changes. */
-  refresh() {
-    this.render();
-  }
-  render() {
-    const content = this.containerEl.children[1];
-    if (!content) return;
-    content.empty();
-    content.addClass("havemind-view");
-    renderViewTitle(content, "Havemind activity");
-    renderSection(content, "activity", () => {
-      renderActivityRows(content, {
-        feed: this.options.feedProvider?.() ?? [],
-        ...this.options.onRestore ? { onRestore: this.options.onRestore } : {}
-      });
-    });
-  }
-};
-
 // src/ui/conflict-modal.ts
-var import_obsidian9 = require("obsidian");
 function buildConflictModalModel(copy, diff) {
   return {
     title: copy.noteName ?? copy.copyName,
@@ -24565,7 +24635,7 @@ function buildConflictModalModel(copy, diff) {
 }
 function renderConflictModalBody(container, model, actions) {
   container.addClass("havemind-conflict-modal");
-  renderViewTitle(container, `Resolve conflict \u2014 ${model.title}`);
+  renderViewTitle(container, `Resolve conflict, ${model.title}`);
   if (model.author !== null && model.timestamp !== null) {
     const meta3 = container.createDiv({
       text: `Conflict from ${model.author} \xB7 ${model.timestamp}`
@@ -24610,7 +24680,7 @@ function renderConflictModalBody(container, model, actions) {
   keepBoth.addClass("havemind-conflict-action");
   keepBoth.onClickEvent(() => actions.onKeepBoth());
 }
-var ConflictResolveModal = class extends import_obsidian9.Modal {
+var ConflictResolveModal = class extends import_obsidian8.Modal {
   constructor(app, model, actions) {
     super(app);
     __publicField(this, "model");
@@ -24627,79 +24697,7 @@ var ConflictResolveModal = class extends import_obsidian9.Modal {
 };
 
 // src/ui/onboarding-view.ts
-var import_obsidian14 = require("obsidian");
-
-// src/runtime/getting-started-render.ts
-var SELF_HOSTING_DOC_PATH = "https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md";
-function buildGettingStartedViewModel() {
-  return {
-    title: "Getting started",
-    requirement: "Havemind needs a self-hosted server on your Tailscale network \u2014 there is no cloud. Connect to one you were given, or run your own.",
-    steps: [
-      {
-        number: 1,
-        text: "Install and connect Tailscale, and make sure it shows connected."
-      },
-      {
-        number: 2,
-        text: "Get your Server URL and a pairing token from whoever runs your Havemind server, or set up your own.",
-        docRef: { label: "Self-hosting guide", url: SELF_HOSTING_DOC_PATH }
-      },
-      {
-        number: 3,
-        text: "Paste the Server URL and pairing token below, then select Connect."
-      },
-      {
-        number: 4,
-        text: "Joining someone's vault? Read the 6-digit code aloud to the owner so they can approve you."
-      },
-      {
-        number: 5,
-        text: "Done \u2014 your edits sync to the other devices in about a second. Use a dedicated vault, and don't run another sync tool on it."
-      }
-    ],
-    footnote: "New here? Installing the plugin and running a server are covered in the project README and docs/self-hosting.md."
-  };
-}
-
-// src/runtime/entry-choice.ts
-function buildEntryChooser() {
-  return {
-    heading: "Havemind",
-    subheading: "One shared vault, on your hardware.",
-    question: "Two or three people, one server you run. Which are you?",
-    options: [
-      {
-        id: "joining",
-        title: "Someone sent me an invitation",
-        cost: "Paste it, read out six digits, done. About a minute."
-      },
-      {
-        id: "hosting",
-        title: "I'll run the server",
-        cost: "Docker and Tailscale on a machine that stays on. Fifteen minutes, a terminal."
-      }
-    ],
-    footnote: "Not sure? If a friend sent you a long block of text, it's the first one."
-  };
-}
-var SELF_HOSTING_GUIDE_URL = "https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md";
-function buildHostView() {
-  return {
-    heading: "Run the server",
-    subheading: "On a machine that stays awake. A Pi is enough.",
-    steps: [
-      { text: "Install Docker and Tailscale on that machine." },
-      { text: "Sign both machines into the same tailnet." },
-      { text: "Run the stack:", command: "docker compose up -d" },
-      { text: "Copy its Tailscale address \u2014 that's your server URL." },
-      { text: "Connect below, then invite the others." }
-    ],
-    guideLabel: "Full self-hosting guide",
-    guideUrl: SELF_HOSTING_GUIDE_URL,
-    primaryAction: "I've done this \u2014 connect"
-  };
-}
+var import_obsidian17 = require("obsidian");
 
 // src/runtime/handshake.ts
 function groupCode(code) {
@@ -24720,7 +24718,7 @@ function buildGuestHandshake(input) {
   return {
     code: groupCode(input.code),
     instruction,
-    mismatchWarning: "They will see the same six digits and confirm they match. If they don't match, stop \u2014 someone else is trying to join.",
+    mismatchWarning: "They will see the same six digits and confirm they match. If they don't match, stop, someone else is trying to join.",
     expiryLabel: input.expiresAt !== void 0 && input.now !== void 0 ? formatExpiry(input.expiresAt, input.now) : null,
     liveNote: "This screen updates itself."
   };
@@ -24729,10 +24727,81 @@ function buildSpentInvitation(ownerName) {
   const who = ownerName ?? "whoever invited you";
   return {
     heading: "This invitation has been used",
-    explanation: `Each invitation works once, for one device. If this is your second machine, ask ${who} for a fresh one \u2014 it takes about ten seconds.`,
+    explanation: `Each invitation works once, for one device. If this is your second machine, ask ${who} for a fresh one, it takes about ten seconds.`,
     primaryAction: "Paste a different invitation",
     secondaryAction: "Start over"
   };
+}
+
+// src/ui/screens/guest-waiting.ts
+function renderGuestWaitingScreen(content, model, actions = {}) {
+  const view = buildGuestHandshake({
+    code: model.verificationPhrase,
+    ...model.ownerName !== void 0 ? { ownerName: model.ownerName } : {}
+  });
+  content.createDiv({ text: view.instruction }).addClass("havemind-handshake-lead");
+  const digits = content.createDiv();
+  digits.addClass("havemind-handshake-code");
+  digits.setAttribute("aria-label", view.code.join(""));
+  for (const group of view.code) {
+    digits.createEl("span", { text: group });
+  }
+  content.createDiv({ text: view.mismatchWarning }).addClass("havemind-handshake-warning");
+  if (view.expiryLabel !== null) {
+    content.createDiv({ text: `Expires in ${view.expiryLabel}` }).addClass("havemind-hint");
+  }
+  content.createDiv({ text: view.liveNote }).addClass("havemind-hint");
+  const cancel = content.createEl("button", { text: "Cancel" });
+  cancel.onClickEvent(() => actions.onCancel?.());
+}
+
+// src/ui/screens/connect-form.ts
+function renderConnectForm(content, draft, live, onConnect) {
+  const tokenInput = labelledField(
+    content,
+    "havemind-connect-token",
+    "Invitation or owner pairing token",
+    "textarea",
+    { placeholder: "v1.\u2026 or hm_pt_\u2026", value: draft.token }
+  );
+  const serverInput = labelledField(
+    content,
+    "havemind-connect-server",
+    "Server URL",
+    "input",
+    {
+      type: "text",
+      placeholder: "https://your-server.example",
+      value: draft.server
+    }
+  );
+  live.token = tokenInput;
+  live.server = serverInput;
+  const status = renderFormStatus(content);
+  const connect = content.createEl("button", { text: "Connect" });
+  connect.addClass("mod-cta");
+  connect.onClickEvent(() => {
+    const input = tokenInput.value.trim();
+    const serverUrl = serverInput.value.trim();
+    if (input.length === 0) {
+      status.setText("Paste an invitation or pairing token first.");
+      return;
+    }
+    status.setText("Connecting\u2026");
+    onConnect?.(
+      input,
+      serverUrl,
+      (message) => status.setText(message)
+    );
+  });
+}
+function captureDrafts(draft, live) {
+  if (live.token) draft.token = live.token.value;
+  if (live.server) draft.server = live.server.value;
+  if (live.role) {
+    draft.role = live.role.value === "owner" ? "owner" : "editor";
+  }
+  if (live.name) draft.name = live.name.value;
 }
 
 // src/runtime/pane-tabs.ts
@@ -24746,7 +24815,7 @@ function buildPaneTabs(input) {
     },
     // No counts on Activity or People (round 2, cut list): "12 today" and
     // "2 connected" are facts nobody can act on, and three competing numbers in
-    // a 300px strip turn the one number that matters — the conflict count —
+    // a 300px strip turn the one number that matters, the conflict count,
     // into noise. Counts in the strip went 3 → 1.
     { id: "activity", label: "Activity", icon: "history" },
     { id: "people", label: "People", icon: "users" },
@@ -24756,51 +24825,165 @@ function buildPaneTabs(input) {
   return { tabs, active };
 }
 
-// src/ui/conflict-section.ts
-var import_obsidian10 = require("obsidian");
-function renderConflictSection(content, copies, actions) {
-  if (copies.length === 0) return;
-  const block = renderAlarmBlock(content, "havemind-alarm-conflict");
-  const header = block.createDiv({ text: "" });
-  header.addClass("havemind-conflict-header");
-  const icon = header.createEl("span", { attr: DECORATIVE });
-  icon.addClass("havemind-conflict-icon");
-  (0, import_obsidian10.setIcon)(icon, "git-merge");
-  header.createEl("span", {
-    text: copies.length === 1 ? " 1 conflict" : ` ${copies.length} conflicts`
-  });
-  const rows = block.createDiv();
-  rows.addClass("havemind-alarm-rows");
-  for (const copy of copies) {
-    const row = rows.createDiv({ text: "" });
-    row.addClass("havemind-conflict-row");
-    const name = copy.noteName ?? copy.copyName;
-    row.createEl("span", { text: name }).addClass("havemind-conflict-note");
-    if (copy.author !== null && copy.timestamp !== null) {
-      row.createEl("span", {
-        text: ` \xB7 ${copy.author} \xB7 ${copy.timestamp}`
-      }).addClass("havemind-conflict-meta");
+// src/ui/pane-tabs-section.ts
+var import_obsidian9 = require("obsidian");
+var PANE_TABPANEL_ID = "havemind-tabpanel";
+function paneTabDomId(id) {
+  return `havemind-tab-${id}`;
+}
+function tabLabel(tab) {
+  const parts = [tab.label];
+  if (tab.count !== void 0) parts.push(`${tab.count}`);
+  if (tab.needsAttention === true) parts.push("needs attention");
+  return parts.join(", ");
+}
+function renderPaneTabs(content, options) {
+  const strip = content.createDiv();
+  strip.addClass("havemind-tabs");
+  strip.setAttribute("role", "tablist");
+  const ids = options.view.tabs.map((tab) => tab.id);
+  for (const [index, tab] of options.view.tabs.entries()) {
+    const active = tab.id === options.view.active;
+    const button = strip.createEl("button", {
+      attr: {
+        role: "tab",
+        id: paneTabDomId(tab.id),
+        "aria-controls": PANE_TABPANEL_ID,
+        "aria-selected": active ? "true" : "false",
+        "aria-label": tabLabel(tab),
+        // Only the open tab is a tab stop; arrow keys move within the strip,
+        // matching how a tablist is expected to behave.
+        tabindex: active ? "0" : "-1"
+      }
+    });
+    button.addEventListener("keydown", (event) => {
+      const key = event.key;
+      const step = key === "ArrowRight" ? 1 : key === "ArrowLeft" ? -1 : void 0;
+      let next;
+      if (step !== void 0) {
+        next = ids[(index + step + ids.length) % ids.length];
+      } else if (key === "Home") {
+        next = ids[0];
+      } else if (key === "End") {
+        next = ids[ids.length - 1];
+      }
+      if (next === void 0) return;
+      event.preventDefault?.();
+      options.onSelect(next);
+    });
+    button.addClass("havemind-tab");
+    if (active) button.addClass("is-active");
+    if (tab.needsAttention === true) button.addClass("needs-attention");
+    const icon = button.createEl("span", { attr: DECORATIVE });
+    icon.addClass("havemind-tab-icon");
+    (0, import_obsidian9.setIcon)(icon, tab.icon);
+    button.createEl("span", { text: tab.label }).addClass("havemind-tab-label");
+    if (tab.count !== void 0) {
+      button.createEl("span", { text: `${tab.count}` }).addClass("havemind-tab-count");
     }
-    if (copy.manualHint !== null) {
-      const hint = row.createDiv({ text: copy.manualHint });
-      hint.addClass("havemind-conflict-hint");
-    }
-    const resolve = row.createEl("button", { text: "Resolve" });
-    resolve.addClass("mod-cta");
-    resolve.addClass("havemind-conflict-action");
-    resolve.onClickEvent(() => actions.onResolve(copy.copyPath));
+    button.onClickEvent(() => options.onSelect(tab.id));
+    if (active && options.focusActive === true) button.focus();
   }
 }
 
+// src/ui/screens/connected-body.ts
+function renderConnectedBody(content, panel, composer, state, screens) {
+  const composerOpen = composer != null;
+  if (panel.showForm && !composerOpen) {
+    renderSection(
+      content,
+      "status",
+      () => screens.renderIndicator(content, panel)
+    );
+    renderSection(content, "send queue", () => screens.renderSendQueue(content));
+    renderSection(content, "conflicts", () => screens.renderConflicts(content));
+    renderSection(content, "connection", () => screens.renderEntryPath(content));
+    return;
+  }
+  renderSection(content, "send queue", () => screens.renderSendQueue(content));
+  renderSection(content, "conflicts", () => screens.renderConflicts(content));
+  if (composer !== null) {
+    renderSection(content, "status", () => screens.renderIndicator(content, panel));
+  }
+  const tabs = screens.paneTabs(composer != null);
+  const focusActive = state.focusTabOnRender;
+  state.focusTabOnRender = false;
+  renderSection(content, "tabs", () => {
+    renderPaneTabs(content, {
+      view: tabs,
+      // Selection is the caller's business: it owns the repaint, and the
+      // focus flag is set there too so the two cannot drift apart.
+      onSelect: (id) => screens.onSelectTab(id, true),
+      ...focusActive ? { focusActive: true } : {}
+    });
+  });
+  const body = content.createDiv();
+  body.addClass("havemind-tab-body");
+  body.setAttribute("role", "tabpanel");
+  body.setAttribute("id", PANE_TABPANEL_ID);
+  body.setAttribute("aria-labelledby", paneTabDomId(tabs.active));
+  renderSection(body, `tab:${tabs.active}`, () => {
+    screens.renderTabBody(body, tabs.active, panel, composer);
+  });
+}
+
+// src/runtime/entry-choice.ts
+var JOINING = {
+  id: "joining",
+  title: "Someone sent me an invitation",
+  cost: "Paste it, read out six digits, done. About a minute."
+};
+var HOSTING = {
+  id: "hosting",
+  title: "I'll run the server",
+  cost: "Docker and Tailscale on a machine that stays on. Fifteen minutes, a terminal."
+};
+function buildEntryChooser(options = {}) {
+  const canHost = options.canHost ?? true;
+  if (!canHost) {
+    return {
+      heading: "Havemind",
+      subheading: "One shared vault, on your hardware.",
+      question: "Paste the invitation someone sent you.",
+      options: [JOINING],
+      footnote: "No invitation yet? One person sets the server up on a computer that stays on, then invites everyone else from there."
+    };
+  }
+  return {
+    heading: "Havemind",
+    subheading: "One shared vault, on your hardware.",
+    question: "Two or three people, one server you run. Which are you?",
+    options: [JOINING, HOSTING],
+    footnote: "Not sure? If a friend sent you a long block of text, it's the first one."
+  };
+}
+var SELF_HOSTING_GUIDE_URL = "https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md";
+function buildHostView() {
+  return {
+    heading: "Run the server",
+    subheading: "On a machine that stays awake and is on your private network.",
+    steps: [
+      { text: "Install Docker and Tailscale on that machine." },
+      { text: "Sign both machines into the same tailnet." },
+      { text: "Run the stack:", command: "docker compose up -d" },
+      { text: "Copy its Tailscale address, that's your server URL." },
+      { text: "Connect below, then invite the others." }
+    ],
+    guideLabel: "Full self-hosting guide",
+    guideUrl: SELF_HOSTING_GUIDE_URL,
+    primaryAction: "I've done this, connect"
+  };
+}
+
 // src/ui/entry-chooser-section.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 function renderEntryChooser(content, options) {
   const { model } = options;
   const head = content.createDiv();
   head.addClass("havemind-entry-head");
   const mark = head.createEl("span", { attr: DECORATIVE });
   mark.addClass("havemind-pane-mark");
-  (0, import_obsidian11.setIcon)(mark, "hexagon");
+  (0, import_obsidian10.setIcon)(mark, "hexagon");
   head.createEl("span", { text: model.heading, cls: "havemind-pane-title" });
   content.createDiv({ text: model.subheading }).addClass("havemind-entry-subheading");
   content.createDiv({ text: model.question }).addClass("havemind-hint");
@@ -24855,131 +25038,163 @@ function renderHostPath(content, options) {
   primary.onClickEvent(() => options.onContinue());
 }
 
-// src/ui/pane-header.ts
-var import_obsidian12 = require("obsidian");
-function renderPaneHeader(content, options) {
-  const strip = content.createDiv();
-  strip.addClass("havemind-pane-header");
-  const markWrap = strip.createDiv();
-  markWrap.addClass("havemind-pane-mark");
-  const mark = markWrap.createEl("span", { attr: DECORATIVE });
-  (0, import_obsidian12.setIcon)(mark, "hexagon");
-  if (options.alarmed === true) {
-    const dot = markWrap.createEl("span", {
-      attr: { title: "Needs attention" }
+// src/ui/screens/entry-path.ts
+function alreadyAnswered(state, options) {
+  return state.draftToken.length > 0 || options.arrivedWithInvitation?.() === true || options.composer !== void 0 && options.composer() !== null;
+}
+function renderEntryPath(content, state, providers, actions) {
+  const decided = state.entryChoice !== "undecided" || alreadyAnswered(state, providers);
+  if (!decided) {
+    renderEntryChooser(content, {
+      model: buildEntryChooser({ canHost: state.canHost }),
+      onChoose: (choice) => actions.onChoose(choice)
     });
-    dot.addClass("havemind-pane-mark-dot");
+    return;
   }
-  strip.createEl("span", { text: options.title, cls: "havemind-pane-title" });
-  if (options.authorOverlayOn !== void 0 && options.onToggleAuthorOverlay !== void 0) {
-    const on = options.authorOverlayOn;
-    const toggle = strip.createEl("button", {
-      attr: {
-        "aria-label": "Authorship colours",
-        "aria-pressed": on ? "true" : "false"
-      }
+  if (state.entryChoice === "hosting") {
+    renderHostPath(content, {
+      model: buildHostView(),
+      onBack: () => actions.onChoose("undecided"),
+      onContinue: () => actions.onChoose("joining"),
+      onOpenGuide: (url2) => actions.onOpenGuide?.(url2)
     });
-    toggle.addClass("havemind-header-action");
-    if (on) toggle.addClass("is-on");
-    (0, import_obsidian12.setIcon)(toggle, "eye");
-    toggle.onClickEvent(() => options.onToggleAuthorOverlay?.());
+    return;
   }
-  if (options.onInvite !== void 0) {
-    const invite = strip.createEl("button", {
-      attr: { "aria-label": "Invite someone" }
-    });
-    invite.addClass("havemind-header-action");
-    (0, import_obsidian12.setIcon)(invite, "user-plus");
-    invite.onClickEvent(() => options.onInvite?.());
+  const back = content.createEl("button", { text: "Back" });
+  back.addClass("havemind-entry-back");
+  back.onClickEvent(() => actions.onChoose("undecided"));
+  actions.renderForm(content);
+}
+
+// src/runtime/view-state.ts
+function resolveViewState(sources) {
+  if (sources.guestInvalid) return { kind: "invalid" };
+  if (sources.guestWaiting !== null) {
+    return { kind: "awaiting", waiting: sources.guestWaiting };
   }
-  const more = strip.createEl("button", {
-    attr: {
-      "aria-label": "More options",
-      "aria-expanded": options.menuOpen ? "true" : "false"
-    }
-  });
-  more.addClass("havemind-header-action");
-  more.addClass("havemind-pane-more");
-  (0, import_obsidian12.setIcon)(more, "more-horizontal");
-  more.onClickEvent(() => options.onToggleMenu());
-  if (!options.menuOpen) return;
-  const menu = content.createDiv();
-  menu.addClass("havemind-pane-menu");
-  let renderedAction = false;
-  for (const item of options.items) {
-    if (item.readOnly === true) {
-      if (renderedAction) {
-        menu.createDiv().addClass("havemind-pane-menu-sep");
-      }
-      menu.createDiv({ text: item.label }).addClass("havemind-pane-menu-note");
-      continue;
-    }
-    const entry = menu.createEl("button", { text: item.label });
-    entry.addClass("havemind-pane-menu-item");
-    entry.onClickEvent(() => item.onSelect());
-    renderedAction = true;
+  if (!sources.panel.showForm) {
+    return { kind: "connected", panel: sources.panel };
+  }
+  if (sources.joinLinkFollowed) return { kind: "joining" };
+  if (sources.entryChoice === "joining") return { kind: "joining" };
+  if (sources.entryChoice === "hosting") return { kind: "hosting" };
+  return { kind: "choosing" };
+}
+function assertNever2(value) {
+  throw new Error(
+    `unhandled ViewState variant: ${JSON.stringify(value)}`
+  );
+}
+
+// src/ui/screens/tab-body.ts
+function renderTabBody(body, tab, panel, composer, screens) {
+  switch (tab) {
+    case "status":
+      screens.renderStatus(body, panel);
+      return;
+    case "activity":
+      screens.renderActivity(body);
+      return;
+    case "connect":
+      screens.renderConnect(body, panel);
+      return;
+    case "people":
+      screens.renderPeople(body, composer);
+      return;
+    default:
+      assertNever2(tab);
   }
 }
 
-// src/ui/pane-tabs-section.ts
-var import_obsidian13 = require("obsidian");
-var PANE_TABPANEL_ID = "havemind-tabpanel";
-function paneTabDomId(id) {
-  return `havemind-tab-${id}`;
-}
-function tabLabel(tab) {
-  const parts = [tab.label];
-  if (tab.count !== void 0) parts.push(`${tab.count}`);
-  if (tab.needsAttention === true) parts.push("needs attention");
-  return parts.join(", ");
-}
-function renderPaneTabs(content, options) {
-  const strip = content.createDiv();
-  strip.addClass("havemind-tabs");
-  strip.setAttribute("role", "tablist");
-  const ids = options.view.tabs.map((tab) => tab.id);
-  for (const [index, tab] of options.view.tabs.entries()) {
-    const active = tab.id === options.view.active;
-    const button = strip.createEl("button", {
-      attr: {
-        role: "tab",
-        id: paneTabDomId(tab.id),
-        "aria-controls": PANE_TABPANEL_ID,
-        "aria-selected": active ? "true" : "false",
-        "aria-label": tabLabel(tab),
-        // Only the open tab is a tab stop; arrow keys move within the strip,
-        // matching how a tablist is expected to behave.
-        tabindex: active ? "0" : "-1"
+// src/runtime/getting-started-render.ts
+var SELF_HOSTING_DOC_PATH = "https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md";
+function buildGettingStartedViewModel() {
+  return {
+    title: "Getting started",
+    requirement: "Havemind needs a self-hosted server on your Tailscale network, there is no cloud. Connect to one you were given, or run your own.",
+    steps: [
+      {
+        number: 1,
+        text: "Install and connect Tailscale, and make sure it shows connected."
+      },
+      {
+        number: 2,
+        text: "Get your Server URL and a pairing token from whoever runs your Havemind server, or set up your own.",
+        docRef: { label: "Self-hosting guide", url: SELF_HOSTING_DOC_PATH }
+      },
+      {
+        number: 3,
+        text: "Paste the Server URL and pairing token below, then select Connect."
+      },
+      {
+        number: 4,
+        text: "Joining someone's vault? Read the 6-digit code aloud to the owner so they can approve you."
+      },
+      {
+        number: 5,
+        text: "Done, your edits sync to the other devices in about a second. Use a dedicated vault, and don't run another sync tool on it."
       }
-    });
-    button.addEventListener("keydown", (event) => {
-      const key = event.key;
-      const step = key === "ArrowRight" ? 1 : key === "ArrowLeft" ? -1 : void 0;
-      let next;
-      if (step !== void 0) {
-        next = ids[(index + step + ids.length) % ids.length];
-      } else if (key === "Home") {
-        next = ids[0];
-      } else if (key === "End") {
-        next = ids[ids.length - 1];
-      }
-      if (next === void 0) return;
-      event.preventDefault?.();
-      options.onSelect(next);
-    });
-    button.addClass("havemind-tab");
-    if (active) button.addClass("is-active");
-    if (tab.needsAttention === true) button.addClass("needs-attention");
-    const icon = button.createEl("span", { attr: DECORATIVE });
-    icon.addClass("havemind-tab-icon");
-    (0, import_obsidian13.setIcon)(icon, tab.icon);
-    button.createEl("span", { text: tab.label }).addClass("havemind-tab-label");
-    if (tab.count !== void 0) {
-      button.createEl("span", { text: `${tab.count}` }).addClass("havemind-tab-count");
-    }
-    button.onClickEvent(() => options.onSelect(tab.id));
-    if (active && options.focusActive === true) button.focus();
+    ],
+    footnote: "New here? Installing the plugin and running a server are covered in the project README and docs/self-hosting.md."
+  };
+}
+
+// src/runtime/activity-render.ts
+function defaultFormatTimestamp3(timestamp) {
+  return new Date(timestamp).toISOString();
+}
+function buildActivityViewModel(records, options = {}) {
+  const format = options.formatTimestamp ?? defaultFormatTimestamp3;
+  const rows = buildActivityFeed(records).map(
+    (entry) => ({
+      revisionId: entry.revisionId,
+      fileId: entry.fileId,
+      label: `${entry.kind} \xB7 ${entry.path} \xB7 ${entry.actorLabel}`,
+      headline: `${entry.actorLabel} ${entry.kind}`,
+      pathLabel: entry.path,
+      timestamp: entry.timestamp,
+      timeLabel: format(entry.timestamp),
+      colorToken: entry.actorId === null ? INITIAL_IMPORT_COLOR_TOKEN : authorColorToken(entry.actorId),
+      canRestore: entry.canRestore
+    })
+  );
+  return { empty: rows.length === 0, rows };
+}
+
+// src/ui/activity-section.ts
+var EMPTY_ACTIVITY_TEXT = "No activity yet. Connect to a vault to see changes as they happen.";
+function renderActivityRows(content, options) {
+  const model = buildActivityViewModel(options.feed, {
+    formatTimestamp: formatActivityTime
+  });
+  if (model.empty) {
+    const empty = content.createDiv({ text: EMPTY_ACTIVITY_TEXT });
+    empty.addClass("havemind-empty");
+    return 0;
   }
+  const rows = options.limit === void 0 ? model.rows : model.rows.slice(0, options.limit);
+  for (const row of rows) {
+    const entry = content.createDiv();
+    entry.addClass("havemind-activity-row");
+    const text = entry.createDiv();
+    text.addClass("havemind-activity-main");
+    text.addClass("havemind-activity-copy");
+    text.createDiv({ text: row.headline }).addClass("havemind-activity-who");
+    const path = text.createDiv({ text: row.pathLabel });
+    path.addClass("havemind-hint");
+    path.addClass("havemind-activity-path");
+    entry.style.setProperty("--havemind-row-color", `var(${row.colorToken})`);
+    const trail = entry.createDiv();
+    trail.addClass("havemind-activity-trail");
+    if (row.canRestore && options.onRestore) {
+      const restore = trail.createEl("button", { text: "Restore" });
+      restore.addClass("havemind-activity-action");
+      restore.onClickEvent(() => options.onRestore?.(row.revisionId));
+    }
+    const time3 = trail.createEl("span", { text: row.timeLabel });
+    time3.addClass("havemind-activity-time");
+  }
+  return model.rows.length;
 }
 
 // src/ui/getting-started-section.ts
@@ -25085,6 +25300,312 @@ function renderRejoinRoster(content, roster, actions) {
   }
 }
 
+// src/ui/screens/status-indicator.ts
+var import_obsidian11 = require("obsidian");
+function renderStatusIndicator(content, panel, actions = {}, includeRecovery = true) {
+  const row = content.createDiv({ text: "" });
+  row.addClass("havemind-status");
+  if (panel.spin) row.addClass("havemind-status-spin");
+  const isDotStatus = panel.status === "synced" || panel.status === "offline";
+  row.style.setProperty("color", `var(${panel.colorToken})`);
+  if (isDotStatus) {
+    const dot = row.createEl("span", { attr: DECORATIVE });
+    dot.addClass("havemind-status-dot");
+    if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
+  } else {
+    const icon = row.createEl("span", { attr: DECORATIVE });
+    (0, import_obsidian11.setIcon)(icon, panel.icon);
+  }
+  row.createEl("span", { text: ` ${panel.label}` });
+  const detail = content.createDiv();
+  detail.addClass("havemind-status-detail");
+  for (const part of panel.detail.split(" \xB7 ")) {
+    const line = detail.createEl("span");
+    line.addClass("havemind-status-line");
+    const lastSync = /^Last sync:\s*(.+)$/.exec(part);
+    if (lastSync?.[1] !== void 0) {
+      line.appendText("Last sync: ");
+      line.createEl("span", { text: lastSync[1] }).addClass("havemind-status-time");
+    } else {
+      line.setText(part);
+    }
+  }
+  if (includeRecovery && actions.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
+    const retry = content.createEl("button", { text: "Retry now" });
+    retry.addClass("mod-cta");
+    retry.addClass("havemind-retry");
+    retry.onClickEvent(() => actions.onRetry?.());
+  }
+  if (includeRecovery && actions.onReset !== void 0 && panel.status === "reset-required") {
+    const reset = content.createEl("button", {
+      text: "Reset connection",
+      attr: {
+        "aria-label": "Reset the stored Havemind connection and pair this device again"
+      }
+    });
+    reset.addClass("mod-warning");
+    reset.addClass("havemind-reset");
+    reset.onClickEvent(() => actions.onReset?.());
+  }
+}
+
+// src/ui/screens/connection-controls.ts
+function renderConnectionControls(content, panel, helpOpen, actions) {
+  renderStatusIndicator(content, panel, {}, false);
+  const state = content.createDiv();
+  state.addClass("havemind-connect-block");
+  if (panel.serverName !== void 0) {
+    const server = state.createDiv();
+    server.addClass("havemind-connect-row");
+    server.createEl("span", { text: "Server" }).addClass("havemind-connect-label");
+    server.createEl("span", { text: panel.serverName }).addClass("havemind-connect-value");
+  }
+  const actionBlock = content.createDiv();
+  actionBlock.addClass("havemind-connect-block");
+  if (actions.onSyncNow !== void 0) {
+    const sync = actionBlock.createEl("button", { text: "Sync now" });
+    sync.addClass("havemind-action-row");
+    sync.onClickEvent(() => actions.onSyncNow?.());
+  }
+  if (actions.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
+    const retry = actionBlock.createEl("button", { text: "Retry now" });
+    retry.addClass("havemind-action-row");
+    retry.onClickEvent(() => actions.onRetry?.());
+  }
+  if (actions.onReset !== void 0 && panel.status === "reset-required") {
+    const reset = actionBlock.createEl("button", { text: "Reset connection" });
+    reset.addClass("havemind-action-row");
+    reset.addClass("mod-warning");
+    reset.onClickEvent(() => actions.onReset?.());
+  }
+  const help = actionBlock.createEl("button", {
+    text: helpOpen ? "Hide getting started" : "Show getting started",
+    attr: { "aria-expanded": helpOpen ? "true" : "false" }
+  });
+  help.addClass("havemind-action-row");
+  help.addClass("mod-quiet");
+  help.onClickEvent(() => actions.onToggleHelp?.());
+  if (helpOpen) {
+    renderGettingStarted(actionBlock, buildGettingStartedViewModel());
+  }
+  if (actions.onDisconnect !== void 0) {
+    const exit = content.createDiv();
+    exit.addClass("havemind-connect-block");
+    const disconnect = exit.createEl("button", {
+      text: "Disconnect and change server"
+    });
+    disconnect.addClass("havemind-action-row");
+    disconnect.addClass("mod-warning");
+    disconnect.onClickEvent(() => actions.onDisconnect?.());
+  }
+}
+
+// src/ui/screens/invite-composer.ts
+var import_obsidian13 = require("obsidian");
+
+// src/ui/screens/invitation-envelope.ts
+var COPY_FAILED = "Could not copy automatically. Select and copy the invitation manually.";
+function renderInvitationEnvelope(content, model, actions) {
+  if (model.invitation === null) return;
+  const envelope = model.invitation.envelope;
+  if (model.invitationExpired === true) {
+    content.createDiv({
+      text: "This invitation expired. Create a new one above to invite the other device."
+    }).addClass("havemind-hint");
+    const dismiss2 = content.createEl("button", { text: "Done" });
+    dismiss2.onClickEvent(() => actions.onDismiss?.());
+    return;
+  }
+  content.createDiv({
+    text: "Invite created, copy it and send it to the other device. Single-use, expires in 15 minutes."
+  }).addClass("havemind-hint");
+  const code = content.createEl("code", { text: envelope });
+  code.addClass("havemind-invite-envelope");
+  const fallback = content.createEl("textarea", {
+    value: envelope,
+    cls: "havemind-invite-copy-fallback",
+    attr: {
+      id: "havemind-invite-envelope-text",
+      readonly: "true",
+      "aria-label": "Invitation to copy"
+    }
+  });
+  fallback.setAttribute("readonly", "true");
+  const copyStatus = content.createDiv({ text: "" });
+  copyStatus.addClass("havemind-form-status");
+  const copy = content.createEl("button", { text: "Copy" });
+  copy.addClass("mod-cta");
+  copy.onClickEvent(() => {
+    void Promise.resolve(actions.onCopy?.(envelope) ?? false).then(
+      (copied) => {
+        copyStatus.setText(copied ? "Copied to clipboard." : COPY_FAILED);
+      },
+      () => copyStatus.setText(COPY_FAILED)
+    );
+  });
+  content.createDiv({ text: `Expires: ${model.invitation.expiresAt}` }).addClass("havemind-hint");
+  const dismiss = content.createEl("button", { text: "Done" });
+  dismiss.onClickEvent(() => actions.onDismiss?.());
+}
+
+// src/ui/screens/pending-approval-row.ts
+var import_obsidian12 = require("obsidian");
+function renderPendingRow(content, entry, actions) {
+  const row = content.createDiv({ text: "" });
+  row.addClass("havemind-pending-row");
+  row.style.setProperty("color", "var(--text-accent)");
+  (0, import_obsidian12.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
+  row.createEl("span", {
+    text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires ${entry.expiresAt}`
+  });
+  const phraseId = `havemind-approve-${entry.invitationId}`;
+  row.createEl("label", {
+    text: "Enter the 6-digit code your peer reads to you",
+    attr: { for: phraseId }
+  });
+  const phraseInput = row.createEl("input", {
+    type: "text",
+    placeholder: "123456",
+    attr: { id: phraseId, inputmode: "numeric", maxlength: "6", pattern: "[0-9]*" }
+  });
+  const status = renderFormStatus(row);
+  const approve = row.createEl("button", { text: "Approve" });
+  approve.addClass("mod-cta");
+  approve.onClickEvent(() => {
+    const phrase = phraseInput.value.trim();
+    if (phrase.length === 0) {
+      status.setText("Enter the code you heard, then approve.");
+      return;
+    }
+    status.setText("Approving\u2026");
+    actions.onApprove?.(
+      entry.invitationId,
+      phrase,
+      (message) => status.setText(message)
+    );
+  });
+}
+
+// src/ui/screens/invite-composer.ts
+function renderInviteComposer(content, model, draft, live, actions) {
+  const title = content.createDiv();
+  title.addClass("havemind-composer-title");
+  renderViewTitle(title, "Invite someone");
+  if (actions.onClose !== void 0) {
+    const close = title.createEl("button", { text: "Close" });
+    close.addClass("havemind-composer-close");
+    close.onClickEvent(() => actions.onClose?.());
+  }
+  if (model.notice) renderNotice(content, model.notice, model.noticeKind);
+  renderSection(
+    content,
+    "create invitation",
+    () => renderCreateSection(content, model, draft, live, actions)
+  );
+  renderSection(content, "waiting devices", () => {
+    if (model.pending.length === 0) {
+      if (model.invitation !== null) {
+        content.createDiv({ text: "Waiting for the other device\u2026" }).addClass("havemind-hint");
+      }
+      return;
+    }
+    const divider = content.createEl("hr");
+    divider.addClass("havemind-divider");
+    content.createEl("h4", { text: "Waiting for the other device" });
+    for (const entry of model.pending) {
+      renderPendingRow(content, entry, actions);
+    }
+  });
+}
+function renderCreateSection(content, model, draft, live, actions) {
+  const roleSelect = labelledField(content, "havemind-invite-role", "Role", "select");
+  for (const value of ["editor", "owner"]) {
+    roleSelect.createEl("option", { text: value, value });
+  }
+  roleSelect.value = draft.role || model.role;
+  const nameInput = labelledField(content, "havemind-invite-name", "Name", "input", {
+    type: "text",
+    placeholder: "e.g. Magda",
+    value: draft.name || model.name
+  });
+  live.role = roleSelect;
+  live.name = nameInput;
+  const status = renderFormStatus(content);
+  const create = content.createEl("button", { text: "Create invitation" });
+  create.addClass("mod-cta");
+  create.onClickEvent(() => {
+    const role = roleSelect.value === "owner" ? "owner" : "editor";
+    status.setText("Creating invitation\u2026");
+    actions.onCreate?.(
+      role,
+      nameInput.value.trim(),
+      (message) => status.setText(message)
+    );
+  });
+  renderInvitationEnvelope(content, model, actions);
+}
+function renderNotice(content, notice, kind) {
+  if (kind !== "success") {
+    content.createDiv({ text: notice }).addClass("havemind-hint");
+    return;
+  }
+  const row = content.createDiv({ text: "" });
+  row.addClass("havemind-status");
+  row.style.setProperty("color", "var(--text-success)");
+  (0, import_obsidian13.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
+  row.createEl("span", { text: ` ${notice}` });
+}
+
+// src/ui/screens/people-tab.ts
+function renderPeopleTab(body, composer, actions) {
+  renderSection(body, "roster", () => actions.renderRoster(body));
+  if (composer !== null) {
+    actions.renderComposer(body, composer);
+    return;
+  }
+  if (actions.onOpenComposer !== void 0) {
+    const open = body.createEl("button", { text: "Invite someone" });
+    open.addClass("havemind-invite-cta");
+    open.onClickEvent(() => actions.onOpenComposer?.());
+  }
+}
+
+// src/ui/conflict-section.ts
+var import_obsidian14 = require("obsidian");
+function renderConflictSection(content, copies, actions) {
+  if (copies.length === 0) return;
+  const block = renderAlarmBlock(content, "havemind-alarm-conflict");
+  const header = block.createDiv({ text: "" });
+  header.addClass("havemind-conflict-header");
+  const icon = header.createEl("span", { attr: DECORATIVE });
+  icon.addClass("havemind-conflict-icon");
+  (0, import_obsidian14.setIcon)(icon, "git-merge");
+  header.createEl("span", {
+    text: copies.length === 1 ? " 1 conflict" : ` ${copies.length} conflicts`
+  });
+  const rows = block.createDiv();
+  rows.addClass("havemind-alarm-rows");
+  for (const copy of copies) {
+    const row = rows.createDiv({ text: "" });
+    row.addClass("havemind-conflict-row");
+    const name = copy.noteName ?? copy.copyName;
+    row.createEl("span", { text: name }).addClass("havemind-conflict-note");
+    if (copy.author !== null && copy.timestamp !== null) {
+      row.createEl("span", {
+        text: ` \xB7 ${copy.author} \xB7 ${copy.timestamp}`
+      }).addClass("havemind-conflict-meta");
+    }
+    if (copy.manualHint !== null) {
+      const hint = row.createDiv({ text: copy.manualHint });
+      hint.addClass("havemind-conflict-hint");
+    }
+    const resolve = row.createEl("button", { text: "Resolve" });
+    resolve.addClass("mod-cta");
+    resolve.addClass("havemind-conflict-action");
+    resolve.onClickEvent(() => actions.onResolve(copy.copyPath));
+  }
+}
+
 // src/ui/send-queue-section.ts
 function renderSendQueueSection(content, view, actions) {
   if (view.waitingCount > 0) {
@@ -25121,13 +25642,349 @@ function renderSendQueueSection(content, view, actions) {
 function renderRecoveryNotice(content, recoveryRequired) {
   if (!recoveryRequired) return;
   const row = content.createDiv({
-    text: "Local queue needs recovery \u2014 some unsent changes could not be read and were preserved for manual recovery."
+    text: "Local queue needs recovery, some unsent changes could not be read and were preserved for manual recovery."
   });
   row.addClass("havemind-send-recovery");
 }
 
+// src/ui/screens/alarms.ts
+function renderConflicts(content, source) {
+  const { onResolve } = source;
+  if (source.copies.length === 0 || onResolve === void 0) return;
+  renderConflictSection(content, source.copies, {
+    onResolve: (copyPath) => onResolve(copyPath)
+  });
+}
+function renderSendQueue(content, source) {
+  renderRecoveryNotice(content, source.recoveryRequired);
+  const { view, onRetry, onDiscard } = source;
+  if (view === null || onRetry === void 0 || onDiscard === void 0) return;
+  renderSendQueueSection(content, view, {
+    onRetry: (revisionId) => onRetry(revisionId),
+    onDiscard: (revisionId) => onDiscard(revisionId)
+  });
+}
+
+// src/ui/screens/tab-screens.ts
+function buildTabScreens(context) {
+  const { options } = context;
+  return {
+    renderStatus: (target, panel) => {
+      renderStatusIndicator(target, panel, {
+        onRetry: options.onRetry,
+        onReset: options.onReset
+      });
+      if (context.helpOpen) {
+        renderGettingStarted(target, buildGettingStartedViewModel());
+      }
+    },
+    renderActivity: (target) => {
+      renderActivityRows(target, {
+        feed: options.activityFeedProvider?.() ?? [],
+        ...options.onRestore ? { onRestore: options.onRestore } : {}
+      });
+    },
+    renderConnect: (target, panel) => renderConnectionControls(target, panel, context.helpOpen, {
+      onSyncNow: options.onSyncNow,
+      onRetry: options.onRetry,
+      onReset: options.onReset,
+      onDisconnect: options.onDisconnect,
+      onToggleHelp: context.onToggleHelp
+    }),
+    renderPeople: (target, model) => renderPeopleTab(target, model, {
+      renderRoster: (rosterTarget) => {
+        const roster = options.rejoinRosterProvider?.();
+        if (roster === void 0) return;
+        renderRejoinRoster(rosterTarget, roster, {
+          waiting: options.rejoinWaitingProvider?.() ?? /* @__PURE__ */ new Set(),
+          ...options.onRejoin === void 0 ? {} : { onRejoin: options.onRejoin },
+          ...options.onMarkDisconnected === void 0 ? {} : { onMarkDisconnected: options.onMarkDisconnected },
+          ...options.onRemove === void 0 ? {} : { onRemove: options.onRemove }
+        });
+      },
+      renderComposer: (composerTarget, m) => renderInviteComposer(composerTarget, m, context.draft, context.liveInputs, {
+        onClose: options.onCloseComposer,
+        onCreate: options.onCreateInvitation,
+        onCopy: options.onCopyInvitation,
+        onDismiss: options.onDismissInvitation,
+        onApprove: options.onApprove
+      }),
+      onOpenComposer: options.onOpenComposer
+    })
+  };
+}
+function buildBodyRenderers(options) {
+  return {
+    renderIndicator: (target, panel) => renderStatusIndicator(target, panel, {
+      onRetry: options.onRetry,
+      onReset: options.onReset
+    }),
+    renderSendQueue: (target) => renderSendQueue(target, {
+      recoveryRequired: options.recoveryRequiredProvider?.() ?? false,
+      view: options.sendQueueProvider?.() ?? null,
+      onRetry: options.onRetrySend,
+      onDiscard: options.onDiscardSend
+    }),
+    renderConflicts: (target) => renderConflicts(target, {
+      copies: options.conflictsProvider?.() ?? [],
+      onResolve: options.onResolveConflict
+    })
+  };
+}
+function attentionCount(options) {
+  const count = (read) => {
+    try {
+      return read();
+    } catch {
+      return 0;
+    }
+  };
+  return count(() => options.conflictsProvider?.().length ?? 0) + count(() => options.sendQueueProvider?.()?.failed.length ?? 0);
+}
+
+// src/ui/screens/connected-body-wiring.ts
+function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
+  const { options } = context;
+  const state = {
+    activeTab: context.activeTab,
+    focusTabOnRender: context.focusTabOnRender
+  };
+  renderConnectedBody(content, panel, composer, state, {
+    ...buildBodyRenderers(options),
+    renderEntryPath: (target) => renderEntryPath(
+      target,
+      {
+        entryChoice: context.entryChoice,
+        draftToken: context.draft.token,
+        canHost: options.canHost ?? true
+      },
+      {
+        arrivedWithInvitation: options.arrivedWithInvitationProvider,
+        composer: options.composerProvider
+      },
+      {
+        onChoose: callbacks.setEntryChoice,
+        renderForm: (formTarget) => renderConnectForm(formTarget, context.draft, context.liveInputs, options.onConnect),
+        onOpenGuide: callbacks.openGuide
+      }
+    ),
+    // `open` is passed in, not re-read: the provider was asked once already, and
+    // a second call could answer differently, leaving the strip and the body
+    // describing different states. An open composer selects People rather than
+    // a tab of its own (round 2, Q3).
+    paneTabs: (open) => buildPaneTabs({
+      active: open ? "people" : context.activeTab,
+      attentionCount: attentionCount(options)
+    }),
+    renderTabBody: (target, tab, p, c) => renderTabBody(
+      target,
+      tab,
+      p,
+      c,
+      buildTabScreens({
+        options,
+        draft: context.draft,
+        liveInputs: context.liveInputs,
+        helpOpen: context.helpOpen,
+        onToggleHelp: () => {
+          callbacks.setHelpOpen(!context.helpOpen);
+          callbacks.repaint();
+        }
+      })
+    ),
+    onSelectTab: callbacks.setActiveTab
+  });
+  return { focusTabOnRender: state.focusTabOnRender };
+}
+
+// src/ui/screens/guest-invalid.ts
+var import_obsidian15 = require("obsidian");
+function renderGuestInvalid(content, ownerName, actions) {
+  const view = buildSpentInvitation(ownerName);
+  const row = content.createDiv({ text: "" });
+  row.addClass("havemind-status");
+  row.style.setProperty("color", "var(--text-error)");
+  (0, import_obsidian15.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
+  row.createEl("span", { text: ` ${view.heading}` });
+  content.createDiv({ text: view.explanation }).addClass("havemind-hint");
+  actions.renderForm(content);
+}
+
+// src/ui/screens/pane-state.ts
+function readPaneState(options, entryChoice, draftToken) {
+  const panel = safeRead(
+    "panel",
+    options.panelProvider,
+    buildConnectionPanel({ status: "disconnected" })
+  );
+  const composer = safeRead("composer", options.composerProvider, null);
+  const state = resolveViewState({
+    guestInvalid: safeRead("guestInvalid", options.guestInvalidProvider, false),
+    guestWaiting: safeRead("guestWaiting", options.guestWaitingProvider, null),
+    panel,
+    entryChoice,
+    joinLinkFollowed: draftToken.length > 0,
+    composerOpen: composer !== null
+  });
+  return { panel, composer, state };
+}
+
+// src/ui/pane-header.ts
+var import_obsidian16 = require("obsidian");
+function renderPaneHeader(content, options) {
+  const strip = content.createDiv();
+  strip.addClass("havemind-pane-header");
+  const markWrap = strip.createDiv();
+  markWrap.addClass("havemind-pane-mark");
+  const mark = markWrap.createEl("span", { attr: DECORATIVE });
+  (0, import_obsidian16.setIcon)(mark, "hexagon");
+  if (options.alarmed === true) {
+    const dot = markWrap.createEl("span", {
+      attr: { title: "Needs attention" }
+    });
+    dot.addClass("havemind-pane-mark-dot");
+  }
+  strip.createEl("span", { text: options.title, cls: "havemind-pane-title" });
+  if (options.authorOverlayOn !== void 0 && options.onToggleAuthorOverlay !== void 0) {
+    const on = options.authorOverlayOn;
+    const toggle = strip.createEl("button", {
+      attr: {
+        "aria-label": "Authorship colours",
+        "aria-pressed": on ? "true" : "false"
+      }
+    });
+    toggle.addClass("havemind-header-action");
+    if (on) toggle.addClass("is-on");
+    (0, import_obsidian16.setIcon)(toggle, "eye");
+    toggle.onClickEvent(() => options.onToggleAuthorOverlay?.());
+  }
+  if (options.onInvite !== void 0) {
+    const invite = strip.createEl("button", {
+      attr: { "aria-label": "Invite someone" }
+    });
+    invite.addClass("havemind-header-action");
+    (0, import_obsidian16.setIcon)(invite, "user-plus");
+    invite.onClickEvent(() => options.onInvite?.());
+  }
+  const more = strip.createEl("button", {
+    attr: {
+      "aria-label": "More options",
+      "aria-expanded": options.menuOpen ? "true" : "false"
+    }
+  });
+  more.addClass("havemind-header-action");
+  more.addClass("havemind-pane-more");
+  (0, import_obsidian16.setIcon)(more, "more-horizontal");
+  more.onClickEvent(() => options.onToggleMenu());
+  if (!options.menuOpen) return;
+  const menu = content.createDiv();
+  menu.addClass("havemind-pane-menu");
+  let renderedAction = false;
+  for (const item of options.items) {
+    if (item.readOnly === true) {
+      if (renderedAction) {
+        menu.createDiv().addClass("havemind-pane-menu-sep");
+      }
+      menu.createDiv({ text: item.label }).addClass("havemind-pane-menu-note");
+      continue;
+    }
+    const entry = menu.createEl("button", { text: item.label });
+    entry.addClass("havemind-pane-menu-item");
+    entry.onClickEvent(() => item.onSelect());
+    renderedAction = true;
+  }
+}
+
+// src/ui/screens/header-menu.ts
+function buildHeaderMenuItems(panel, helpOpen, actions) {
+  if (panel.showForm) return [];
+  const items = [];
+  if (actions.onSyncNow) {
+    items.push({
+      label: "Sync now",
+      onSelect: () => actions.onSelectSyncNow?.()
+    });
+  }
+  items.push({
+    label: helpOpen ? "Hide getting started" : "Show getting started",
+    onSelect: () => actions.onToggleHelp()
+  });
+  if (actions.onDisconnect) {
+    items.push({
+      label: "Disconnect",
+      onSelect: () => actions.onSelectDisconnect?.()
+    });
+  }
+  if (actions.onReset) {
+    items.push({
+      label: "Reset connection",
+      onSelect: () => actions.onSelectReset?.()
+    });
+  }
+  if (panel.serverName !== void 0) {
+    items.push({
+      label: `Server: ${panel.serverName}`,
+      onSelect: () => {
+      },
+      readOnly: true
+    });
+  }
+  return items;
+}
+
+// src/ui/screens/pane-chrome.ts
+function renderPaneChrome(content, options) {
+  const { panel, overlayOn } = options;
+  renderPaneHeader(content, {
+    title: "Havemind",
+    menuOpen: options.menuOpen,
+    onToggleMenu: options.onToggleMenu,
+    items: options.items,
+    alarmed: options.alarmed,
+    // Only once connected, hence the `showForm` guard on each.
+    ...panel.showForm || overlayOn === void 0 ? {} : { authorOverlayOn: overlayOn },
+    ...panel.showForm || options.onToggleAuthorOverlay === void 0 ? {} : { onToggleAuthorOverlay: options.onToggleAuthorOverlay },
+    ...panel.showForm || options.onInvite === void 0 ? {} : { onInvite: options.onInvite }
+  });
+}
+function renderPaneChromeFor(content, panel, options, state, callbacks) {
+  const closeMenu = (run) => () => {
+    callbacks.setMenuOpen(false);
+    run?.();
+  };
+  renderPaneChrome(content, {
+    panel,
+    menuOpen: state.menuOpen,
+    alarmed: attentionCount(options) > 0,
+    overlayOn: safeRead("authorOverlay", options.authorOverlayProvider, void 0),
+    items: buildHeaderMenuItems(panel, state.helpOpen, {
+      onSyncNow: options.onSyncNow,
+      onDisconnect: options.onDisconnect,
+      onReset: options.onReset,
+      onSelectSyncNow: closeMenu(options.onSyncNow),
+      onSelectDisconnect: closeMenu(options.onDisconnect),
+      onSelectReset: closeMenu(options.onReset),
+      onToggleHelp: () => {
+        callbacks.setHelpOpen(!state.helpOpen);
+        callbacks.setMenuOpen(false);
+        callbacks.repaint();
+      }
+    }),
+    onToggleMenu: () => {
+      callbacks.setMenuOpen(!state.menuOpen);
+      callbacks.repaint();
+    },
+    onToggleAuthorOverlay: options.onToggleAuthorOverlay,
+    onInvite: options.onOpenComposer
+  });
+}
+
+// src/ui/view-types.ts
+var HAVEMIND_ACTIVITY_VIEW = "havemind-activity";
+var HAVEMIND_ONBOARDING_VIEW = "havemind-onboarding";
+
 // src/ui/onboarding-view.ts
-var HavemindOnboardingView = class extends import_obsidian14.ItemView {
+var HavemindOnboardingView = class extends import_obsidian17.ItemView {
   constructor(leaf, options = {}) {
     super(leaf);
     __publicField(this, "options");
@@ -25179,662 +26036,91 @@ var HavemindOnboardingView = class extends import_obsidian14.ItemView {
   onClose() {
     this.options.onClosed?.();
   }
-  /** Re-renders from the current panel state — called on every status change. */
+  /** Re-renders from the current panel state, called on every status change. */
   refresh() {
     this.render();
   }
   render() {
     const content = this.containerEl.children[1];
     if (!content) return;
-    this.captureDrafts();
+    captureDrafts(this.draft, this.liveInputs);
     content.empty();
     content.addClass("havemind-view");
     this.liveInputs = {};
-    if (safeRead("guestInvalid", this.options.guestInvalidProvider, false)) {
-      this.renderGuestInvalid(content);
-      return;
-    }
-    const waiting = safeRead("guestWaiting", this.options.guestWaitingProvider, null);
-    if (waiting) {
-      this.renderGuestWaiting(content, waiting);
-      return;
-    }
-    const panel = safeRead(
-      "panel",
-      this.options.panelProvider,
-      buildConnectionPanel({ status: "disconnected" })
+    const { panel, composer, state } = readPaneState(
+      this.options,
+      this.entryChoice,
+      this.draft.token
     );
-    const composer = safeRead("composer", this.options.composerProvider, null);
-    const overlayOn = safeRead(
-      "authorOverlay",
-      this.options.authorOverlayProvider,
-      void 0
-    );
-    renderPaneHeader(content, {
-      title: "Havemind",
-      menuOpen: this.menuOpen,
-      onToggleMenu: () => {
-        this.menuOpen = !this.menuOpen;
-        this.render();
-      },
-      items: this.headerMenuItems(panel),
-      alarmed: this.attentionCount() > 0,
-      // View actions live in the header, not in a second row (round 2, Q1).
-      // Only once connected: before that there is nothing to colour and nobody
-      // to invite.
-      ...panel.showForm || overlayOn === void 0 ? {} : { authorOverlayOn: overlayOn },
-      ...panel.showForm || this.options.onToggleAuthorOverlay === void 0 ? {} : { onToggleAuthorOverlay: this.options.onToggleAuthorOverlay },
-      ...panel.showForm || this.options.onOpenComposer === void 0 ? {} : { onInvite: this.options.onOpenComposer }
-    });
-    const composerOpen = composer != null;
-    if (panel.showForm && !composerOpen) {
-      renderSection(
-        content,
-        "status",
-        () => this.renderIndicator(content, panel)
-      );
-      renderSection(content, "send queue", () => this.renderSendQueue(content));
-      renderSection(content, "conflicts", () => this.renderConflicts(content));
-      renderSection(content, "connection", () => this.renderEntryPath(content));
+    if (state.kind === "invalid") {
+      renderGuestInvalid(content, this.options.guestWaitingProvider?.()?.ownerName, {
+        renderForm: (target) => renderConnectForm(target, this.draft, this.liveInputs, this.options.onConnect)
+      });
       return;
     }
-    renderSection(content, "send queue", () => this.renderSendQueue(content));
-    renderSection(content, "conflicts", () => this.renderConflicts(content));
-    const tabs = this.paneTabs(composer != null);
-    const focusActive = this.focusTabOnRender;
-    this.focusTabOnRender = false;
-    renderSection(content, "tabs", () => {
-      renderPaneTabs(content, {
-        view: tabs,
-        onSelect: (id) => {
-          this.activeTab = id;
-          this.focusTabOnRender = true;
-          this.render();
+    if (state.kind === "awaiting") {
+      renderGuestWaitingScreen(content, state.waiting, {
+        onCancel: this.options.onDisconnect
+      });
+      return;
+    }
+    renderPaneChromeFor(
+      content,
+      panel,
+      this.options,
+      { menuOpen: this.menuOpen, helpOpen: this.helpOpen },
+      {
+        setMenuOpen: (open) => {
+          this.menuOpen = open;
         },
-        ...focusActive ? { focusActive: true } : {}
-      });
-    });
-    const body = content.createDiv();
-    body.addClass("havemind-tab-body");
-    body.setAttribute("role", "tabpanel");
-    body.setAttribute("id", PANE_TABPANEL_ID);
-    body.setAttribute("aria-labelledby", paneTabDomId(tabs.active));
-    renderSection(body, `tab:${tabs.active}`, () => {
-      this.renderTabBody(body, tabs.active, panel, composer);
-    });
-  }
-  /**
-   * The tab model, derived from the same providers the body reads.
-   *
-   * Every read is guarded: the strip is chrome, and a provider that throws must
-   * cost the user its count, not their whole pane. `renderSection` protects the
-   * sections it wraps, but this runs before them — an unguarded throw here would
-   * blank everything, which is the failure MAJOR 5 exists to prevent.
-   */
-  paneTabs(composerOpen) {
-    return buildPaneTabs({
-      // Inviting happens inside People now (round 2, Q3), so an open composer
-      // selects that tab rather than a fourth one of its own.
-      active: composerOpen ? "people" : this.activeTab,
-      attentionCount: this.attentionCount()
-    });
-  }
-  renderTabBody(body, tab, panel, composer) {
-    if (tab === "status") {
-      this.renderIndicator(body, panel);
-      if (this.helpOpen) {
-        renderGettingStarted(body, buildGettingStartedViewModel());
+        setHelpOpen: (open) => {
+          this.helpOpen = open;
+        },
+        repaint: () => this.render()
       }
-      return;
-    }
-    if (tab === "activity") {
-      const feed = this.options.activityFeedProvider?.() ?? [];
-      renderActivityRows(body, {
-        feed,
-        ...this.options.onRestore ? { onRestore: this.options.onRestore } : {}
-      });
-      return;
-    }
-    if (tab === "connect") {
-      this.renderConnectionControls(body, panel);
-      return;
-    }
-    renderSection(body, "roster", () => {
-      const roster = this.options.rejoinRosterProvider?.();
-      if (roster !== void 0) this.renderRoster(body, roster);
-    });
-    if (composer !== null) {
-      this.renderCreateConnection(body, composer);
-      return;
-    }
-    if (this.options.onOpenComposer !== void 0) {
-      const open = body.createEl("button", { text: "Invite someone" });
-      open.addClass("havemind-invite-cta");
-      open.onClickEvent(() => this.options.onOpenComposer?.());
-    }
-  }
-  /** Reads live input values into `draft` so the next render can restore them. */
-  captureDrafts() {
-    const live = this.liveInputs;
-    if (live.token) this.draft.token = live.token.value;
-    if (live.server) this.draft.server = live.server.value;
-    if (live.role) this.draft.role = live.role.value === "owner" ? "owner" : "editor";
-    if (live.name) this.draft.name = live.name.value;
-  }
-  renderIndicator(content, panel, includeRecovery = true) {
-    const row = content.createDiv({ text: "" });
-    row.addClass("havemind-status");
-    if (panel.spin) row.addClass("havemind-status-spin");
-    const isDotStatus = panel.status === "synced" || panel.status === "offline";
-    row.style.setProperty("color", `var(${panel.colorToken})`);
-    if (isDotStatus) {
-      const dot = row.createEl("span", { attr: DECORATIVE });
-      dot.addClass("havemind-status-dot");
-      if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
-    } else {
-      const icon = row.createEl("span", { attr: DECORATIVE });
-      (0, import_obsidian14.setIcon)(icon, panel.icon);
-    }
-    row.createEl("span", { text: ` ${panel.label}` });
-    const detail = content.createDiv();
-    detail.addClass("havemind-status-detail");
-    for (const part of panel.detail.split(" \xB7 ")) {
-      const line = detail.createEl("span");
-      line.addClass("havemind-status-line");
-      const lastSync = /^Last sync:\s*(.+)$/.exec(part);
-      if (lastSync?.[1] !== void 0) {
-        line.appendText("Last sync: ");
-        line.createEl("span", { text: lastSync[1] }).addClass("havemind-status-time");
-      } else {
-        line.setText(part);
-      }
-    }
-    if (includeRecovery && this.options.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
-      const retry = content.createEl("button", { text: "Retry now" });
-      retry.addClass("mod-cta");
-      retry.addClass("havemind-retry");
-      retry.onClickEvent(() => this.options.onRetry?.());
-    }
-    if (includeRecovery && this.options.onReset !== void 0 && panel.status === "reset-required") {
-      const reset = content.createEl("button", {
-        text: "Reset connection",
-        attr: {
-          "aria-label": "Reset the stored Havemind connection and pair this device again"
-        }
-      });
-      reset.addClass("mod-warning");
-      reset.addClass("havemind-reset");
-      reset.onClickEvent(() => this.options.onReset?.());
-    }
-  }
-  /**
-   * Keeps every connection action in the pane instead of requiring the header
-   * overflow menu. Connecting a different server remains an explicit two-step
-   * action: disconnect first, then the normal pairing form appears.
-   */
-  renderConnectionControls(content, panel) {
-    this.renderIndicator(content, panel, false);
-    const state = content.createDiv();
-    state.addClass("havemind-connect-block");
-    if (panel.serverName !== void 0) {
-      const server = state.createDiv();
-      server.addClass("havemind-connect-row");
-      server.createEl("span", { text: "Server" }).addClass("havemind-connect-label");
-      server.createEl("span", { text: panel.serverName }).addClass("havemind-connect-value");
-    }
-    const actions = content.createDiv();
-    actions.addClass("havemind-connect-block");
-    if (this.options.onSyncNow !== void 0) {
-      const sync = actions.createEl("button", { text: "Sync now" });
-      sync.addClass("havemind-action-row");
-      sync.onClickEvent(() => this.options.onSyncNow?.());
-    }
-    if (this.options.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
-      const retry = actions.createEl("button", { text: "Retry now" });
-      retry.addClass("havemind-action-row");
-      retry.onClickEvent(() => this.options.onRetry?.());
-    }
-    if (this.options.onReset !== void 0 && panel.status === "reset-required") {
-      const reset = actions.createEl("button", { text: "Reset connection" });
-      reset.addClass("havemind-action-row");
-      reset.addClass("mod-warning");
-      reset.onClickEvent(() => this.options.onReset?.());
-    }
-    const help = actions.createEl("button", {
-      text: this.helpOpen ? "Hide getting started" : "Show getting started",
-      attr: { "aria-expanded": this.helpOpen ? "true" : "false" }
-    });
-    help.addClass("havemind-action-row");
-    help.addClass("mod-quiet");
-    help.onClickEvent(() => {
-      this.helpOpen = !this.helpOpen;
-      this.render();
-    });
-    if (this.helpOpen) {
-      renderGettingStarted(actions, buildGettingStartedViewModel());
-    }
-    if (this.options.onDisconnect !== void 0) {
-      const exit = content.createDiv();
-      exit.addClass("havemind-connect-block");
-      const disconnect = exit.createEl("button", {
-        text: "Disconnect and change server"
-      });
-      disconnect.addClass("havemind-action-row");
-      disconnect.addClass("mod-warning");
-      disconnect.onClickEvent(() => this.options.onDisconnect?.());
-    }
-  }
-  /**
-   * Draws the MRG-03 "Conflicts" section when copies exist. The provider reads
-   * the vault synchronously; an empty list renders nothing so the section
-   * appears only while there is something to resolve.
-   */
-  renderConflicts(content) {
-    const copies = this.options.conflictsProvider?.() ?? [];
-    const onResolveConflict = this.options.onResolveConflict;
-    if (copies.length === 0 || onResolveConflict === void 0) return;
-    renderConflictSection(content, copies, {
-      onResolve: (copyPath) => onResolveConflict(copyPath)
-    });
-  }
-  /**
-   * Draws the SND-01 send-queue section (waiting + failed) beneath the status
-   * indicator. The provider reads the persisted sync state; a null return
-   * (disconnected) or an all-clear view renders nothing.
-   */
-  renderSendQueue(content) {
-    renderRecoveryNotice(content, this.options.recoveryRequiredProvider?.() ?? false);
-    const view = this.options.sendQueueProvider?.() ?? null;
-    if (view === null) return;
-    const onRetry = this.options.onRetrySend;
-    const onDiscard = this.options.onDiscardSend;
-    if (onRetry === void 0 || onDiscard === void 0) return;
-    renderSendQueueSection(content, view, {
-      onRetry: (revisionId) => onRetry(revisionId),
-      onDiscard: (revisionId) => onDiscard(revisionId)
-    });
-  }
-  /**
-   * The disconnected pane: a chooser, then only the branch the user picked
-   * (design 1d). The five-step tutorial used to render unconditionally above
-   * the form — correct for the half of users who will host a server, and fatal
-   * for the half who only need to paste an invitation someone sent them.
-   *
-   * A user who arrived through `obsidian://havemind-join`, or who already has a
-   * token typed, has self-evidently chosen: skip the question.
-   */
-  renderEntryPath(content) {
-    const decided = this.entryChoice !== "undecided" || this.draft.token.length > 0 || this.options.arrivedWithInvitationProvider?.() === true || // An owner minting an invitation has already answered the question by
-    // opening the composer; asking again would be asking twice. Note the
-    // `=== undefined` guard: an absent provider is not an open composer.
-    this.options.composerProvider !== void 0 && this.options.composerProvider() !== null;
-    if (!decided) {
-      renderEntryChooser(content, {
-        model: buildEntryChooser(),
-        onChoose: (choice) => {
+    );
+    const { focusTabOnRender } = renderConnectedBodyFor(
+      content,
+      panel,
+      composer,
+      {
+        options: this.options,
+        draft: this.draft,
+        liveInputs: this.liveInputs,
+        entryChoice: this.entryChoice,
+        helpOpen: this.helpOpen,
+        activeTab: this.activeTab,
+        focusTabOnRender: this.focusTabOnRender
+      },
+      {
+        setEntryChoice: (choice) => {
           this.entryChoice = choice;
           this.render();
-        }
-      });
-      return;
-    }
-    if (this.entryChoice === "hosting") {
-      renderHostPath(content, {
-        model: buildHostView(),
-        onBack: () => {
-          this.entryChoice = "undecided";
+        },
+        setHelpOpen: (open) => {
+          this.helpOpen = open;
+        },
+        setActiveTab: (id, viaKeyboard) => {
+          this.activeTab = id;
+          this.focusTabOnRender = viaKeyboard;
           this.render();
         },
-        onContinue: () => {
-          this.entryChoice = "joining";
-          this.render();
-        },
-        onOpenGuide: (url2) => {
+        repaint: () => this.render(),
+        openGuide: (url2) => {
           window.open(url2, "_blank");
         }
-      });
-      return;
-    }
-    const back = content.createEl("button", { text: "Back" });
-    back.addClass("havemind-entry-back");
-    back.onClickEvent(() => {
-      this.entryChoice = "undecided";
-      this.render();
-    });
-    this.renderForm(content);
+      }
+    );
+    this.focusTabOnRender = focusTabOnRender;
   }
   /**
-   * What the header overflow menu holds. Only offered once connected: on the
-   * connect screen there is nothing to disconnect from, and Reset is already
-   * surfaced as its own affordance in the state that needs it.
+   * Everything below the header: the alarms, the tab strip and the open tab.
+   *
+   * Split from `render()` so the dispatcher above stays readable as a list of
+   * screens. The ordering rules it encodes are the load-bearing part, and they
+   * are commented where they apply.
    */
-  /** How many things need the user right now, across every guarded provider. */
-  attentionCount() {
-    const count = (read) => {
-      try {
-        return read();
-      } catch {
-        return 0;
-      }
-    };
-    return count(() => this.options.conflictsProvider?.().length ?? 0) + count(() => this.options.sendQueueProvider?.()?.failed.length ?? 0);
-  }
-  headerMenuItems(panel) {
-    if (panel.showForm) return [];
-    const items = [];
-    if (this.options.onSyncNow) {
-      items.push({
-        label: "Sync now",
-        onSelect: () => {
-          this.menuOpen = false;
-          this.options.onSyncNow?.();
-        }
-      });
-    }
-    items.push({
-      label: this.helpOpen ? "Hide getting started" : "Show getting started",
-      onSelect: () => {
-        this.helpOpen = !this.helpOpen;
-        this.menuOpen = false;
-        this.render();
-      }
-    });
-    if (this.options.onDisconnect) {
-      items.push({
-        label: "Disconnect",
-        onSelect: () => {
-          this.menuOpen = false;
-          this.options.onDisconnect?.();
-        }
-      });
-    }
-    if (this.options.onReset) {
-      items.push({
-        label: "Reset connection",
-        onSelect: () => {
-          this.menuOpen = false;
-          this.options.onReset?.();
-        }
-      });
-    }
-    if (panel.serverName !== void 0) {
-      items.push({
-        label: `Server: ${panel.serverName}`,
-        onSelect: () => {
-        },
-        readOnly: true
-      });
-    }
-    return items;
-  }
   /** Renders the rejoin-aware roster with its owner actions from the options. */
-  renderRoster(content, roster) {
-    renderRejoinRoster(content, roster, {
-      waiting: this.options.rejoinWaitingProvider?.() ?? /* @__PURE__ */ new Set(),
-      ...this.options.onRejoin === void 0 ? {} : { onRejoin: this.options.onRejoin },
-      ...this.options.onMarkDisconnected === void 0 ? {} : { onMarkDisconnected: this.options.onMarkDisconnected },
-      ...this.options.onRemove === void 0 ? {} : { onRemove: this.options.onRemove }
-    });
-  }
-  /**
-   * Guest waiting screen: the invitation is already redeemed and this device is
-   * waiting for the owner to approve it. The verification phrase is shown so it
-   * survives a pane close/reopen; no paste form is drawn (re-pasting would try
-   * to re-redeem a single-use invitation).
-   */
-  renderGuestWaiting(content, model) {
-    const view = buildGuestHandshake({
-      code: model.verificationPhrase,
-      ...model.ownerName !== void 0 ? { ownerName: model.ownerName } : {}
-    });
-    content.createDiv({ text: view.instruction }).addClass("havemind-handshake-lead");
-    const digits = content.createDiv();
-    digits.addClass("havemind-handshake-code");
-    digits.setAttribute("aria-label", view.code.join(""));
-    for (const group of view.code) {
-      digits.createEl("span", { text: group });
-    }
-    content.createDiv({ text: view.mismatchWarning }).addClass("havemind-handshake-warning");
-    if (view.expiryLabel !== null) {
-      content.createDiv({ text: `Expires in ${view.expiryLabel}` }).addClass("havemind-hint");
-    }
-    content.createDiv({ text: view.liveNote }).addClass("havemind-hint");
-    const cancel = content.createEl("button", { text: "Cancel" });
-    cancel.onClickEvent(() => this.options.onDisconnect?.());
-  }
-  /**
-   * Terminal guest screen after the owner rejected this device or the 3-attempt
-   * cap was reached. The invitation is spent, so we present a clear message plus
-   * the paste form to try a fresh invite — never offline, never a blank form.
-   */
-  renderGuestInvalid(content) {
-    const view = buildSpentInvitation(
-      this.options.guestWaitingProvider?.()?.ownerName
-    );
-    const row = content.createDiv({ text: "" });
-    row.addClass("havemind-status");
-    row.style.setProperty("color", "var(--text-error)");
-    (0, import_obsidian14.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
-    row.createEl("span", { text: ` ${view.heading}` });
-    content.createDiv({ text: view.explanation }).addClass("havemind-hint");
-    this.renderForm(content);
-  }
-  renderForm(content) {
-    const tokenInput = labelledField(
-      content,
-      "havemind-connect-token",
-      "Invitation or owner pairing token",
-      "textarea",
-      { placeholder: "v1.\u2026 or hm_pt_\u2026", value: this.draft.token }
-    );
-    const serverInput = labelledField(
-      content,
-      "havemind-connect-server",
-      "Server URL",
-      "input",
-      {
-        type: "text",
-        placeholder: "https://your-server.example",
-        value: this.draft.server
-      }
-    );
-    this.liveInputs.token = tokenInput;
-    this.liveInputs.server = serverInput;
-    const status = renderFormStatus(content);
-    const connect = content.createEl("button", { text: "Connect" });
-    connect.addClass("mod-cta");
-    connect.onClickEvent(() => {
-      const input = tokenInput.value.trim();
-      const serverUrl = serverInput.value.trim();
-      if (input.length === 0) {
-        status.setText("Paste an invitation or pairing token first.");
-        return;
-      }
-      status.setText("Connecting\u2026");
-      this.options.onConnect?.(
-        input,
-        serverUrl,
-        (message) => status.setText(message)
-      );
-    });
-  }
-  /**
-   * The unified owner "Create connection" panel. The create section (role +
-   * name + Create invitation, plus the minted envelope with Copy) and the live
-   * "waiting for the other device" section render together in one surface;
-   * approving a waiting device never unmounts the create section.
-   */
-  renderCreateConnection(content, model) {
-    const title = content.createDiv();
-    title.addClass("havemind-composer-title");
-    renderViewTitle(title, "Creating connection");
-    if (this.options.onCloseComposer !== void 0) {
-      const close = title.createEl("button", { text: "Close" });
-      close.addClass("havemind-composer-close");
-      close.onClickEvent(() => this.options.onCloseComposer?.());
-    }
-    if (model.notice) this.renderNotice(content, model.notice, model.noticeKind);
-    renderSection(
-      content,
-      "create invitation",
-      () => this.renderCreateSection(content, model)
-    );
-    renderSection(content, "waiting devices", () => {
-      if (model.pending.length === 0) {
-        if (model.invitation !== null) {
-          content.createDiv({ text: "Waiting for the other device\u2026" }).addClass("havemind-hint");
-        }
-        return;
-      }
-      const divider = content.createEl("hr");
-      divider.addClass("havemind-divider");
-      content.createEl("h4", { text: "Waiting for the other device" });
-      for (const entry of model.pending) {
-        this.renderPendingRow(content, entry);
-      }
-    });
-  }
-  renderCreateSection(content, model) {
-    const roleSelect = labelledField(
-      content,
-      "havemind-invite-role",
-      "Role",
-      "select"
-    );
-    for (const value of ["editor", "owner"]) {
-      roleSelect.createEl("option", { text: value, value });
-    }
-    roleSelect.value = this.draft.role || model.role;
-    const nameInput = labelledField(
-      content,
-      "havemind-invite-name",
-      "Name",
-      "input",
-      {
-        type: "text",
-        placeholder: "e.g. Magda",
-        value: this.draft.name || model.name
-      }
-    );
-    this.liveInputs.role = roleSelect;
-    this.liveInputs.name = nameInput;
-    const status = renderFormStatus(content);
-    const create = content.createEl("button", { text: "Create invitation" });
-    create.addClass("mod-cta");
-    create.onClickEvent(() => {
-      const role = roleSelect.value === "owner" ? "owner" : "editor";
-      const name = nameInput.value.trim();
-      status.setText("Creating invitation\u2026");
-      this.options.onCreateInvitation?.(
-        role,
-        name,
-        (message) => status.setText(message)
-      );
-    });
-    if (model.invitation === null) return;
-    const envelope = model.invitation.envelope;
-    if (model.invitationExpired === true) {
-      content.createDiv({
-        text: "This invitation expired. Create a new one above to invite the other device."
-      }).addClass("havemind-hint");
-      const dismiss2 = content.createEl("button", { text: "Done" });
-      dismiss2.onClickEvent(() => this.options.onDismissInvitation?.());
-      return;
-    }
-    content.createDiv({
-      text: "Invite created \u2014 copy it and send it to the other device. Single-use, expires in 15 minutes."
-    }).addClass("havemind-hint");
-    const code = content.createEl("code", { text: envelope });
-    code.addClass("havemind-invite-envelope");
-    const fallback = content.createEl("textarea", {
-      value: envelope,
-      cls: "havemind-invite-copy-fallback",
-      attr: {
-        id: "havemind-invite-envelope-text",
-        readonly: "true",
-        "aria-label": "Invitation to copy"
-      }
-    });
-    fallback.setAttribute("readonly", "true");
-    const copyStatus = content.createDiv({ text: "" });
-    copyStatus.addClass("havemind-form-status");
-    const copy = content.createEl("button", { text: "Copy" });
-    copy.addClass("mod-cta");
-    copy.onClickEvent(() => {
-      void Promise.resolve(this.options.onCopyInvitation?.(envelope) ?? false).then(
-        (copied) => {
-          copyStatus.setText(
-            copied ? "Copied to clipboard." : "Could not copy automatically. Select and copy the invitation manually."
-          );
-        },
-        () => {
-          copyStatus.setText(
-            "Could not copy automatically. Select and copy the invitation manually."
-          );
-        }
-      );
-    });
-    content.createDiv({ text: `Expires: ${model.invitation.expiresAt}` }).addClass("havemind-hint");
-    const dismiss = content.createEl("button", { text: "Done" });
-    dismiss.onClickEvent(() => this.options.onDismissInvitation?.());
-  }
-  /**
-   * Renders the composer's transient notice line. 'success' (e.g. a device
-   * just connected) uses the icon+label+colour status-row convention shared
-   * with the Connect panel indicator — never colour alone; other notices
-   * (progress/info) stay a plain text line.
-   */
-  renderNotice(content, notice, kind) {
-    if (kind !== "success") {
-      content.createDiv({ text: notice }).addClass("havemind-hint");
-      return;
-    }
-    const row = content.createDiv({ text: "" });
-    row.addClass("havemind-status");
-    row.style.setProperty("color", "var(--text-success)");
-    (0, import_obsidian14.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
-    row.createEl("span", { text: ` ${notice}` });
-  }
-  renderPendingRow(content, entry) {
-    const row = content.createDiv({ text: "" });
-    row.addClass("havemind-pending-row");
-    row.style.setProperty("color", "var(--text-accent)");
-    (0, import_obsidian14.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
-    row.createEl("span", {
-      text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires ${entry.expiresAt}`
-    });
-    const phraseId = `havemind-approve-${entry.invitationId}`;
-    row.createEl("label", {
-      text: "Enter the 6-digit code your peer reads to you",
-      attr: { for: phraseId }
-    });
-    const phraseInput = row.createEl("input", {
-      type: "text",
-      placeholder: "123456",
-      attr: {
-        id: phraseId,
-        inputmode: "numeric",
-        maxlength: "6",
-        pattern: "[0-9]*"
-      }
-    });
-    const status = renderFormStatus(row);
-    const approve = row.createEl("button", { text: "Approve" });
-    approve.addClass("mod-cta");
-    approve.onClickEvent(() => {
-      const phrase = phraseInput.value.trim();
-      if (phrase.length === 0) {
-        status.setText("Enter the code you heard, then approve.");
-        return;
-      }
-      status.setText("Approving\u2026");
-      this.options.onApprove?.(
-        entry.invitationId,
-        phrase,
-        (message) => status.setText(message)
-      );
-    });
-  }
 };
 
 // src/ui/retry-plan.ts
@@ -25842,14 +26128,14 @@ function planRetryFromDisk(outcome, path, discardOnRetrigger) {
   switch (outcome) {
     case "file-missing":
       return {
-        notice: `${path} no longer exists \u2014 removing it from the queue.`,
+        notice: `${path} no longer exists, removing it from the queue.`,
         discard: true
       };
     case "retriggered":
       return { notice: null, discard: discardOnRetrigger };
     default:
       return {
-        notice: "Cannot retry while disconnected \u2014 reconnect first.",
+        notice: "Cannot retry while disconnected, reconnect first.",
         discard: false
       };
   }
@@ -25859,17 +26145,17 @@ function planQuarantineRequeueFallback(requeued, path) {
   if (path !== null) return { kind: "retry-from-disk", path };
   return {
     kind: "discard-dead-letter",
-    notice: "The original file for this change no longer exists \u2014 removing it."
+    notice: "The original file for this change no longer exists, removing it."
   };
 }
 
 // src/ui/setting-tab.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 function formatMemberCount(count) {
   if (count === 0) return "No members recorded yet";
   return count === 1 ? "1 member" : `${count} members`;
 }
-var HavemindSettingTab = class extends import_obsidian15.PluginSettingTab {
+var HavemindSettingTab = class extends import_obsidian18.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     /**
@@ -25884,41 +26170,41 @@ var HavemindSettingTab = class extends import_obsidian15.PluginSettingTab {
     this.containerEl.empty();
     const plugin = this.havemind;
     const info = plugin.settingsInfo();
-    new import_obsidian15.Setting(this.containerEl).setName("Havemind").setHeading();
-    new import_obsidian15.Setting(this.containerEl).setName("Server").setDesc(info.server);
-    new import_obsidian15.Setting(this.containerEl).setName("Connection").setDesc(info.status);
-    new import_obsidian15.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
-    new import_obsidian15.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
-    new import_obsidian15.Setting(this.containerEl).setName("Actions").setHeading();
+    new import_obsidian18.Setting(this.containerEl).setName("Havemind").setHeading();
+    new import_obsidian18.Setting(this.containerEl).setName("Server").setDesc(info.server);
+    new import_obsidian18.Setting(this.containerEl).setName("Connection").setDesc(info.status);
+    new import_obsidian18.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
+    new import_obsidian18.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
+    new import_obsidian18.Setting(this.containerEl).setName("Actions").setHeading();
     this.renderActions(plugin, info);
     const refresh = this.containerEl.createEl("button", { text: "Refresh" });
     refresh.onClickEvent(() => this.display());
   }
   /**
    * The action rows. Every button routes into the SAME plugin method its command
-   * palette entry runs — `connectionActions()` is the single definition of what
+   * palette entry runs, `connectionActions()` is the single definition of what
    * each action does, so the two surfaces can never drift apart.
    */
   renderActions(plugin, info) {
     const actions = plugin.connectionActions();
-    new import_obsidian15.Setting(this.containerEl).setName("Havemind panel").setDesc(
+    new import_obsidian18.Setting(this.containerEl).setName("Havemind panel").setDesc(
       "Connect a device, invite a peer, resolve conflicts and inspect the send queue."
     ).addButton(
       (button) => button.setButtonText("Open Havemind panel").setCta().onClick(() => plugin.revealPanel())
     );
-    new import_obsidian15.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
+    new import_obsidian18.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
       (button) => button.setButtonText("Sync now").setDisabled(!info.connected).onClick(() => actions.syncNow())
     );
-    new import_obsidian15.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
+    new import_obsidian18.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
       (button) => button.setButtonText("Disconnect").setDisabled(!info.connected).onClick(() => actions.disconnect())
     );
-    new import_obsidian15.Setting(this.containerEl).setName("Reset connection").setDesc(
+    new import_obsidian18.Setting(this.containerEl).setName("Reset connection").setDesc(
       "Clear the stored pairing so this device can be paired again. No note is touched."
     ).addButton(
       (button) => button.setButtonText("Reset connection").onClick(() => actions.resetConnection())
     );
     const overlayOn = plugin.authorOverlayEnabled();
-    new import_obsidian15.Setting(this.containerEl).setName("Author overlay").setDesc(
+    new import_obsidian18.Setting(this.containerEl).setName("Author overlay").setDesc(
       overlayOn ? "Currently on. Each note shows who last changed it, by colour and by name." : "Currently off. Author colours and names are hidden in both editor views."
     ).addButton(
       (button) => button.setButtonText(overlayOn ? "Hide authors" : "Show authors").onClick(() => {
@@ -25933,34 +26219,23 @@ var HavemindSettingTab = class extends import_obsidian15.PluginSettingTab {
 var PluginViewRegistry = class {
   constructor() {
     __publicField(this, "onboarding", null);
-    __publicField(this, "activity", null);
   }
   registerOnboarding(view) {
     this.onboarding = view;
     return () => this.unregisterOnboarding(view);
   }
-  registerActivity(view) {
-    this.activity = view;
-    return () => this.unregisterActivity(view);
-  }
   unregisterOnboarding(view) {
     if (this.onboarding === view) this.onboarding = null;
   }
-  unregisterActivity(view) {
-    if (this.activity === view) this.activity = null;
-  }
   refreshOnboarding() {
     this.onboarding?.refresh();
-  }
-  refreshActivity() {
-    this.activity?.refresh();
   }
 };
 
 // src/main.ts
 var CONFLICT_SWEEP_DEBOUNCE_MS = 2e3;
 var SHOW_AUTHORS_KEY = "showAuthors";
-var HavemindPlugin = class extends import_obsidian16.Plugin {
+var HavemindPlugin = class extends import_obsidian19.Plugin {
   constructor() {
     super(...arguments);
     __publicField(this, "activityOptions", {});
@@ -25970,7 +26245,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
      * Set true in `onunload`. `startConnection` runs on `onLayoutReady` and awaits
      * an async connection build; if the plugin is disabled while that await is in
      * flight, `onunload` runs first and the resolved handle must be stopped, never
-     * assigned — otherwise its vault listeners and running sync loop leak with no
+     * assigned, otherwise its vault listeners and running sync loop leak with no
      * `stop()` ever reaching them.
      */
     __publicField(this, "unloaded", false);
@@ -25989,7 +26264,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     /**
      * True once the server reported this invitation is dead (owner rejected the
      * device or the 3-attempt cap was reached). Shows the "ask for a new invite"
-     * screen instead of the waiting screen — never offline, never a blank form.
+     * screen instead of the waiting screen, never offline, never a blank form.
      */
     __publicField(this, "guestInvitationInvalid", false);
     __publicField(this, "connectionStatus", "disconnected");
@@ -25997,7 +26272,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     __publicField(this, "connectionError");
     /** Lifecycle-safe bridge between long-lived plugin state and short-lived leaves. */
     __publicField(this, "views", new PluginViewRegistry());
-    /** Live feed behind the Activity view (previously orphaned — now wired). */
+    /** Live feed behind the Activity view (previously orphaned, now wired). */
     __publicField(this, "activityLog", new ActivityLog());
     /** Disposer for the activityLog subscription set up in onload(); torn down in onunload(). */
     __publicField(this, "activityLogUnsubscribe", null);
@@ -26009,7 +26284,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     __publicField(this, "rosterMembers", []);
     /**
      * F9 Rejoin (owner side). Membership ids the owner has asserted are dead
-     * (pilot heuristic — no server liveness signal yet, see renderRejoinRoster):
+     * (pilot heuristic, no server liveness signal yet, see renderRejoinRoster):
      * their roster rows draw as disconnected and offer Rejoin.
      */
     __publicField(this, "deadMembershipIds", []);
@@ -26029,7 +26304,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
      * (`startConnection`/`connectFromInput` assign a handle). The invitee rejoin
      * poll captures it when it arms; a poll tick that sees the counter has advanced
      * knows the connection was rebuilt since it armed (Retry now, a fresh user
-     * connect, a rejoin restart) and must not tear that healthy connection down —
+     * connect, a rejoin restart) and must not tear that healthy connection down,
      * see `pollRejoinOnce` (FINDING 1b).
      */
     __publicField(this, "connectGeneration", 0);
@@ -26037,11 +26312,13 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     __publicField(this, "rejoinArmedGeneration", null);
     /**
      * Guards a user-initiated "Retry now" so a rapid double-click never spawns a
-     * second connection build while the first is still in flight — two live
+     * second connection build while the first is still in flight, two live
      * handles could otherwise be created (one would leak). Cleared once the retry
      * settles.
      */
     __publicField(this, "retryInFlight", false);
+    /** Abort signals for all connection builds that are still awaiting onboarding I/O. */
+    __publicField(this, "connectionAttemptAborters", /* @__PURE__ */ new Set());
     /**
      * Guards the user-initiated "Reset connection" (P1 #5) so a double-click can
      * never run two overlapping clear-and-rewrite passes over `data.json`.
@@ -26055,7 +26332,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     __publicField(this, "conflictResolver", null);
     /**
      * The live durable sync state (SND-01 + MRG-05), captured from the connection
-     * handle. Null when disconnected — the send-queue panel then renders nothing
+     * handle. Null when disconnected, the send-queue panel then renders nothing
      * and the sweep is a no-op.
      */
     __publicField(this, "syncState", null);
@@ -26071,7 +26348,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     __publicField(this, "conflictSweepTimer", null);
     /**
      * Serialises sweep runs AND re-arms one more pass when a trigger arrives
-     * mid-run — so a conflict copy written while a sweep is in flight is not
+     * mid-run, so a conflict copy written while a sweep is in flight is not
      * dropped (MINOR); the guarded no-op used to leave it un-swept.
      */
     __publicField(this, "conflictSweepGuard", new RerunGuard(
@@ -26079,7 +26356,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     ));
     /**
      * F6 author overlay: whether "Show authors" is on for this vault. OFF by
-     * default — attribution decoration changes how every note looks, so it is
+     * default, attribution decoration changes how every note looks, so it is
      * opt-in. Persisted under `showAuthors` in `data.json` through the shared
      * plugin-data mutex; a data.json that cannot be read leaves the flag
      * session-only rather than blocking load.
@@ -26099,21 +26376,16 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       onRestore: (revisionId) => this.handleRestore(revisionId)
     };
     this.activityLogUnsubscribe = this.activityLog.subscribe(() => {
-      this.views.refreshActivity();
       this.views.refreshOnboarding();
-    });
-    this.registerView(HAVEMIND_ACTIVITY_VIEW, (leaf) => {
-      const view = new HavemindActivityView(leaf, {
-        ...this.activityOptions,
-        onClosed: () => this.views.unregisterActivity(view)
-      });
-      this.views.registerActivity(view);
-      return view;
     });
     this.registerView(HAVEMIND_ONBOARDING_VIEW, (leaf) => {
       const view = new HavemindOnboardingView(leaf, {
+        // A phone joins vaults, it does not run them: hosting needs Docker, a
+        // terminal and a machine that stays awake. The entry chooser drops the
+        // host branch there rather than walking the user to a dead end.
+        canHost: !import_obsidian19.Platform.isMobileApp,
         // The activity feed is a section of this pane now, not a separate
-        // destination (plans/007 Stage 0) — same providers the standalone
+        // destination (plans/007 Stage 0), same providers the standalone
         // Activity view reads, so the two can never disagree.
         activityFeedProvider: () => this.activityOptions.feedProvider?.() ?? [],
         onRestore: (revisionId) => this.handleRestore(revisionId),
@@ -26141,13 +26413,13 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
         recoveryRequiredProvider: () => this.syncState?.isRecoveryRequired() ?? false,
         onRetrySend: (revisionId) => {
           void this.retrySend(revisionId).catch(() => {
-            new import_obsidian16.Notice("Havemind: could not retry this queued change.");
+            new import_obsidian19.Notice("Havemind: could not retry this queued change.");
             this.views.refreshOnboarding();
           });
         },
         onDiscardSend: (revisionId) => {
           void this.discardSend(revisionId).catch(() => {
-            new import_obsidian16.Notice("Havemind: could not discard this queued change.");
+            new import_obsidian19.Notice("Havemind: could not discard this queued change.");
             this.views.refreshOnboarding();
           });
         },
@@ -26279,6 +26551,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
   }
   onunload() {
     this.unloaded = true;
+    this.abortConnectionAttempts();
     this.disarmRejoin();
     if (this.conflictSweepTimer !== null) {
       globalThis.clearTimeout(this.conflictSweepTimer);
@@ -26400,28 +26673,35 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       this.connectionStatus = "offline";
       this.connectionError = "Havemind could not start syncing. Try reconnecting.";
       this.setStatus(formatStatusBar({ status: "offline" }));
-      new import_obsidian16.Notice("Havemind: could not start syncing. Try reconnecting.");
+      new import_obsidian19.Notice("Havemind: could not start syncing. Try reconnecting.");
       this.views.refreshOnboarding();
     }
   }
   /** The fallible connection build, kept separate from the UI-facing boundary. */
   async startConnectionOnce() {
-    await this.loadRoster();
-    const handle = await startHavemindConnection(
-      this,
-      (status, view) => this.handleStatus(status, view),
-      this.activityHooks()
-    );
-    if (this.unloaded || this.connection !== null) {
-      handle.stop();
-      return;
+    const attempt = this.beginConnectionAttempt();
+    try {
+      await this.loadRoster();
+      if (attempt.signal.aborted) return;
+      const handle = await startHavemindConnection(
+        this,
+        (status, view) => this.handleStatus(status, view),
+        this.activityHooks(),
+        attempt.signal
+      );
+      if (this.unloaded || this.connection !== null) {
+        handle.stop();
+        return;
+      }
+      this.connection = handle;
+      this.syncState = handle.state ?? null;
+      this.connectGeneration += 1;
+      this.adoptSelfMembership(this.connection);
+      void this.restorePendingApprovals();
+      this.scheduleConflictSweep();
+    } finally {
+      this.connectionAttemptAborters.delete(attempt);
     }
-    this.connection = handle;
-    this.syncState = handle.state ?? null;
-    this.connectGeneration += 1;
-    this.adoptSelfMembership(this.connection);
-    void this.restorePendingApprovals();
-    this.scheduleConflictSweep();
   }
   /** Runtime hooks handed to the sync loop so live surfaces stay fed. */
   activityHooks() {
@@ -26436,7 +26716,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       // refreshes the panel at once, so the phantom failure disappears.
       onSendQueueChanged: () => this.views.refreshOnboarding(),
       // MINOR 7: commit-recovery already showed a Notice for this failed-to-queue
-      // row, so record its id as notified — the panel's quarantine-notice check
+      // row, so record its id as notified, the panel's quarantine-notice check
       // then skips it, preventing a duplicate Notice for the same event.
       onFailedToQueueNotified: (revisionId) => this.notifiedQuarantineIds.add(revisionId)
     };
@@ -26451,7 +26731,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
   handleRestore(revisionId) {
     const self = this.rosterMembers.find((member) => member.self);
     if (self === void 0) {
-      new import_obsidian16.Notice("Havemind: connect before restoring a revision.");
+      new import_obsidian19.Notice("Havemind: connect before restoring a revision.");
       return;
     }
     const history = activityEntriesToRecords(
@@ -26466,7 +26746,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       newRevisionId: globalThis.crypto.randomUUID()
     });
     if (entry === null) {
-      new import_obsidian16.Notice("Havemind: could not restore that revision.");
+      new import_obsidian19.Notice("Havemind: could not restore that revision.");
       return;
     }
     this.activityLog.record(entry);
@@ -26490,7 +26770,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     try {
       return await this.openConflictModalOnce(copyPath);
     } catch {
-      new import_obsidian16.Notice("Havemind: could not open this conflict. Try again.");
+      new import_obsidian19.Notice("Havemind: could not open this conflict. Try again.");
       this.views.refreshOnboarding();
       return null;
     }
@@ -26518,13 +26798,13 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       void resolver.resolve(copy, action).then(
         (outcome) => {
           if (outcome === "vanished") {
-            new import_obsidian16.Notice("This conflict was already auto-resolved.");
+            new import_obsidian19.Notice("This conflict was already auto-resolved.");
           }
           modal2.close();
           this.views.refreshOnboarding();
         },
         () => {
-          new import_obsidian16.Notice("Havemind: could not resolve this conflict. Try again.");
+          new import_obsidian19.Notice("Havemind: could not resolve this conflict. Try again.");
           this.views.refreshOnboarding();
         }
       );
@@ -26551,7 +26831,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       role: self.role,
       self: true
     }).catch(() => {
-      new import_obsidian16.Notice("Havemind: could not save this device in the member roster.");
+      new import_obsidian19.Notice("Havemind: could not save this device in the member roster.");
       this.views.refreshOnboarding();
     });
   }
@@ -26569,7 +26849,6 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
   async recordRosterMember(member) {
     this.rosterMembers = await this.rosterStore().recordMember(member);
     this.views.refreshOnboarding();
-    this.views.refreshActivity();
   }
   /**
    * Drives the Connect form: classifies the pasted input (invitation envelope or
@@ -26578,47 +26857,55 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
    * logged.
    */
   async connectFromInput(input, serverUrl, report) {
-    this.guestInvitationInvalid = false;
-    const previousConnection = this.connection;
-    const handle = await connectFromInput(this, input, serverUrl, {
-      report,
-      onStatus: (status, view) => this.handleStatus(status, view),
-      hooks: this.activityHooks(),
-      // Durably record the waiting state so a pane reopen resumes the waiting
-      // screen (with the code) instead of a blank paste form.
-      onPendingApproval: (verificationPhrase) => {
-        this.awaitingApproval = { verificationPhrase };
-        this.views.refreshOnboarding();
-      },
-      // The owner rejected the device or the attempt cap was reached: leave the
-      // waiting screen for the terminal "invitation invalid" screen. This is an
-      // expected auth response, not a connection loss — status is untouched.
-      onInvitationRejected: () => {
-        this.awaitingApproval = null;
-        this.guestInvitationInvalid = true;
-        this.views.refreshOnboarding();
-      }
-    });
-    if (handle !== null) {
-      if (this.unloaded || this.connection !== previousConnection) {
-        handle.stop();
-        return;
-      }
-      previousConnection?.stop();
-      this.awaitingApproval = null;
+    const attempt = this.beginConnectionAttempt();
+    try {
       this.guestInvitationInvalid = false;
-      this.connection = handle;
-      this.syncState = handle.state ?? null;
-      this.connectGeneration += 1;
-      this.adoptSelfMembership(handle);
-      this.scheduleConflictSweep();
+      const previousConnection = this.connection;
+      const handle = await connectFromInput(this, input, serverUrl, {
+        report,
+        onStatus: (status, view) => this.handleStatus(status, view),
+        hooks: this.activityHooks(),
+        // Durably record the waiting state so a pane reopen resumes the waiting
+        // screen (with the code) instead of a blank paste form.
+        onPendingApproval: (verificationPhrase) => {
+          if (attempt.signal.aborted || this.unloaded) return;
+          this.awaitingApproval = { verificationPhrase };
+          this.views.refreshOnboarding();
+        },
+        // The owner rejected the device or the attempt cap was reached: leave the
+        // waiting screen for the terminal "invitation invalid" screen. This is an
+        // expected auth response, not a connection loss, status is untouched.
+        onInvitationRejected: () => {
+          if (attempt.signal.aborted || this.unloaded) return;
+          this.awaitingApproval = null;
+          this.guestInvitationInvalid = true;
+          this.views.refreshOnboarding();
+        },
+        signal: attempt.signal
+      });
+      if (handle !== null) {
+        if (this.unloaded || this.connection !== previousConnection) {
+          handle.stop();
+          return;
+        }
+        previousConnection?.stop();
+        this.awaitingApproval = null;
+        this.guestInvitationInvalid = false;
+        this.connection = handle;
+        this.syncState = handle.state ?? null;
+        this.connectGeneration += 1;
+        this.adoptSelfMembership(handle);
+        this.scheduleConflictSweep();
+      }
+    } finally {
+      this.connectionAttemptAborters.delete(attempt);
     }
   }
   /**
    * Command-palette "Sync now": force an immediate cycle instead of waiting for
    * the loop's own schedule. The connection handle exposes no direct sync entry
-   * point, so this reuses the panel's "Retry now" path — stop the running loop,
-   * start a fresh one — which is exactly the forced cycle the button performs.
+   * point, so this reuses the panel's "Retry now" path, stop the running loop,
+   * start a fresh one, which is exactly the forced cycle the button performs.
    *
    * The palette greys the command out while nothing is connected, so this guard
    * is the belt to that braces: a direct invocation explains itself rather than
@@ -26626,13 +26913,14 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
    */
   async syncNow() {
     if (this.connection === null) {
-      new import_obsidian16.Notice("Havemind: connect before syncing.");
+      new import_obsidian19.Notice("Havemind: connect before syncing.");
       return;
     }
     await this.retryConnection();
   }
   /** Stops the live sync loop; the paste form returns so the user can reconnect. */
   disconnect() {
+    this.abortConnectionAttempts();
     this.connection?.stop();
     this.connection = null;
     this.syncState = null;
@@ -26645,6 +26933,18 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     this.setStatus(formatStatusBar({ status: "disconnected" }));
     this.views.refreshOnboarding();
   }
+  /** Starts a tracked connection build; all live attempts are cancelled on teardown. */
+  beginConnectionAttempt() {
+    const attempt = new AbortController();
+    this.connectionAttemptAborters.add(attempt);
+    return attempt;
+  }
+  abortConnectionAttempts() {
+    for (const attempt of this.connectionAttemptAborters) {
+      attempt.abort();
+    }
+    this.connectionAttemptAborters.clear();
+  }
   /** Updates the status bar and live Connect indicator from a cycle status. */
   handleStatus(status, view) {
     this.connectionStatus = status;
@@ -26656,7 +26956,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       this.connectionError = void 0;
     }
     if (status === "reconnect-required") {
-      this.connectionError = "The server refused the session \u2014 reconnect.";
+      this.connectionError = "The server refused the session, reconnect.";
       void this.armRejoin();
     }
     this.checkQuarantineNotices();
@@ -26688,7 +26988,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
   /**
    * Retry a quarantined send. A server-rejected send (SND-01) re-enqueues its
    * stashed envelope through the outbox. A failed-to-queue row (SND-02, MAJOR 2)
-   * has no envelope — it never reached the outbox — so Retry re-runs the commit
+   * has no envelope, it never reached the outbox, so Retry re-runs the commit
    * chain for the path against the current on-disk content; if the file has
    * since been deleted, surface a Notice and drop the stale row instead of
    * pushing a phantom empty create for a vanished file.
@@ -26711,7 +27011,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       return;
     }
     if (fallback.kind === "discard-dead-letter") {
-      new import_obsidian16.Notice(fallback.notice);
+      new import_obsidian19.Notice(fallback.notice);
       await this.syncState?.discardQuarantined(revisionId);
     }
     this.views.refreshOnboarding();
@@ -26727,8 +27027,8 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
    * Re-run the commit chain for `path` from disk (the MAJOR 2 recovery for a row
    * with no usable stashed envelope). FINDING 1: the retry outcome is tri-state.
    * Only a CONFIRMED-missing file drops the row; `unavailable` (debouncer
-   * disposed) and a null/uncallable connection — the common state for a durable
-   * row after a restart, before reconnect — keep the row and tell the user to
+   * disposed) and a null/uncallable connection, the common state for a durable
+   * row after a restart, before reconnect, keep the row and tell the user to
    * reconnect, so a real unsynced change is never silently discarded.
    * `discardOnRetrigger` drops the row immediately after a real re-trigger for a
    * superseded server-rejected row (MAJOR 4); a failed-to-queue row keeps its
@@ -26737,7 +27037,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
   async retryFromDisk(revisionId, path, options) {
     const outcome = this.connection?.retryFailedCommit?.(path);
     const effect = planRetryFromDisk(outcome, path, options.discardOnRetrigger);
-    if (effect.notice !== null) new import_obsidian16.Notice(effect.notice);
+    if (effect.notice !== null) new import_obsidian19.Notice(effect.notice);
     if (effect.discard) await this.syncState?.discardQuarantined(revisionId);
     this.views.refreshOnboarding();
   }
@@ -26748,7 +27048,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
   }
   /**
    * SND-01: emit one Notice per item the FIRST time it enters quarantine. A
-   * retry that re-quarantines the same revision is silent — its id is already in
+   * retry that re-quarantines the same revision is silent, its id is already in
    * `notifiedQuarantineIds`. Discarding then re-quarantining a NEW revision for
    * the same file does notify, which is correct: it is a distinct failed send.
    */
@@ -26768,8 +27068,8 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     this.notifiedQuarantineIds = new Set(next);
     for (const item of fresh) {
       const label = item.path ?? item.fileId;
-      new import_obsidian16.Notice(
-        `A change to ${label} could not be sent \u2014 see the Havemind panel.`
+      new import_obsidian19.Notice(
+        `A change to ${label} could not be sent, see the Havemind panel.`
       );
     }
   }
@@ -26787,7 +27087,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     this.conflictSweepTimer = globalThis.setTimeout(() => {
       this.conflictSweepTimer = null;
       void this.runConflictSweep().catch(() => {
-        new import_obsidian16.Notice("Havemind: automatic conflict repair could not finish.");
+        new import_obsidian19.Notice("Havemind: automatic conflict repair could not finish.");
         this.views.refreshOnboarding();
       });
     }, CONFLICT_SWEEP_DEBOUNCE_MS);
@@ -26813,7 +27113,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       baseHashFor: (fileId) => state.baseHashFor(fileId),
       hashContent: (content) => hashPlaintext(content),
       notify: (message) => {
-        new import_obsidian16.Notice(`Havemind: ${message}`);
+        new import_obsidian19.Notice(`Havemind: ${message}`);
       }
     });
     this.views.refreshOnboarding();
@@ -26825,7 +27125,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
   /**
    * Owner action (pilot heuristic): assert a connected contact has fallen off so
    * their row offers Rejoin. No server liveness signal reaches the owner yet, so
-   * "disconnected" is owner-driven — see renderRejoinRoster.
+   * "disconnected" is owner-driven, see renderRejoinRoster.
    */
   markMemberDisconnected(membershipId) {
     if (!this.deadMembershipIds.includes(membershipId)) {
@@ -26842,20 +27142,20 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     try {
       const waiting = await requestRejoinGrantForOwner(this, { membershipId });
       if (waiting === null) {
-        new import_obsidian16.Notice("Havemind: connect as the vault owner before rejoining a member.");
+        new import_obsidian19.Notice("Havemind: connect as the vault owner before rejoining a member.");
         return;
       }
       this.rejoinWaiting = /* @__PURE__ */ new Set([...this.rejoinWaiting, membershipId]);
       this.views.refreshOnboarding();
     } catch (error51) {
-      new import_obsidian16.Notice(
-        `Havemind: could not request rejoin \u2014 ${error51 instanceof Error ? error51.message : "unexpected error"}`
+      new import_obsidian19.Notice(
+        `Havemind: could not request rejoin, ${error51 instanceof Error ? error51.message : "unexpected error"}`
       );
     }
   }
   /**
    * Owner action: permanently remove a member from the vault. Revokes the
-   * membership server-side (append-only — the member's past revisions and
+   * membership server-side (append-only, the member's past revisions and
    * attribution survive; their sessions are burned and they are terminally
    * locked out), then drops the member from the local roster and clears any
    * dead/waiting markers so no stale Rejoin affordance lingers. This is a
@@ -26870,7 +27170,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     try {
       const removed = await revokeMembershipForOwner(this, { membershipId });
       if (removed === null) {
-        new import_obsidian16.Notice(
+        new import_obsidian19.Notice(
           "Havemind: connect as the vault owner before removing a member."
         );
         return;
@@ -26882,18 +27182,17 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       this.rejoinWaiting = new Set(
         [...this.rejoinWaiting].filter((id) => id !== membershipId)
       );
-      new import_obsidian16.Notice(`Removed ${displayName} from the vault.`);
+      new import_obsidian19.Notice(`Removed ${displayName} from the vault.`);
       this.views.refreshOnboarding();
-      this.views.refreshActivity();
     } catch (error51) {
-      new import_obsidian16.Notice(
-        `Havemind: could not remove member \u2014 ${error51 instanceof Error ? error51.message : "unexpected error"}`
+      new import_obsidian19.Notice(
+        `Havemind: could not remove member, ${error51 instanceof Error ? error51.message : "unexpected error"}`
       );
     }
   }
   /**
    * Invitee side: arm the rejoin poll after a terminal auth failure. Idempotent
-   * — a second terminal status while a poll is already armed is a no-op, so the
+   *, a second terminal status while a poll is already armed is a no-op, so the
    * poll is never doubled. Builds the controller from this device's persisted
    * (membershipId, deviceId); if none is stored there is nothing to rejoin with.
    */
@@ -26970,9 +27269,9 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
    */
   surfaceRejoinFailed() {
     this.disarmRejoin();
-    this.connectionError = "Rejoin failed \u2014 the server rejected the automatic rejoin. Reconnect manually to resume syncing.";
+    this.connectionError = "Rejoin failed, the server rejected the automatic rejoin. Reconnect manually to resume syncing.";
     this.setStatus(formatStatusBar({ status: "reconnect-required" }));
-    new import_obsidian16.Notice(
+    new import_obsidian19.Notice(
       "Havemind: rejoin failed. Reconnect manually to resume syncing."
     );
     this.views.refreshOnboarding();
@@ -27014,7 +27313,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
    *
    * FINDING 1a: disarm any armed invitee rejoin poll BEFORE restarting. Leaving
    * it armed lets a stale 30 s tick fire against the connection this retry just
-   * rebuilt — attempt() → 'syncing' → stop + restart — thrashing a healthy
+   * rebuilt, attempt() → 'syncing' → stop + restart, thrashing a healthy
    * connection up to 30 s after the user fixed it. The fallback is not lost: if
    * the restart lands back in reconnect-required, `handleStatus` re-arms the poll
    * from scratch.
@@ -27069,12 +27368,12 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
       this.lastSyncedAt = void 0;
       this.connectionError = void 0;
       this.setStatus(formatStatusBar({ status: "disconnected" }));
-      new import_obsidian16.Notice(
+      new import_obsidian19.Notice(
         "Havemind: connection reset. Paste a new invitation or pairing token to connect."
       );
     } catch (error51) {
-      new import_obsidian16.Notice(
-        `Havemind: could not reset the connection \u2014 ${error51 instanceof Error ? error51.message : "unexpected error"}`
+      new import_obsidian19.Notice(
+        `Havemind: could not reset the connection, ${error51 instanceof Error ? error51.message : "unexpected error"}`
       );
     } finally {
       this.resetInFlight = false;
@@ -27139,7 +27438,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     this.showAuthors = !this.showAuthors;
     this.authorOverlayChosen = true;
     this.app.workspace.updateOptions?.();
-    new import_obsidian16.Notice(
+    new import_obsidian19.Notice(
       `Havemind: author overlay ${this.showAuthors ? "on" : "off"}. Reading view updates on its next render.`
     );
     void this.persistAuthorOverlayFlag();
@@ -27167,7 +27466,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     }
   }
   /**
-   * Overlay input for one file, honestly degraded to whole-file attribution —
+   * Overlay input for one file, honestly degraded to whole-file attribution,
    * see `attribution/overlay-source.ts` for why per-line is not derivable yet.
    */
   overlayInputFor(path, content) {
@@ -27205,7 +27504,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
    * Owner action: mint an invitation for the connected vault, reveal the
    * copyable envelope, and register the joining device in the waiting list so
    * the owner can approve it by clicking a row (never by typing a UUID). The
-   * envelope (a secret) is rendered only for the owner to copy — never logged.
+   * envelope (a secret) is rendered only for the owner to copy, never logged.
    */
   async createInvitation(role, name, report) {
     try {
@@ -27244,7 +27543,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
    * Closes the owner composer and returns to the connection panel. Clearing
    * `connectionActive` is what makes Done a real exit: `render()` gives the
    * composer priority and returns before drawing the status indicator, so
-   * leaving the composer open would hide "Connected — synced" indefinitely and
+   * leaving the composer open would hide "Connected, synced" indefinitely and
    * read as if the vault had disconnected.
    */
   dismissInvitation() {
@@ -27263,7 +27562,7 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     if (item === null) return;
     item.empty();
     const glyph = item.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian16.setIcon)(glyph, "hexagon");
+    (0, import_obsidian19.setIcon)(glyph, "hexagon");
     item.createEl("span", { text: view.text });
   }
   /** Supplies the Activity view with a live feed and a restore action. */
@@ -27271,8 +27570,8 @@ var HavemindPlugin = class extends import_obsidian16.Plugin {
     this.activityOptions = options;
   }
   /**
-   * The single door into the plugin (plans/007 Stage 0). Every entry point —
-   * the ribbon hexagon, `open-activity`, `connect` — resolves here, so the user
+   * The single door into the plugin (plans/007 Stage 0). Every entry point,
+   * the ribbon hexagon, `open-activity`, `connect`, resolves here, so the user
    * never has to know which of two panes holds the thing they want. `openView`
    * reuses an existing leaf, so asking twice focuses the pane rather than
    * opening a second copy of it.
