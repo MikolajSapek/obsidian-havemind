@@ -25169,7 +25169,9 @@ function defaultFormatTimestamp3(timestamp) {
 }
 function buildActivityViewModel(records, options = {}) {
   const format = options.formatTimestamp ?? defaultFormatTimestamp3;
-  const rows = buildActivityFeed(records).map(
+  const ordered = buildActivityFeed(records);
+  const visible = options.limit === void 0 ? ordered : ordered.slice(0, options.limit);
+  const rows = visible.map(
     (entry) => ({
       revisionId: entry.revisionId,
       fileId: entry.fileId,
@@ -25190,14 +25192,15 @@ var EMPTY_ACTIVITY_TEXT = "No activity yet. Connect to a vault to see changes as
 var DEFAULT_ACTIVITY_ROW_LIMIT = 60;
 function renderActivityRows(content, options) {
   const model = buildActivityViewModel(options.feed, {
-    formatTimestamp: formatActivityTime
+    formatTimestamp: formatActivityTime,
+    limit: options.limit ?? DEFAULT_ACTIVITY_ROW_LIMIT
   });
   if (model.empty) {
     const empty = content.createDiv({ text: EMPTY_ACTIVITY_TEXT });
     empty.addClass("havemind-empty");
     return 0;
   }
-  const rows = model.rows.slice(0, options.limit ?? DEFAULT_ACTIVITY_ROW_LIMIT);
+  const rows = model.rows;
   for (const row of rows) {
     const entry = content.createDiv();
     entry.addClass("havemind-activity-row");
