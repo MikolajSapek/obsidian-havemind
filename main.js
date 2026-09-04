@@ -25187,6 +25187,7 @@ function buildActivityViewModel(records, options = {}) {
 
 // src/ui/activity-section.ts
 var EMPTY_ACTIVITY_TEXT = "No activity yet. Connect to a vault to see changes as they happen.";
+var DEFAULT_ACTIVITY_ROW_LIMIT = 60;
 function renderActivityRows(content, options) {
   const model = buildActivityViewModel(options.feed, {
     formatTimestamp: formatActivityTime
@@ -25196,7 +25197,7 @@ function renderActivityRows(content, options) {
     empty.addClass("havemind-empty");
     return 0;
   }
-  const rows = options.limit === void 0 ? model.rows : model.rows.slice(0, options.limit);
+  const rows = model.rows.slice(0, options.limit ?? DEFAULT_ACTIVITY_ROW_LIMIT);
   for (const row of rows) {
     const entry = content.createDiv();
     entry.addClass("havemind-activity-row");
