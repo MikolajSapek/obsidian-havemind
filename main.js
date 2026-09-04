@@ -18579,6 +18579,7 @@ var SYNCABLE_BINARY_EXTENSIONS = [
   "pdf"
 ];
 var MAX_BINARY_FILE_BYTES = 25 * 1024 * 1024;
+var BASE64_CHUNK_BYTES = 8192;
 var LocalVaultError = class extends Error {
   constructor(code, message) {
     super(message);
@@ -18938,8 +18939,10 @@ function pathUnderFolder(path, folderPrefix) {
 }
 function bytesToBase642(bytes) {
   let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
+  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_BYTES) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + BASE64_CHUNK_BYTES)
+    );
   }
   return btoa(binary);
 }
