@@ -17639,6 +17639,25 @@ function createObsidianConflictPort(vault) {
   };
 }
 
+// src/runtime/conflict-cache.ts
+var CachedConflictList = class {
+  constructor(scan) {
+    __publicField(this, "scan", scan);
+    __publicField(this, "cached", null);
+  }
+  /** The current list, scanning only if the vault has moved since the last read. */
+  read() {
+    if (this.cached !== null) return this.cached;
+    const fresh = this.scan();
+    this.cached = fresh;
+    return fresh;
+  }
+  /** Drops the cached list; the next read rescans. */
+  invalidate() {
+    this.cached = null;
+  }
+};
+
 // src/runtime/send-queue-status.ts
 var DEFAULT_STALE_THRESHOLD_MS = 3e4;
 function buildSendQueueStatus(input) {
@@ -25799,6 +25818,42 @@ function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
   return { focusTabOnRender: state.focusTabOnRender };
 }
 
+// src/ui/screens/repaint-scheduler.ts
+var REPAINT_WINDOW_MS = 50;
+var RepaintScheduler = class {
+  constructor(render) {
+    __publicField(this, "render", render);
+    __publicField(this, "pending", null);
+    __publicField(this, "stopped", false);
+  }
+  /** Queues a repaint, folding into one already queued. */
+  request() {
+    if (this.stopped || this.pending !== null) return;
+    this.pending = setTimeout(() => {
+      this.pending = null;
+      if (!this.stopped) this.render();
+    }, REPAINT_WINDOW_MS);
+  }
+  /** Repaints immediately, dropping anything queued. */
+  now() {
+    this.cancel();
+    if (!this.stopped) this.render();
+  }
+  /**
+   * Permanently quiesces the scheduler. A repaint queued a moment before the
+   * pane closed would otherwise write into a dead DOM.
+   */
+  stop() {
+    this.stopped = true;
+    this.cancel();
+  }
+  cancel() {
+    if (this.pending === null) return;
+    clearTimeout(this.pending);
+    this.pending = null;
+  }
+};
+
 // src/ui/screens/guest-invalid.ts
 var import_obsidian15 = require("obsidian");
 function renderGuestInvalid(content, ownerName, actions) {
@@ -26013,6 +26068,8 @@ var HavemindOnboardingView = class extends import_obsidian17.ItemView {
      * re-render must not move focus.
      */
     __publicField(this, "focusTabOnRender", false);
+    /** Folds a burst of repaint requests into one render (see the module). */
+    __publicField(this, "repaints", new RepaintScheduler(() => this.render()));
     /**
      * Which entry path the user picked on the connect screen (design 1d).
      * `undecided` shows the chooser; a typed token or a `havemind-join` URI
@@ -26036,11 +26093,32 @@ var HavemindOnboardingView = class extends import_obsidian17.ItemView {
     this.render();
   }
   onClose() {
+    this.repaints.stop();
     this.options.onClosed?.();
   }
-  /** Re-renders from the current panel state, called on every status change. */
+  /**
+   * Repaints at once, for a change the user just caused by tapping something.
+   *
+   * A tap has to answer immediately: coalescing is for events arriving FROM the
+   * server, where nobody is waiting on a specific frame.
+   */
+  /**
+   * Re-renders from the current panel state, called on every status change.
+   *
+   * COALESCED, and that is the point. 36 call sites reach this, and every
+   * repaint reads the conflict provider, which scans the whole vault. On a
+   * desktop that is invisible; on a phone, catching up after a reconnect fires
+   * these in bursts and the pane freezes mid-tap. A burst inside one window
+   * therefore produces one render.
+   *
+   * `onOpen()` still calls `render()` directly: a pane blank for a frame is
+   * worse than one that repaints once too often.
+   */
+  refreshNow() {
+    this.repaints.now();
+  }
   refresh() {
-    this.render();
+    this.repaints.request();
   }
   render() {
     const content = this.containerEl.children[1];
@@ -26232,6 +26310,18 @@ var PluginViewRegistry = class {
   refreshOnboarding() {
     this.onboarding?.refresh();
   }
+  /**
+   * Repaints the pane at once, for a change the user just caused by tapping.
+   *
+   * `refreshOnboarding` coalesces, which is right for events arriving from the
+   * server but wrong for a tap: nobody is waiting on a specific frame there,
+   * and here somebody is.
+   */
+  refreshOnboardingNow() {
+    const view = this.onboarding;
+    if (view?.refreshNow !== void 0) view.refreshNow();
+    else view?.refresh();
+  }
 };
 
 // src/main.ts
@@ -26298,6 +26388,13 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
      * so unload tears the poll down. Null when no rejoin is armed.
      */
     __publicField(this, "rejoinController", null);
+    /**
+     * The conflict scan, cached between vault changes. The pane reads it twice
+     * per render and repaints often; each scan walks the whole vault.
+     */
+    __publicField(this, "conflicts", new CachedConflictList(
+      () => listConflictCopies(this.conflictPort())
+    ));
     __publicField(this, "rejoinPollTimer", null);
     /** Guards the post-rejoin restart so it fires exactly once (no double-start). */
     __publicField(this, "rejoinRestarted", false);
@@ -26407,7 +26504,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         guestWaitingProvider: () => this.awaitingApproval,
         guestInvalidProvider: () => this.guestInvitationInvalid,
         panelProvider: () => this.connectionPanel(),
-        conflictsProvider: () => listConflictCopies(this.conflictPort()),
+        conflictsProvider: () => this.conflicts.read(),
         onResolveConflict: (copyPath) => {
           void this.openConflictModal(copyPath);
         },
@@ -26416,13 +26513,13 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         onRetrySend: (revisionId) => {
           void this.retrySend(revisionId).catch(() => {
             new import_obsidian19.Notice("Havemind: could not retry this queued change.");
-            this.views.refreshOnboarding();
+            this.views.refreshOnboardingNow();
           });
         },
         onDiscardSend: (revisionId) => {
           void this.discardSend(revisionId).catch(() => {
             new import_obsidian19.Notice("Havemind: could not discard this queued change.");
-            this.views.refreshOnboarding();
+            this.views.refreshOnboardingNow();
           });
         },
         rejoinRosterProvider: () => this.rejoinRosterView(),
@@ -26437,7 +26534,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         onConnect: (input, serverUrl, report) => {
           void this.connectFromInput(input, serverUrl, report).catch(() => {
             report("Could not connect. Check the invitation, pairing token, and server URL.");
-            this.views.refreshOnboarding();
+            this.views.refreshOnboardingNow();
           });
         },
         onDisconnect: () => this.disconnect(),
@@ -26547,6 +26644,16 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.arrivedWithInvitation = true;
       void this.openView(HAVEMIND_ONBOARDING_VIEW);
     });
+    for (const event of ["create", "delete", "rename"]) {
+      const { vault } = this.app;
+      const ref = vault.on?.(event, () => {
+        this.conflicts.invalidate();
+        this.views.refreshOnboarding();
+      });
+      if (ref !== void 0 && ref !== null) {
+        this.registerEvent(ref);
+      }
+    }
     this.app.workspace.onLayoutReady(() => {
       void this.startConnection();
     });
@@ -26567,7 +26674,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
   }
   openConnectView() {
     this.connectionActive = false;
-    this.views.refreshOnboarding();
+    this.views.refreshOnboardingNow();
     return this.openView(HAVEMIND_ONBOARDING_VIEW);
   }
   /**
@@ -26578,7 +26685,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     this.connectionActive = true;
     this.connectionNotice = void 0;
     this.connectionNoticeKind = void 0;
-    this.views.refreshOnboarding();
+    this.views.refreshOnboardingNow();
     return this.openView(HAVEMIND_ONBOARDING_VIEW);
   }
   /** Returns from the owner composer without discarding an already-minted invite. */
@@ -26586,7 +26693,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     this.connectionActive = false;
     this.connectionNotice = void 0;
     this.connectionNoticeKind = void 0;
-    this.views.refreshOnboarding();
+    this.views.refreshOnboardingNow();
   }
   /** Snapshot of the owner composer state for the unified panel. */
   composerModel() {
@@ -26645,7 +26752,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.connectionNotice = connectedMessage;
       this.connectionNoticeKind = "success";
       report(connectedMessage);
-      this.views.refreshOnboarding();
+      this.views.refreshOnboardingNow();
     } catch (error51) {
       if (error51 instanceof ApproveDeviceError && error51.locked) {
         this.pendingApprovals = this.pendingApprovals.filter(
@@ -26654,7 +26761,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         this.connectionNotice = "This invitation is now invalid. Create a new one above to try again.";
         this.connectionNoticeKind = void 0;
         report(error51.message);
-        this.views.refreshOnboarding();
+        this.views.refreshOnboardingNow();
         return;
       }
       if (error51 instanceof ApproveDeviceError) {
