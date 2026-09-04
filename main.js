@@ -24987,6 +24987,7 @@ function renderEntryChooser(content, options) {
   head.createEl("span", { text: model.heading, cls: "havemind-pane-title" });
   content.createDiv({ text: model.subheading }).addClass("havemind-entry-subheading");
   content.createDiv({ text: model.question }).addClass("havemind-hint");
+  content.addClass("havemind-view-scrolls");
   const list = content.createDiv();
   list.addClass("havemind-entry-options");
   for (const option of model.options) {
@@ -25005,6 +25006,7 @@ function renderHostPath(content, options) {
   back.onClickEvent(() => options.onBack());
   content.createEl("h4", { text: model.heading });
   content.createDiv({ text: model.subheading }).addClass("havemind-entry-subheading");
+  content.addClass("havemind-view-scrolls");
   const list = content.createDiv();
   list.addClass("havemind-host-steps");
   model.steps.forEach((step, index) => {
