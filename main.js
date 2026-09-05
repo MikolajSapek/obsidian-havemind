@@ -26986,7 +26986,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         onPendingApproval: (verificationPhrase) => {
           if (attempt.signal.aborted || this.unloaded) return;
           this.awaitingApproval = { verificationPhrase };
-          this.views.refreshOnboarding();
+          this.views.refreshOnboardingNow();
         },
         // The owner rejected the device or the attempt cap was reached: leave the
         // waiting screen for the terminal "invitation invalid" screen. This is an
@@ -26995,7 +26995,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
           if (attempt.signal.aborted || this.unloaded) return;
           this.awaitingApproval = null;
           this.guestInvitationInvalid = true;
-          this.views.refreshOnboarding();
+          this.views.refreshOnboardingNow();
         },
         signal: attempt.signal
       });
@@ -27047,7 +27047,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     this.awaitingApproval = null;
     this.guestInvitationInvalid = false;
     this.setStatus(formatStatusBar({ status: "disconnected" }));
-    this.views.refreshOnboarding();
+    this.views.refreshOnboardingNow();
   }
   /** Starts a tracked connection build; all live attempts are cancelled on teardown. */
   beginConnectionAttempt() {
@@ -27155,12 +27155,12 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     const effect = planRetryFromDisk(outcome, path, options.discardOnRetrigger);
     if (effect.notice !== null) new import_obsidian19.Notice(effect.notice);
     if (effect.discard) await this.syncState?.discardQuarantined(revisionId);
-    this.views.refreshOnboarding();
+    this.views.refreshOnboardingNow();
   }
   /** Permanently discard a quarantined send (SND-01). */
   async discardSend(revisionId) {
     await this.syncState?.discardQuarantined(revisionId);
-    this.views.refreshOnboarding();
+    this.views.refreshOnboardingNow();
   }
   /**
    * SND-01: emit one Notice per item the FIRST time it enters quarantine. A
@@ -27262,7 +27262,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         return;
       }
       this.rejoinWaiting = /* @__PURE__ */ new Set([...this.rejoinWaiting, membershipId]);
-      this.views.refreshOnboarding();
+      this.views.refreshOnboardingNow();
     } catch (error51) {
       new import_obsidian19.Notice(
         `Havemind: could not request rejoin, ${error51 instanceof Error ? error51.message : "unexpected error"}`
@@ -27299,7 +27299,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         [...this.rejoinWaiting].filter((id) => id !== membershipId)
       );
       new import_obsidian19.Notice(`Removed ${displayName} from the vault.`);
-      this.views.refreshOnboarding();
+      this.views.refreshOnboardingNow();
     } catch (error51) {
       new import_obsidian19.Notice(
         `Havemind: could not remove member, ${error51 instanceof Error ? error51.message : "unexpected error"}`
@@ -27320,7 +27320,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     } catch {
       if (!this.unloaded) {
         this.connectionError = "Havemind could not prepare reconnection. Pair again if this persists.";
-        this.views.refreshOnboarding();
+        this.views.refreshOnboardingNow();
       }
       return;
     }
@@ -27647,7 +27647,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       ];
       this.connectionNotice = "Invitation created. Copy it and send it to the other device.";
       this.connectionNoticeKind = void 0;
-      this.views.refreshOnboarding();
+      this.views.refreshOnboardingNow();
     } catch (error51) {
       report(
         `Could not create invitation: ${error51 instanceof Error ? error51.message : "unexpected error"}`
@@ -27667,7 +27667,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     this.connectionActive = false;
     this.connectionNotice = void 0;
     this.connectionNoticeKind = void 0;
-    this.views.refreshOnboarding();
+    this.views.refreshOnboardingNow();
   }
   /** Stores the created invitation so the onboarding view can display it. */
   setPendingInvitation(invitation) {
