@@ -18482,15 +18482,39 @@ function createConfigApplyReloader(options) {
 
 // src/runtime/adapters/request-url.ts
 var import_obsidian2 = require("obsidian");
+
+// src/runtime/adapters/request-timeout.ts
+var REQUEST_TIMEOUT_MS = 6e4;
+var RequestTimeoutError = class extends Error {
+  constructor(ms) {
+    super(`Request timed out after ${ms}ms`);
+    __publicField(this, "name", "RequestTimeoutError");
+  }
+};
+async function withRequestTimeout(request, ms = REQUEST_TIMEOUT_MS) {
+  let timer;
+  const expiry = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new RequestTimeoutError(ms)), ms);
+  });
+  try {
+    return await Promise.race([request, expiry]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+}
+
+// src/runtime/adapters/request-url.ts
 function createRequestUrlFn() {
   return async (options) => {
-    const response = await (0, import_obsidian2.requestUrl)({
-      url: options.url,
-      method: options.method,
-      throw: false,
-      ...options.headers === void 0 ? {} : { headers: options.headers },
-      ...options.body === void 0 ? {} : { body: options.body }
-    });
+    const response = await withRequestTimeout(
+      (0, import_obsidian2.requestUrl)({
+        url: options.url,
+        method: options.method,
+        throw: false,
+        ...options.headers === void 0 ? {} : { headers: options.headers },
+        ...options.body === void 0 ? {} : { body: options.body }
+      })
+    );
     return {
       status: response.status,
       text: response.text,
