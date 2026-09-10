@@ -21,7 +21,7 @@
 
 Share one Obsidian vault with the people you trust. Each person keeps a normal
 local copy while a server **you** control relays changes, keeps history, and
-records who changed what. No Havemind cloud, no account with us, no telemetry.
+records who changed what. No Havemind cloud, no account, no telemetry.
 
 ---
 
@@ -41,11 +41,8 @@ Tailscale and the plugin.
 
 ## Install
 
-**From the Obsidian catalogue.** Settings → Community plugins → Browse →
-search **Havemind** → Install → Enable.
-
-**With BRAT**, while a release is under review: add
-`MikolajSapek/obsidian-havemind` as a beta plugin.
+Settings → Community plugins → Browse → search **Havemind** → Install →
+Enable.
 
 ## Quick start
 
