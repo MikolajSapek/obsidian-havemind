@@ -100,21 +100,21 @@ Enable.
 
 Whether you are connected, when the last sync landed, and over what network.
 
-<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/pane-status.png" alt="The Havemind pane on the Status tab, showing Connected and synced, the time of the last sync, and that the connection runs over a private Tailscale network" width="100%">
+<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/pane-status.png" alt="Havemind on a MacBook: the Status tab shows Connected and synced, the time of the last sync, and that the connection runs over a private Tailscale network" width="100%">
 
 ### People
 
 Everyone in the vault, their role, and whether they are connected right now.
 Invite someone from the same place.
 
-<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/pane-people.png" alt="The Havemind pane on the People tab, listing the vault owner and two connected editors with an Invite someone action" width="100%">
+<img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/pane-people.png" alt="Havemind on a MacBook: the People tab lists the vault owner and two connected editors, with an Invite someone action" width="100%">
 
 ### On a phone
 
 The same pane, full screen, with touch targets and safe areas sized for it.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/pane-mobile.png" alt="Havemind running full screen on an iPhone, showing Connected and synced" width="320">
+  <img src="https://raw.githubusercontent.com/MikolajSapek/obsidian-havemind/main/assets/pane-mobile.png" alt="Havemind running full screen on an iPhone, showing Connected and synced" width="380">
 </p>
 
 ## Commands
