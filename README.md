@@ -59,17 +59,24 @@ Enable.
    turns green when it works.
 5. **Invite someone.** **People → Invite someone**, and send them the
    invitation. It works once.
-6. **Approve their device.** They read a **6-digit code** aloud to you and you
-   type it in. Three attempts. Do this by voice, never by message: that
-   handshake is what binds their identity.
+6. **Approve their device.** Your pane shows *A device wants to join* with six
+   digits. Ask them to read out the digits on their screen. If they match,
+   press **They match, approve**. Do this by voice, never by message: that
+   comparison is what binds their identity, and approving gives the device
+   full read and write access.
 
 ### If you are joining someone else's vault
 
-1. Install Tailscale, log in, accept their invitation to the tailnet.
-2. Install the Havemind plugin.
-3. Open the invitation they sent you.
-4. Your device shows a **6-digit code**. Read it aloud to the owner on a call.
-5. Once they approve, the vault syncs and appears like any other vault.
+1. **Install Tailscale**, log in, and accept their invitation to the tailnet.
+2. **Install the Havemind plugin** and enable it.
+3. **Open the Havemind pane** and choose *Someone sent me an invitation*.
+4. **Paste the invitation** they sent you and press **Connect**. It is valid
+   for 15 minutes and works once.
+5. **Read the six digits aloud.** Your screen shows them and says who invited
+   you. The owner sees the same six on their side and confirms they match. If
+   they do not match, stop: someone else is trying to join.
+6. **Wait.** The screen updates itself. Once the owner approves, the vault
+   syncs and appears like any other vault.
 
 ## Key features
 
@@ -90,9 +97,9 @@ Enable.
   `.obsidian/` is in scope, and never `.obsidian/plugins/`.
 - 👥 **Presence roster and rejoin.** See who is connected; if a session dies,
   one click re-admits a known contact with no new code exchange.
-- 🔐 **Human-verified onboarding.** Joining needs a 6-digit code shown only on
-  the joining device and read aloud. Identity is bound server-side at approval
-  and never trusted from the client afterwards.
+- 🔐 **Human-verified onboarding.** Both devices show the same six digits; the
+  joiner reads them aloud and the owner confirms they match. Identity is bound
+  server-side at approval and never trusted from the client afterwards.
 
 ## What it looks like
 
@@ -167,9 +174,10 @@ members. **It does not provide end-to-end encryption:** the server stores synced
 content in plaintext. Do not connect a vault to a server you do not trust, and
 do not expose the server to the public internet.
 
-Joining is human-verified: a 6-digit code is shown only on the joining device
-and read aloud to the owner, who has three attempts to enter it. Identity is
-bound server-side at approval and never trusted from the client afterwards.
+Joining is human-verified: both devices display the same six digits, the
+joiner reads them aloud, and the owner approves only if they match. An
+invitation is valid for 15 minutes and can be redeemed once. Identity is bound
+server-side at approval and never trusted from the client afterwards.
 
 ## Troubleshooting
 
