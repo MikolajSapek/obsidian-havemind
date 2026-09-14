@@ -15120,7 +15120,15 @@ function mergeText(ancestor, local, remote, options = {}) {
 }
 function mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regionEnd) {
   const inRegion = (hunk) => hunk.oStart < regionEnd && hunk.oStart + hunk.oLength > regionStart;
-  const balanced = (hunks) => hunks.filter(inRegion).every((hunk) => hunk.oLength > 0 && hunk.oLength === hunk.abLength);
+  const balanced = (hunks) => hunks.filter(inRegion).every((hunk) => (
+    // One ancestor line in, one replacement line out, so the walk below can
+    // attribute each line to exactly one side.
+    hunk.oLength > 0 && hunk.oLength === hunk.abLength && // Wholly inside the region. A hunk that straddles the boundary has part
+    // of its replacement outside the span this function rebuilds, and that
+    // part would simply vanish (CI counterexample: ancestor "b\n", local
+    // "# h\n- a", remote "b\nfoo" lost "foo").
+    hunk.oStart >= regionStart && hunk.oStart + hunk.oLength <= regionEnd
+  ));
   if (!balanced(localHunks) || !balanced(remoteHunks)) {
     return null;
   }
@@ -15136,7 +15144,10 @@ function mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regi
       return null;
     }
     const own = local ?? remote;
-    if (own.abLength === 0 && regionHasOppositeChange(local !== void 0 ? remoteHunks : localHunks, regionStart, regionEnd)) {
+    if (regionHasOppositeChange(local !== void 0 ? remoteHunks : localHunks, own.oStart, own.oStart + own.oLength)) {
+      return null;
+    }
+    if (own.abLength === 0) {
       return null;
     }
     if (local === void 0 && remote === void 0) {
