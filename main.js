@@ -15105,7 +15105,11 @@ function mergeText(ancestor, local, remote, options = {}) {
     } else if (linesEqual(localSegment, remoteSegment)) {
       merged.push(...localSegment);
     } else {
-      return { status: "conflict" };
+      const disjoint = mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regionEnd);
+      if (disjoint === null) {
+        return { status: "conflict" };
+      }
+      merged.push(...disjoint);
     }
     oCursor = regionEnd;
   }
@@ -15113,6 +15117,52 @@ function mergeText(ancestor, local, remote, options = {}) {
     merged.push(o[line]);
   }
   return { status: "merged", text: merged.join("\n") };
+}
+function mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regionEnd) {
+  const inRegion = (hunk) => hunk.oStart < regionEnd && hunk.oStart + hunk.oLength > regionStart;
+  const balanced = (hunks) => hunks.filter(inRegion).every((hunk) => hunk.oLength > 0 && hunk.oLength === hunk.abLength);
+  if (!balanced(localHunks) || !balanced(remoteHunks)) {
+    return null;
+  }
+  if (insertionsIn(localHunks, regionStart, regionEnd).length > 0 || insertionsIn(remoteHunks, regionStart, regionEnd).length > 0) {
+    return null;
+  }
+  const out = [];
+  let line = regionStart;
+  while (line < regionEnd) {
+    const local = hunkCovering(localHunks, line);
+    const remote = hunkCovering(remoteHunks, line);
+    if (local !== void 0 && remote !== void 0) {
+      return null;
+    }
+    const own = local ?? remote;
+    if (own.abLength === 0 && regionHasOppositeChange(local !== void 0 ? remoteHunks : localHunks, regionStart, regionEnd)) {
+      return null;
+    }
+    if (local === void 0 && remote === void 0) {
+      out.push(o[line]);
+      line += 1;
+      continue;
+    }
+    const hunk = local ?? remote;
+    const source = local !== void 0 ? a : b;
+    if (hunk.oStart >= line) {
+      for (let k = 0; k < hunk.abLength; k += 1) {
+        out.push(source[hunk.abStart + k]);
+      }
+    }
+    line = hunk.oStart + hunk.oLength;
+  }
+  return out;
+}
+function insertionsIn(hunks, regionStart, regionEnd) {
+  return hunks.filter((hunk) => hunk.oLength === 0 && hunk.oStart >= regionStart && hunk.oStart <= regionEnd);
+}
+function hunkCovering(hunks, line) {
+  return hunks.find((hunk) => line >= hunk.oStart && line < hunk.oStart + hunk.oLength);
+}
+function regionHasOppositeChange(hunks, regionStart, regionEnd) {
+  return hunks.some((hunk) => hunk.oStart < regionEnd && hunk.oStart + hunk.oLength > regionStart);
 }
 
 // ../../node_modules/diff/libesm/diff/base.js
