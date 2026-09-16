@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.4.14-8257e6" alt="Version 1.4.14">
+  <img src="https://img.shields.io/badge/version-1.4.15-8257e6" alt="Version 1.4.15">
   <img src="https://img.shields.io/badge/licence-Apache--2.0-8257e6" alt="Apache 2.0">
   <img src="https://img.shields.io/badge/Obsidian-1.11.4%2B-8257e6" alt="Obsidian 1.11.4 or newer">
   <img src="https://img.shields.io/badge/desktop%20%2B%20mobile-8257e6" alt="Desktop and mobile">

@@ -24337,6 +24337,13 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
   const selfMembership = connection.memberId === void 0 ? void 0 : { membershipId: connection.memberId, role: extras.role ?? "editor" };
   return {
     ...selfMembership === void 0 ? {} : { selfMembership },
+    getAccessToken: async () => {
+      try {
+        return await accessProvider.getAccessToken();
+      } catch {
+        return null;
+      }
+    },
     // The live durable state, so the plugin can read the send-queue (SND-01) and
     // drive the auto-repair sweep (MRG-05) off the same store the runner uses.
     state,
@@ -24718,7 +24725,46 @@ function parseMember2(value, selfMembershipId) {
     self
   };
 }
+function parseMembersPayload(json2, selfMembershipId) {
+  const members = isRecord19(json2) ? json2.members : void 0;
+  if (!Array.isArray(members)) {
+    throw new MemberRosterError("The member roster response was malformed.");
+  }
+  return members.map((entry) => parseMember2(entry, selfMembershipId));
+}
+function hasMembershipIds(json2) {
+  const members = isRecord19(json2) ? json2.members : void 0;
+  if (!Array.isArray(members) || members.length === 0) {
+    return Array.isArray(members);
+  }
+  return members.every(
+    (entry) => isRecord19(entry) && typeof entry.membershipId === "string"
+  );
+}
 async function fetchMemberRoster(options) {
+  if (options.vaultId !== null && options.getAccessToken !== void 0) {
+    const accessToken = await options.getAccessToken();
+    if (accessToken !== null) {
+      const bearerResponse = await options.requestUrl({
+        url: `${options.apiBaseUrl}/vaults/${options.vaultId}/members`,
+        method: "GET",
+        headers: { Authorization: `Bearer ${accessToken}` },
+        throw: false
+      });
+      if (bearerResponse.status >= 200 && bearerResponse.status < 300) {
+        if (hasMembershipIds(bearerResponse.json)) {
+          return parseMembersPayload(
+            bearerResponse.json,
+            options.selfMembershipId
+          );
+        }
+      } else if (bearerResponse.status !== 401 && bearerResponse.status !== 403) {
+        throw new MemberRosterError(
+          `The member roster request returned HTTP ${bearerResponse.status}.`
+        );
+      }
+    }
+  }
   const refreshToken = await options.getRefreshToken();
   if (refreshToken === null) {
     throw new MemberRosterError(
@@ -24737,11 +24783,7 @@ async function fetchMemberRoster(options) {
       `The member roster request returned HTTP ${response.status}.`
     );
   }
-  const members = isRecord19(response.json) ? response.json.members : void 0;
-  if (!Array.isArray(members)) {
-    throw new MemberRosterError("The member roster response was malformed.");
-  }
-  return members.map((entry) => parseMember2(entry, options.selfMembershipId));
+  return parseMembersPayload(response.json, options.selfMembershipId);
 }
 
 // src/runtime/remove-member.ts
@@ -24950,8 +24992,30 @@ async function fetchMemberRosterForVault(plugin, options) {
     clientInstanceId,
     secretStorage: plugin.app.secretStorage
   });
+  let getAccessToken = options.getAccessToken;
+  if (getAccessToken === void 0) {
+    const accessProvider = new RefreshTokenAccessProvider({
+      requestUrl: createRequestUrlFn(),
+      apiBaseUrl: connected.apiBaseUrl,
+      getRefreshToken: () => secrets.getRefreshToken(),
+      saveRefreshToken: (value) => secrets.saveRefreshToken(value),
+      generateRotationId: generateRotationIdValue,
+      generateSuccessorToken: generateRefreshTokenValue,
+      loadPendingRotation: () => secrets.getPendingRotation(),
+      savePendingRotation: (record2) => secrets.savePendingRotation(record2),
+      clearPendingRotation: () => secrets.clearPendingRotation()
+    });
+    getAccessToken = async () => {
+      try {
+        return await accessProvider.getAccessToken();
+      } catch {
+        return null;
+      }
+    };
+  }
   return fetchMemberRoster({
     apiBaseUrl: connected.apiBaseUrl,
+    getAccessToken,
     getRefreshToken: () => secrets.getRefreshToken(),
     requestUrl: createRequestUrlFn(),
     selfMembershipId: options.selfMembershipId,
@@ -26314,7 +26378,12 @@ function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
         }
       })
     ),
-    onSelectTab: callbacks.setActiveTab
+    onSelectTab: (id, viaKeyboard) => {
+      callbacks.setActiveTab(id, viaKeyboard);
+      if (id === "people") {
+        options.onPeopleVisible?.();
+      }
+    }
   });
   return { focusTabOnRender: state.focusTabOnRender };
 }
@@ -26875,6 +26944,8 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
      * data.json (endpoint-free). Never derived from sync activity.
      */
     __publicField(this, "rosterMembers", []);
+    /** Serializes roster reads so a slow older response cannot win a race. */
+    __publicField(this, "rosterRefreshTail", Promise.resolve());
     /**
      * F9 Rejoin (owner side). Membership ids the owner has asserted are dead
      * (pilot heuristic, no server liveness signal yet, see renderRejoinRoster):
@@ -26996,6 +27067,9 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         arrivedWithInvitationProvider: () => this.arrivedWithInvitation,
         onOpenComposer: () => {
           void this.openCreateConnectionView();
+        },
+        onPeopleVisible: () => {
+          void this.refreshRoster();
         },
         onCloseComposer: () => this.closeCreateConnectionView(),
         onSyncNow: () => {
@@ -27253,6 +27327,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.connectionNotice = connectedMessage;
       this.connectionNoticeKind = "success";
       report(connectedMessage);
+      void this.refreshRoster();
       this.views.refreshOnboardingNow();
     } catch (error51) {
       if (error51 instanceof ApproveDeviceError && error51.locked) {
@@ -27469,10 +27544,18 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
    * blanking the People pane. The next connect or reconnect retries.
    */
   async refreshRoster() {
-    const self = this.rosterMembers.find((member) => member.self);
+    const refresh = this.rosterRefreshTail.then(
+      () => this.fetchAndPersistRoster()
+    );
+    this.rosterRefreshTail = refresh;
+    return refresh;
+  }
+  async fetchAndPersistRoster() {
+    const selfMembershipId = this.connection?.selfMembership?.membershipId ?? this.rosterMembers.find((member) => member.self)?.membershipId ?? null;
     try {
       const members = await fetchMemberRosterForVault(this, {
-        selfMembershipId: self?.membershipId ?? null
+        selfMembershipId,
+        ...this.connection?.getAccessToken === void 0 ? {} : { getAccessToken: this.connection.getAccessToken }
       });
       if (members === null || this.unloaded) return;
       this.rosterMembers = await this.rosterStore().replaceMembers(members);
