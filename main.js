@@ -20863,6 +20863,7 @@ async function driveToConnected(options) {
     );
     if (resumed === CANCELLED) return { phase: "cancelled" };
     state = resumed;
+    options.onPhase?.(state.phase);
     if (state.phase === "connected" || state.phase === "rejected") {
       return state;
     }
@@ -23342,6 +23343,10 @@ var SyncRunner = class {
       if (page.snapshot !== true || page.events.length === 0) {
         break;
       }
+      const pageHigh = lastSequence(page.events);
+      if (pageHigh <= scanCursor) {
+        break;
+      }
       collected.push(...page.events);
       scanCursor = lastSequence(collected);
       complete = page.complete === true;
@@ -24358,7 +24363,7 @@ var APPROVAL_POLL_INTERVAL_MS = 5e3;
 var MAX_CONNECT_STEPS = 720;
 var OWNER_DEVICE_LABEL = "Havemind owner device";
 var INVITEE_DEVICE_LABEL = "Havemind device";
-async function startHavemindConnection(plugin, onStatus, hooks, signal) {
+async function startHavemindConnection(plugin, onStatus, hooks, signal, onPhase) {
   const gate = await evaluateOwnerConnection(plugin);
   if (gate.kind === "reset-required") {
     try {
@@ -24386,7 +24391,8 @@ async function startHavemindConnection(plugin, onStatus, hooks, signal) {
     sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
     pollIntervalMs: APPROVAL_POLL_INTERVAL_MS,
     maxSteps: MAX_CONNECT_STEPS,
-    ...signal === void 0 ? {} : { signal }
+    ...signal === void 0 ? {} : { signal },
+    ...onPhase === void 0 ? {} : { onPhase }
   });
   if (!isConnectedOnboardingState(connectedState)) {
     onStatus("disconnected", HAVEMIND_STATUS_DISCONNECTED);
@@ -24476,7 +24482,8 @@ async function connectAsInvitee(plugin, envelope, options) {
     sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
     pollIntervalMs: APPROVAL_POLL_INTERVAL_MS,
     maxSteps: MAX_CONNECT_STEPS,
-    ...options.signal === void 0 ? {} : { signal: options.signal }
+    ...options.signal === void 0 ? {} : { signal: options.signal },
+    ...options.onPhase === void 0 ? {} : { onPhase: options.onPhase }
   });
   if (state.phase === "rejected") {
     options.report(
@@ -25260,6 +25267,7 @@ function renderGuestWaitingScreen(content, model, actions = {}) {
   }
   content.createDiv({ text: view.liveNote }).addClass("havemind-hint");
   const cancel = content.createEl("button", { text: "Cancel" });
+  cancel.addClass("havemind-handshake-cancel");
   cancel.onClickEvent(() => actions.onCancel?.());
 }
 
@@ -27289,7 +27297,8 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         this,
         (status, view) => this.handleStatus(status, view),
         this.activityHooks(),
-        attempt.signal
+        attempt.signal,
+        (phase) => this.leaveHandshake(phase)
       );
       if (this.unloaded || this.connection !== null) {
         handle.stop();
@@ -27507,6 +27516,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
           this.guestInvitationInvalid = true;
           this.views.refreshOnboardingNow();
         },
+        onPhase: (phase) => this.leaveHandshake(phase),
         signal: attempt.signal
       });
       if (handle !== null) {
@@ -27523,6 +27533,10 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         this.adoptSelfMembership(handle);
         void this.refreshRoster();
         this.scheduleConflictSweep();
+        this.views.refreshOnboardingNow();
+      } else if (!attempt.signal.aborted && !this.unloaded) {
+        this.awaitingApproval = null;
+        this.views.refreshOnboardingNow();
       }
     } finally {
       this.connectionAttemptAborters.delete(attempt);
@@ -27558,6 +27572,23 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     this.awaitingApproval = null;
     this.guestInvitationInvalid = false;
     this.setStatus(formatStatusBar({ status: "disconnected" }));
+    this.views.refreshOnboardingNow();
+  }
+  /**
+   * Drops the six-digit waiting screen as soon as approval or bootstrap starts.
+   * The first vault pull still runs after that, so files appear in the vault
+   * while the pane would otherwise stay on the handshake with no Havemind
+   * buttons.
+   */
+  leaveHandshake(phase) {
+    if (this.unloaded || this.awaitingApproval === null) return;
+    if (phase === "pending-approval" || phase === "idle" || phase === "cancelled") {
+      return;
+    }
+    this.awaitingApproval = null;
+    if (phase !== "rejected") {
+      this.connectionStatus = "syncing";
+    }
     this.views.refreshOnboardingNow();
   }
   /** Starts a tracked connection build; all live attempts are cancelled on teardown. */
