@@ -19870,7 +19870,12 @@ var VaultApplyAdapter = class {
     const onDisk = await this.files.readByPath(decoded.path);
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
-      if (onDisk !== null && contentMatches(onDisk, text)) {
+      const bootstrapVacant = origin === "bootstrap" && onDisk !== null && isVacantMarkdown(onDisk);
+      if (bootstrapVacant) {
+        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+        await this.files.forgetBaseHash(owner);
+        await this.files.forgetBaseContent(owner);
+      } else if (onDisk !== null && contentMatches(onDisk, text)) {
         const contentHash2 = await this.hashContent(text);
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
@@ -19887,14 +19892,14 @@ var VaultApplyAdapter = class {
           revisionId: event.revision.revisionId
         });
         return "noop";
-      }
-      if (!lastWriterWins) {
+      } else if (!lastWriterWins) {
         await this.writeConflict(event, decoded);
         return "conflict";
+      } else {
+        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+        await this.files.forgetBaseHash(owner);
+        await this.files.forgetBaseContent(owner);
       }
-      await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-      await this.files.forgetBaseHash(owner);
-      await this.files.forgetBaseContent(owner);
     }
     if (onDisk !== null) {
       if (contentMatches(onDisk, text)) {
@@ -19913,24 +19918,27 @@ var VaultApplyAdapter = class {
         return "noop";
       }
       const base = this.files.baseHashFor(fileId);
-      const onDiskHash = await this.hashContent(onDisk);
-      const diverged = base === null || onDiskHash !== base;
-      if (diverged || !await this.isCausalFastForward(fileId, event)) {
-        const merged = await this.tryMergeApply(
-          event,
-          decoded,
-          fileId,
-          onDisk,
-          text,
-          base,
-          origin
-        );
-        if (merged !== null) {
-          return merged;
-        }
-        if (!lastWriterWins) {
-          await this.writeConflict(event, decoded);
-          return "conflict";
+      if (origin === "bootstrap" && isBootstrapReplaceable(onDisk, base)) {
+      } else {
+        const onDiskHash = await this.hashContent(onDisk);
+        const diverged = base === null || onDiskHash !== base;
+        if (diverged || !await this.isCausalFastForward(fileId, event)) {
+          const merged = await this.tryMergeApply(
+            event,
+            decoded,
+            fileId,
+            onDisk,
+            text,
+            base,
+            origin
+          );
+          if (merged !== null) {
+            return merged;
+          }
+          if (!lastWriterWins) {
+            await this.writeConflict(event, decoded);
+            return "conflict";
+          }
         }
       }
     }
@@ -19946,23 +19954,26 @@ var VaultApplyAdapter = class {
     const preWriteOnDisk = await this.files.readByPath(decoded.path);
     if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, text)) {
       const preWriteBase = this.files.baseHashFor(fileId);
-      const preWriteHash = await this.hashContent(preWriteOnDisk);
-      if (preWriteBase === null || preWriteHash !== preWriteBase) {
-        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        const merged = await this.tryMergeApply(
-          event,
-          decoded,
-          fileId,
-          preWriteOnDisk,
-          text,
-          preWriteBase,
-          origin
-        );
-        if (merged !== null) {
-          return merged;
+      if (origin === "bootstrap" && isBootstrapReplaceable(preWriteOnDisk, preWriteBase)) {
+      } else {
+        const preWriteHash = await this.hashContent(preWriteOnDisk);
+        if (preWriteBase === null || preWriteHash !== preWriteBase) {
+          await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
+          const merged = await this.tryMergeApply(
+            event,
+            decoded,
+            fileId,
+            preWriteOnDisk,
+            text,
+            preWriteBase,
+            origin
+          );
+          if (merged !== null) {
+            return merged;
+          }
+          await this.writeConflict(event, decoded);
+          return "conflict";
         }
-        await this.writeConflict(event, decoded);
-        return "conflict";
       }
     }
     try {
@@ -20105,7 +20116,12 @@ var VaultApplyAdapter = class {
     const onDisk = await this.files.readBinaryByPath(decoded.path);
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
-      if (onDisk !== null && bytesEqual(onDisk, bytes)) {
+      const bootstrapVacant = origin === "bootstrap" && onDisk !== null && onDisk.byteLength === 0;
+      if (bootstrapVacant) {
+        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+        await this.files.forgetBaseHash(owner);
+        await this.files.forgetBaseContent(owner);
+      } else if (onDisk !== null && bytesEqual(onDisk, bytes)) {
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
         await this.files.recordPathOwner(fileId, decoded.path);
@@ -20119,14 +20135,14 @@ var VaultApplyAdapter = class {
           revisionId: event.revision.revisionId
         });
         return "noop";
-      }
-      if (!lastWriterWins) {
+      } else if (!lastWriterWins) {
         await this.writeConflict(event, decoded);
         return "conflict";
+      } else {
+        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+        await this.files.forgetBaseHash(owner);
+        await this.files.forgetBaseContent(owner);
       }
-      await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-      await this.files.forgetBaseHash(owner);
-      await this.files.forgetBaseContent(owner);
     }
     if (onDisk !== null) {
       if (bytesEqual(onDisk, bytes)) {
@@ -20143,14 +20159,17 @@ var VaultApplyAdapter = class {
         return "noop";
       }
       const base = this.files.baseHashFor(fileId);
-      const onDiskHash = await hashBlob(onDisk);
-      if (!lastWriterWins && (base === null || onDiskHash !== base)) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-      if (!lastWriterWins && !await this.isCausalFastForward(fileId, event)) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
+      if (origin === "bootstrap" && (base === null || onDisk.byteLength === 0)) {
+      } else {
+        const onDiskHash = await hashBlob(onDisk);
+        if (!lastWriterWins && (base === null || onDiskHash !== base)) {
+          await this.writeConflict(event, decoded);
+          return "conflict";
+        }
+        if (!lastWriterWins && !await this.isCausalFastForward(fileId, event)) {
+          await this.writeConflict(event, decoded);
+          return "conflict";
+        }
       }
     }
     await this.producerSync?.onRemoteWrite({
@@ -20164,11 +20183,14 @@ var VaultApplyAdapter = class {
     const preWriteOnDisk = await this.files.readBinaryByPath(decoded.path);
     if (preWriteOnDisk !== null && !lastWriterWins && !bytesEqual(preWriteOnDisk, bytes)) {
       const preWriteBase = this.files.baseHashFor(fileId);
-      const preWriteHash = await hashBlob(preWriteOnDisk);
-      if (preWriteBase === null || preWriteHash !== preWriteBase) {
-        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        await this.writeConflict(event, decoded);
-        return "conflict";
+      if (origin === "bootstrap" && (preWriteBase === null || preWriteOnDisk.byteLength === 0)) {
+      } else {
+        const preWriteHash = await hashBlob(preWriteOnDisk);
+        if (preWriteBase === null || preWriteHash !== preWriteBase) {
+          await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
+          await this.writeConflict(event, decoded);
+          return "conflict";
+        }
       }
     }
     try {
@@ -20275,6 +20297,12 @@ function bytesEqual(a, b) {
 }
 function contentMatches(onDisk, incoming) {
   return canonicalizeMarkdown(onDisk) === canonicalizeMarkdown(incoming);
+}
+function isVacantMarkdown(text) {
+  return canonicalizeMarkdown(text).trim().length === 0;
+}
+function isBootstrapReplaceable(onDisk, base) {
+  return base === null || isVacantMarkdown(onDisk);
 }
 
 // src/runtime/adapters/vault-file-port.ts
@@ -23243,11 +23271,21 @@ var SyncRunner = class {
   }
   async runPull() {
     let cursor = await this.options.state.loadCursor();
-    const { cursor: serverHead, events } = await this.options.transport.pull(cursor);
-    if (this.bootstrapTarget === null) {
+    const pulled = await this.options.transport.pull(
+      cursor,
+      cursor === 0 ? { snapshot: true } : void 0
+    );
+    const { cursor: serverHead, events } = pulled;
+    if (this.bootstrapTarget === null && serverHead > 0) {
       this.bootstrapTarget = serverHead;
     }
     const bootstrapTarget = this.bootstrapTarget;
+    if (cursor === 0 && pulled.snapshot === true && serverHead > 0) {
+      return this.runSnapshotBootstrap(pulled, serverHead);
+    }
+    if (cursor === 0 && bootstrapTarget !== null && bootstrapTarget > 0) {
+      return this.runCollapsedBootstrap(events, bootstrapTarget);
+    }
     const ordered = [...events].sort(
       (left, right) => left.serverSequence - right.serverSequence
     );
@@ -23262,37 +23300,20 @@ var SyncRunner = class {
       if (remoteEvent.serverSequence !== cursor + 1) {
         break;
       }
-      if (await this.options.state.isLocallyAuthored(remoteEvent.revision.revisionId)) {
-        suppressed += 1;
-        cursor = remoteEvent.serverSequence;
-        await this.options.state.saveCursor(cursor);
-        continue;
-      }
-      const buffers = await this.options.vault.openBuffers(
-        remoteEvent.revision.fileId
+      const outcome = await this.applyPulledEvent(
+        remoteEvent,
+        bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
       );
-      const decision = decideRemoteApply(
-        buffers,
-        remoteEvent.revision.contentHash
-      );
-      if (decision === "defer") {
+      if (outcome === "deferred") {
         deferred += 1;
         break;
       }
-      if (decision === "conflict") {
-        await this.options.vault.recordConflict(remoteEvent);
+      if (outcome === "suppressed") {
+        suppressed += 1;
+      } else if (outcome === "conflict") {
         conflicts += 1;
       } else {
-        const outcome = await this.options.vault.applyRemote(remoteEvent, {
-          // At or below the connect-time head → part of the initial catch-up, so
-          // its Activity entry is suppressed (baseline). Beyond it → a live edit.
-          bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
-        });
-        if (outcome === "conflict") {
-          conflicts += 1;
-        } else {
-          applied += 1;
-        }
+        applied += 1;
       }
       cursor = remoteEvent.serverSequence;
       await this.options.state.saveCursor(cursor);
@@ -23304,6 +23325,130 @@ var SyncRunner = class {
       status: resolveStatus({ conflicts, deferred }),
       suppressed
     };
+  }
+  /**
+   * Materialises a server-supplied snapshot of current file heads. Pages until
+   * `complete` (or an empty page) so a vault larger than one pull still lands
+   * as one all-or-nothing cursor jump.
+   */
+  async runSnapshotBootstrap(firstPage, serverHead) {
+    const collected = [...firstPage.events];
+    let scanCursor = lastSequence(collected);
+    let complete = firstPage.complete === true || firstPage.events.length === 0;
+    while (!complete && scanCursor < serverHead) {
+      const page = await this.options.transport.pull(scanCursor, {
+        snapshot: true
+      });
+      if (page.snapshot !== true || page.events.length === 0) {
+        break;
+      }
+      collected.push(...page.events);
+      scanCursor = lastSequence(collected);
+      complete = page.complete === true;
+    }
+    let applied = 0;
+    let conflicts = 0;
+    let deferred = 0;
+    let suppressed = 0;
+    for (const item of collected) {
+      const outcome = await this.applyPulledEvent(item, true);
+      if (outcome === "deferred") {
+        deferred += 1;
+        break;
+      }
+      if (outcome === "suppressed") suppressed += 1;
+      else if (outcome === "conflict") conflicts += 1;
+      else applied += 1;
+    }
+    if (deferred === 0) {
+      await this.options.state.saveCursor(serverHead);
+    }
+    return {
+      applied,
+      conflicts,
+      deferred,
+      status: resolveStatus({ conflicts, deferred }),
+      suppressed
+    };
+  }
+  /**
+   * Reads the complete cursor-zero bootstrap without touching the vault, then
+   * applies only revisions that are not a parent of another revision. The
+   * server's event cursor is the current head, while each page may be bounded;
+   * follow-up pulls advance an in-memory scan cursor until that fixed boundary.
+   */
+  async runCollapsedBootstrap(firstPage, serverHead) {
+    const collected = [];
+    let scanCursor = 0;
+    let page = firstPage;
+    while (scanCursor < serverHead) {
+      const ordered = [...page].sort(
+        (left, right) => left.serverSequence - right.serverSequence
+      );
+      let progressed = false;
+      for (const item of ordered) {
+        if (item.serverSequence <= scanCursor || item.serverSequence > serverHead) {
+          continue;
+        }
+        if (item.serverSequence !== scanCursor + 1) {
+          return emptyPullResult();
+        }
+        collected.push(item);
+        scanCursor = item.serverSequence;
+        progressed = true;
+      }
+      if (scanCursor >= serverHead) break;
+      if (!progressed) return emptyPullResult();
+      page = (await this.options.transport.pull(scanCursor)).events;
+    }
+    const supersededRevisionIds = /* @__PURE__ */ new Set();
+    for (const item of collected) {
+      for (const parentId of item.revision.parentRevisionIds ?? []) {
+        supersededRevisionIds.add(parentId);
+      }
+    }
+    const heads = collected.filter(
+      (item) => !supersededRevisionIds.has(item.revision.revisionId)
+    );
+    let applied = 0;
+    let conflicts = 0;
+    let deferred = 0;
+    let suppressed = 0;
+    for (const item of heads) {
+      const outcome = await this.applyPulledEvent(item, true);
+      if (outcome === "deferred") {
+        deferred += 1;
+        break;
+      }
+      if (outcome === "suppressed") suppressed += 1;
+      else if (outcome === "conflict") conflicts += 1;
+      else applied += 1;
+    }
+    if (deferred === 0) {
+      await this.options.state.saveCursor(serverHead);
+    }
+    return {
+      applied,
+      conflicts,
+      deferred,
+      status: resolveStatus({ conflicts, deferred }),
+      suppressed
+    };
+  }
+  /** Applies one pulled event without advancing the cursor. */
+  async applyPulledEvent(remoteEvent, bootstrap) {
+    if (await this.options.state.isLocallyAuthored(remoteEvent.revision.revisionId)) {
+      return "suppressed";
+    }
+    const buffers = await this.options.vault.openBuffers(remoteEvent.revision.fileId);
+    const decision = decideRemoteApply(buffers, remoteEvent.revision.contentHash);
+    if (decision === "defer") return "deferred";
+    if (decision === "conflict") {
+      await this.options.vault.recordConflict(remoteEvent);
+      return "conflict";
+    }
+    const outcome = await this.options.vault.applyRemote(remoteEvent, { bootstrap });
+    return outcome === "conflict" ? "conflict" : "applied";
   }
   scheduleBackoff() {
     if (this.stopped) {
@@ -23348,6 +23493,22 @@ function idleCycleResult() {
     deferred: 0,
     pushed: 0,
     quarantined: 0,
+    status: "synced",
+    suppressed: 0
+  };
+}
+function lastSequence(events) {
+  let highest = 0;
+  for (const event of events) {
+    if (event.serverSequence > highest) highest = event.serverSequence;
+  }
+  return highest;
+}
+function emptyPullResult() {
+  return {
+    applied: 0,
+    conflicts: 0,
+    deferred: 0,
     status: "synced",
     suppressed: 0
   };
@@ -23590,14 +23751,35 @@ var RequestUrlTransport = class {
     });
     return parsePushResponse(response);
   }
-  async pull(after) {
+  async pull(after, options) {
     const epoch = this.options.serverEpoch?.() ?? null;
-    const query = epoch === null ? `after=${after}` : `after=${after}&epoch=${encodeURIComponent(epoch)}`;
-    const response = await this.request({
-      method: "GET",
-      url: `${this.options.apiBaseUrl}/vaults/${this.options.vaultId}/events?${query}`
-    });
-    return parsePullResponse(response);
+    const params = [`after=${after}`];
+    if (epoch !== null) {
+      params.push(`epoch=${encodeURIComponent(epoch)}`);
+    }
+    if (options?.snapshot === true) {
+      params.push("snapshot=1");
+    }
+    try {
+      const response = await this.request({
+        method: "GET",
+        url: `${this.options.apiBaseUrl}/vaults/${this.options.vaultId}/events?${params.join("&")}`
+      });
+      return parsePullResponse(response);
+    } catch (error51) {
+      if (options?.snapshot === true && error51 instanceof RequestUrlTransportError && error51.permanent) {
+        const fallback = [`after=${after}`];
+        if (epoch !== null) {
+          fallback.push(`epoch=${encodeURIComponent(epoch)}`);
+        }
+        const response = await this.request({
+          method: "GET",
+          url: `${this.options.apiBaseUrl}/vaults/${this.options.vaultId}/events?${fallback.join("&")}`
+        });
+        return parsePullResponse(response);
+      }
+      throw error51;
+    }
   }
   async request(init) {
     const token = await this.options.getAuthToken();
@@ -23686,7 +23868,12 @@ function parsePullResponse(response) {
       }
     };
   });
-  return { cursor: body.cursor, events };
+  return {
+    cursor: body.cursor,
+    events,
+    ...body.snapshot === true ? { snapshot: true } : {},
+    ...body.complete === true ? { complete: true } : {}
+  };
 }
 function malformed(detail) {
   return new RequestUrlTransportError("malformed-response", detail);
@@ -24122,7 +24309,7 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     fileApplyLock
   );
   await runCanonicalizationRebase(plugin);
-  controller.start();
+  await controller.syncNow();
   let producer = null;
   if (hasPushIdentity) {
     producer = startPushProducer(
@@ -24141,6 +24328,7 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
       fileApplyLock
     );
   }
+  controller.start();
   const selfMembership = connection.memberId === void 0 ? void 0 : { membershipId: connection.memberId, role: extras.role ?? "editor" };
   return {
     ...selfMembership === void 0 ? {} : { selfMembership },
