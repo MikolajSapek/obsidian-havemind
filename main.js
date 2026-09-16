@@ -23022,6 +23022,37 @@ var DEFAULT_BASE_BACKOFF_MS = 5e3;
 var DEFAULT_MAX_BACKOFF_MS = 6e4;
 var DEFAULT_MAX_PUSH_BATCH_BYTES = 512 * 1024;
 var DEFAULT_MAX_PUSH_BATCH_ITEMS = 64;
+var DEFAULT_BOOTSTRAP_APPLY_CONCURRENCY = 8;
+async function mapPool(items, concurrency, worker) {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function runWorker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const item = items[index];
+      if (item === void 0) return;
+      results[index] = await worker(item);
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, () => runWorker()));
+  return results;
+}
+function tallyApplyOutcomes(outcomes) {
+  let applied = 0;
+  let conflicts = 0;
+  let deferred = 0;
+  let suppressed = 0;
+  for (const outcome of outcomes) {
+    if (outcome === "deferred") deferred += 1;
+    else if (outcome === "suppressed") suppressed += 1;
+    else if (outcome === "conflict") conflicts += 1;
+    else applied += 1;
+  }
+  return { applied, conflicts, deferred, suppressed };
+}
 function decideRemoteApply(buffers, incomingContentHash) {
   const divergent = buffers.filter(
     (buffer) => buffer.currentHash !== buffer.baseHash
@@ -23064,6 +23095,7 @@ var SyncRunner = class {
       random: options.random ?? Math.random,
       maxPushBatchBytes: options.maxPushBatchBytes ?? DEFAULT_MAX_PUSH_BATCH_BYTES,
       maxPushBatchItems: options.maxPushBatchItems ?? DEFAULT_MAX_PUSH_BATCH_ITEMS,
+      bootstrapApplyConcurrency: options.bootstrapApplyConcurrency ?? DEFAULT_BOOTSTRAP_APPLY_CONCURRENCY,
       ...options
     };
   }
@@ -23372,20 +23404,12 @@ var SyncRunner = class {
       scanCursor = lastSequence(collected);
       complete = page.complete === true;
     }
-    let applied = 0;
-    let conflicts = 0;
-    let deferred = 0;
-    let suppressed = 0;
-    for (const item of collected) {
-      const outcome = await this.applyPulledEvent(item, true);
-      if (outcome === "deferred") {
-        deferred += 1;
-        break;
-      }
-      if (outcome === "suppressed") suppressed += 1;
-      else if (outcome === "conflict") conflicts += 1;
-      else applied += 1;
-    }
+    const outcomes = await mapPool(
+      collected,
+      this.options.bootstrapApplyConcurrency,
+      (item) => this.applyPulledEvent(item, true)
+    );
+    const { applied, conflicts, deferred, suppressed } = tallyApplyOutcomes(outcomes);
     if (deferred === 0) {
       await this.options.state.saveCursor(serverHead);
     }
@@ -23436,20 +23460,12 @@ var SyncRunner = class {
     const heads = collected.filter(
       (item) => !supersededRevisionIds.has(item.revision.revisionId)
     );
-    let applied = 0;
-    let conflicts = 0;
-    let deferred = 0;
-    let suppressed = 0;
-    for (const item of heads) {
-      const outcome = await this.applyPulledEvent(item, true);
-      if (outcome === "deferred") {
-        deferred += 1;
-        break;
-      }
-      if (outcome === "suppressed") suppressed += 1;
-      else if (outcome === "conflict") conflicts += 1;
-      else applied += 1;
-    }
+    const outcomes = await mapPool(
+      heads,
+      this.options.bootstrapApplyConcurrency,
+      (item) => this.applyPulledEvent(item, true)
+    );
+    const { applied, conflicts, deferred, suppressed } = tallyApplyOutcomes(outcomes);
     if (deferred === 0) {
       await this.options.state.saveCursor(serverHead);
     }
