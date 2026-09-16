@@ -16709,6 +16709,22 @@ var DurableSyncState = class {
      * synchronous assignment, so any read sees a complete, consistent snapshot.
      */
     __publicField(this, "mutationTail", Promise.resolve());
+    /**
+     * Depth of nested {@link runBatched} sections. Above zero, `mutate` updates the
+     * in-memory cache but does NOT hit the persist port; the outermost section
+     * flushes once on the way out.
+     *
+     * Why: every `record*` call used to re-serialise the WHOLE blob, and the
+     * persist port turns one save into two full load+save round trips (stage, then
+     * promote) over a blob that itself grows with the vault, because it carries the
+     * base CONTENT of every note. Materialising N heads was therefore O(N) writes
+     * of an O(N) blob: a few hundred notes took twenty minutes to join on a phone,
+     * which is long enough for iOS to background the app mid-bootstrap and leave
+     * the half-applied state this batching also makes recoverable.
+     */
+    __publicField(this, "batchDepth", 0);
+    /** True when a `mutate` was swallowed by an open batch and still needs a flush. */
+    __publicField(this, "batchDirty", false);
     this.persist = options.persist;
     this.maxLocallyAuthored = options.maxLocallyAuthored ?? DEFAULT_MAX_LOCALLY_AUTHORED;
     this.now = options.now ?? (() => Date.now());
@@ -17145,8 +17161,41 @@ var DurableSyncState = class {
     }
     await this.persist.save(this.toDiskForm(this.cache));
   }
+  /**
+   * Runs `body` with persistence coalesced into ONE write at the end.
+   *
+   * Every mutation inside still updates the in-memory cache immediately, so
+   * readers (`fileIdAtPath`, `baseHashFor`, …) behave exactly as they do outside
+   * a batch and the on-disk result is identical, only the number of writes
+   * changes. Re-entrant: a nested call joins the outer batch and the flush
+   * happens once, when the outermost section exits.
+   *
+   * The flush also runs when `body` REJECTS, then the error is re-thrown. That
+   * is the important half for the bootstrap: an interrupted join must still
+   * durably record the heads it already materialised, or the next connect finds
+   * cursor zero over a populated vault and replays the whole history onto it.
+   */
+  async runBatched(body) {
+    this.batchDepth += 1;
+    try {
+      return await body();
+    } finally {
+      this.batchDepth -= 1;
+      if (this.batchDepth === 0 && this.batchDirty) {
+        this.batchDirty = false;
+        const current = this.cache;
+        if (current !== null) {
+          await this.persist.save(this.toDiskForm(current));
+        }
+      }
+    }
+  }
   async mutate(next) {
     this.cache = next;
+    if (this.batchDepth > 0) {
+      this.batchDirty = true;
+      return;
+    }
     await this.persist.save(this.toDiskForm(next));
   }
   /**
@@ -18270,6 +18319,7 @@ var LABELS = {
   offline: "Offline",
   conflict: "Conflict",
   deferred: "Waiting to apply",
+  unsent: "Changes not sent yet",
   "reconnect-required": "Reconnect required",
   "recovery-required": "Recovery required",
   "reset-required": "Reset required"
@@ -18279,6 +18329,7 @@ var RECOVERY_REQUIRED_DETAIL = "The local sync state is incomplete or inconsiste
 var NO_E2EE_NOTE = "Private Tailscale network only, no end-to-end encryption.";
 var PANE_NETWORK_NOTE = "Private Tailscale network \xB7 Encrypted in transit";
 var DEFERRED_DETAIL = "A change waits for an open note to settle before applying.";
+var UNSENT_DETAIL = "A local change is still queued to send and will retry automatically.";
 function connectionStatusFromCycle(status) {
   switch (status) {
     case "synced":
@@ -18291,6 +18342,10 @@ function connectionStatusFromCycle(status) {
     // its own waiting state rather than the conflict warning.
     case "deferred":
       return "deferred";
+    // Reached the server, but a queued revision did not land. Quieter than
+    // offline, never "synced".
+    case "unsent":
+      return "unsent";
     case "unauthenticated":
       return "reconnect-required";
   }
@@ -18371,6 +18426,15 @@ var PANEL_STYLES = {
     spin: false,
     showForm: false
   },
+  // Nothing is broken and no user action is required: the next cycle retries the
+  // send, so this is muted like `deferred` rather than a warning.
+  unsent: {
+    icon: "clock",
+    label: "Changes not sent yet",
+    colorToken: "--text-muted",
+    spin: false,
+    showForm: false
+  },
   "reconnect-required": {
     icon: "alert-triangle",
     label: "Reconnect required",
@@ -18409,6 +18473,9 @@ function buildConnectionPanel(input) {
   }
   if (input.status === "deferred") {
     parts.push(DEFERRED_DETAIL);
+  }
+  if (input.status === "unsent") {
+    parts.push(UNSENT_DETAIL);
   }
   if (input.status === "reset-required") {
     parts.push(input.errorMessage ?? RESET_REQUIRED_DETAIL);
@@ -22169,6 +22236,9 @@ function gateLocalSyncState(rawData) {
   if (sync !== null && sync.cursor === 0 && producerHasHistory(producer.state) && sync.locallyAuthoredCount === 0 && sync.outboxCount === 0 && sync.ownedPathCount === 0) {
     return { kind: "recovery-required", reason: "cursor-reset" };
   }
+  if (sync !== null && sync.cursor === 0 && sync.ownedPathCount > 0) {
+    return { kind: "resume-bootstrap" };
+  }
   return { kind: "allow" };
 }
 
@@ -22794,7 +22864,7 @@ function createPushProducerRepository(options) {
     onLocalForgotten: (forget) => forgetLocalMaterialization(state, forget)
   });
 }
-function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock) {
+function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock, options) {
   const vault = plugin.app.vault;
   const repository = producerRef.current ?? createPushProducerRepository({ plugin, state, identity });
   producerRef.current = repository;
@@ -22949,21 +23019,23 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     onFolderRename: (oldPath, newPath) => observedMany(observer.observeFolderRename(oldPath, newPath)),
     onFolderDelete: (folderPath) => observedMany(observer.observeFolderDelete(folderPath))
   });
-  afterChange(
-    reconcileVaultState({ observer, repository, vault: snapshot }).then(
-      (result) => {
-        if (result.skipped > 0) {
-          new import_obsidian5.Notice(
-            `Havemind: ${result.skipped} file(s) could not be synced and were skipped.`
-          );
-          warnSkippedPaths(result);
+  if (options?.skipInitialReconcile !== true) {
+    afterChange(
+      reconcileVaultState({ observer, repository, vault: snapshot }).then(
+        (result) => {
+          if (result.skipped > 0) {
+            new import_obsidian5.Notice(
+              `Havemind: ${result.skipped} file(s) could not be synced and were skipped.`
+            );
+            warnSkippedPaths(result);
+          }
+          for (const notice of formatReconcileNotices(result)) {
+            new import_obsidian5.Notice(notice);
+          }
         }
-        for (const notice of formatReconcileNotices(result)) {
-          new import_obsidian5.Notice(notice);
-        }
-      }
-    )
-  );
+      )
+    );
+  }
   const configObserver = {
     observeModify: (path) => lockedObserve(path, () => observer.observeModify(path)),
     observeDelete: (path) => lockedObserve(path, () => observer.observeDelete(path))
@@ -23171,7 +23243,10 @@ var SyncRunner = class {
         deferred: apply.deferred,
         pushed: push.pushed,
         quarantined: push.quarantined,
-        status: apply.status,
+        // An outbox this cycle could not ship keeps the status off "synced". A
+        // conflict or a deferred apply still outranks it: both concern content
+        // already on disk, while an unsent revision only needs another cycle.
+        status: apply.status === "synced" && push.unsent > 0 ? "unsent" : apply.status,
         suppressed: apply.suppressed
       };
     } catch (error51) {
@@ -23211,7 +23286,7 @@ var SyncRunner = class {
   async runPush() {
     const outbox = await this.options.state.listOutbox();
     if (outbox.length === 0) {
-      return { pushed: 0, quarantined: 0 };
+      return { pushed: 0, quarantined: 0, unsent: 0 };
     }
     const queue = this.planPushBatches(outbox);
     const lineage = buildLineageIndex(outbox);
@@ -23285,7 +23360,7 @@ var SyncRunner = class {
         }
       }
     }
-    return { pushed, quarantined: quarantinedIds.size };
+    return { pushed, quarantined: quarantinedIds.size, unsent: pending.size };
   }
   /**
    * Whether a MISSING_PARENT child's lineage is still healthy: at least one of its
@@ -23414,15 +23489,20 @@ var SyncRunner = class {
       scanCursor = lastSequence(collected);
       complete = page.complete === true;
     }
-    const outcomes = await mapPool(
-      collected,
-      this.options.bootstrapApplyConcurrency,
-      (item) => this.applyPulledEvent(item, true)
+    const { applied, conflicts, deferred, suppressed } = await this.batched(
+      async () => {
+        const outcomes = await mapPool(
+          collected,
+          this.options.bootstrapApplyConcurrency,
+          (item) => this.applyPulledEvent(item, true)
+        );
+        const tally = tallyApplyOutcomes(outcomes);
+        if (tally.deferred === 0) {
+          await this.options.state.saveCursor(serverHead);
+        }
+        return tally;
+      }
     );
-    const { applied, conflicts, deferred, suppressed } = tallyApplyOutcomes(outcomes);
-    if (deferred === 0) {
-      await this.options.state.saveCursor(serverHead);
-    }
     return {
       applied,
       conflicts,
@@ -23470,15 +23550,20 @@ var SyncRunner = class {
     const heads = collected.filter(
       (item) => !supersededRevisionIds.has(item.revision.revisionId)
     );
-    const outcomes = await mapPool(
-      heads,
-      this.options.bootstrapApplyConcurrency,
-      (item) => this.applyPulledEvent(item, true)
+    const { applied, conflicts, deferred, suppressed } = await this.batched(
+      async () => {
+        const outcomes = await mapPool(
+          heads,
+          this.options.bootstrapApplyConcurrency,
+          (item) => this.applyPulledEvent(item, true)
+        );
+        const tally = tallyApplyOutcomes(outcomes);
+        if (tally.deferred === 0) {
+          await this.options.state.saveCursor(serverHead);
+        }
+        return tally;
+      }
     );
-    const { applied, conflicts, deferred, suppressed } = tallyApplyOutcomes(outcomes);
-    if (deferred === 0) {
-      await this.options.state.saveCursor(serverHead);
-    }
     return {
       applied,
       conflicts,
@@ -23486,6 +23571,16 @@ var SyncRunner = class {
       status: resolveStatus({ conflicts, deferred }),
       suppressed
     };
+  }
+  /**
+   * Runs `body` inside the state port's durable-write batch when it offers one,
+   * otherwise calls it directly (the port method is optional). Used for the
+   * bootstrap apply pass, where the per-mutation persistence is quadratic.
+   */
+  batched(body) {
+    const state = this.options.state;
+    if (state.runBatched === void 0) return body();
+    return state.runBatched(body);
   }
   /** Applies one pulled event without advancing the cursor. */
   async applyPulledEvent(remoteEvent, bootstrap) {
@@ -24309,6 +24404,7 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
       serverName: serverNameFromUrl(connection.apiBaseUrl)
     };
   }
+  const resumingBootstrap = localStateGate.kind === "resume-bootstrap";
   const clientInstanceId = await ensureClientInstanceId(
     createClientInstanceRepo(plugin)
   );
@@ -24390,7 +24486,12 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
       },
       producerRef,
       extras.hooks,
-      fileApplyLock
+      fileApplyLock,
+      // An interrupted bootstrap left heads on disk that never reached the
+      // producer mapping. The `syncNow` above has just re-run and converged them;
+      // letting reconcile enumerate the vault in the same session would push them
+      // back as fresh local creates (see the gate's `resume-bootstrap`).
+      resumingBootstrap ? { skipInitialReconcile: true } : void 0
     );
   }
   controller.start();
