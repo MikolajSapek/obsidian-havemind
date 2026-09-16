@@ -17828,6 +17828,9 @@ function createSerializedDataPort(mutex) {
         }
         return next;
       });
+    },
+    update(mutator) {
+      return mutex.update(mutator);
     }
   };
 }
@@ -18091,10 +18094,12 @@ var RosterStore = class {
   }
   /** Upserts a member (idempotent by membershipId) and persists the roster. */
   async recordMember(member) {
-    const data = await this.persist.load();
-    const base = isRecord5(data) ? data : {};
-    const next = upsertRosterMember(parseRoster(data), member);
-    await this.persist.save({ ...base, [ROSTER_KEY]: next });
+    let next = [];
+    await this.persist.update((data) => {
+      const base = isRecord5(data) ? data : {};
+      next = upsertRosterMember(parseRoster(base), member);
+      return { ...base, [ROSTER_KEY]: next };
+    });
     return next;
   }
   /**
@@ -18104,10 +18109,11 @@ var RosterStore = class {
    * is rewritten; every other plugin-data key is preserved.
    */
   async replaceMembers(members) {
-    const data = await this.persist.load();
-    const base = isRecord5(data) ? data : {};
     const next = [...members];
-    await this.persist.save({ ...base, [ROSTER_KEY]: next });
+    await this.persist.update((data) => {
+      const base = isRecord5(data) ? data : {};
+      return { ...base, [ROSTER_KEY]: next };
+    });
     return next;
   }
   /**
@@ -18117,10 +18123,12 @@ var RosterStore = class {
    * drops the departed member.
    */
   async removeMember(membershipId) {
-    const data = await this.persist.load();
-    const base = isRecord5(data) ? data : {};
-    const next = removeRosterMember(parseRoster(data), membershipId);
-    await this.persist.save({ ...base, [ROSTER_KEY]: next });
+    let next = [];
+    await this.persist.update((data) => {
+      const base = isRecord5(data) ? data : {};
+      next = removeRosterMember(parseRoster(base), membershipId);
+      return { ...base, [ROSTER_KEY]: next };
+    });
     return next;
   }
 };
@@ -24294,6 +24302,8 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     onStatus("recovery-required", HAVEMIND_STATUS_RECOVERY_REQUIRED);
     return {
       ...NOOP_HANDLE,
+      apiBaseUrl: connection.apiBaseUrl,
+      vaultId: connection.vaultId,
       serverName: serverNameFromUrl(connection.apiBaseUrl)
     };
   }
@@ -24374,6 +24384,8 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
   const selfMembership = connection.memberId === void 0 ? void 0 : { membershipId: connection.memberId, role: extras.role ?? "editor" };
   return {
     ...selfMembership === void 0 ? {} : { selfMembership },
+    apiBaseUrl: connection.apiBaseUrl,
+    vaultId: connection.vaultId,
     getAccessToken: async () => {
       try {
         return await accessProvider.getAccessToken();
@@ -25018,7 +25030,7 @@ async function revokeMembershipForOwner(plugin, options) {
   });
 }
 async function fetchMemberRosterForVault(plugin, options) {
-  const connected = await resolveConnectedVault(plugin);
+  const connected = options.connected ?? await resolveConnectedVault(plugin).catch(() => null);
   if (connected === null) {
     return null;
   }
@@ -27419,8 +27431,8 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.connection = handle;
       this.syncState = handle.state ?? null;
       this.connectGeneration += 1;
-      this.adoptSelfMembership(this.connection);
-      void this.refreshRoster();
+      await this.refreshRoster();
+      this.adoptSelfMembershipIfNeeded(this.connection);
       void this.restorePendingApprovals();
       this.scheduleConflictSweep();
     } finally {
@@ -27559,6 +27571,21 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.views.refreshOnboarding();
     });
   }
+  /**
+   * Seeds "You" only when the server roster did not already identify this
+   * device. Calling this after `refreshRoster` avoids the connect-time race
+   * where a parallel self-seed clobbered the full People list.
+   */
+  adoptSelfMembershipIfNeeded(handle) {
+    const self = handle?.selfMembership;
+    if (self === void 0) return;
+    if (this.rosterMembers.some(
+      (member) => member.self || member.membershipId === self.membershipId
+    )) {
+      return;
+    }
+    this.adoptSelfMembership(handle);
+  }
   /** The durable roster store over the shared plugin-data blob. */
   rosterStore() {
     return new RosterStore({
@@ -27589,10 +27616,15 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
   }
   async fetchAndPersistRoster() {
     const selfMembershipId = this.connection?.selfMembership?.membershipId ?? this.rosterMembers.find((member) => member.self)?.membershipId ?? null;
+    const connected = this.connection?.apiBaseUrl !== void 0 && this.connection.vaultId !== void 0 ? {
+      apiBaseUrl: this.connection.apiBaseUrl,
+      vaultId: this.connection.vaultId
+    } : void 0;
     try {
       const members = await fetchMemberRosterForVault(this, {
         selfMembershipId,
-        ...this.connection?.getAccessToken === void 0 ? {} : { getAccessToken: this.connection.getAccessToken }
+        ...this.connection?.getAccessToken === void 0 ? {} : { getAccessToken: this.connection.getAccessToken },
+        ...connected === void 0 ? {} : { connected }
       });
       if (members === null || this.unloaded) return;
       this.rosterMembers = await this.rosterStore().replaceMembers(members);
@@ -27650,8 +27682,8 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         this.connection = handle;
         this.syncState = handle.state ?? null;
         this.connectGeneration += 1;
-        this.adoptSelfMembership(handle);
-        void this.refreshRoster();
+        await this.refreshRoster();
+        this.adoptSelfMembershipIfNeeded(handle);
         this.scheduleConflictSweep();
         this.views.refreshOnboardingNow();
       } else if (!attempt.signal.aborted && !this.unloaded) {
