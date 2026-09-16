@@ -16613,6 +16613,11 @@ function parseFailedToQueuePath(revisionId) {
   const path = revisionId.slice(FAILED_TO_QUEUE_PREFIX.length);
   return path.length === 0 ? null : path;
 }
+function readableCursor(raw) {
+  if (!isRecord3(raw)) return 0;
+  const cursor = raw.cursor;
+  return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
+}
 function emptyState() {
   return {
     version: 1,
@@ -17135,7 +17140,7 @@ var DurableSyncState = class {
     if (outcome.salvage !== null) {
       this.cache = outcome.salvage;
     } else {
-      this.cache = emptyState();
+      this.cache = outcome.state;
       if (outcome.outboxAtRisk) this.recoveryRequired = true;
     }
     await this.persist.save(this.toDiskForm(this.cache));
@@ -17335,7 +17340,7 @@ function parsePersistedState(raw) {
   }
   return {
     status: "corrupt",
-    state: emptyState(),
+    state: { ...emptyState(), cursor: readableCursor(raw) },
     salvage: salvageState(raw),
     outboxAtRisk: outboxAtRisk(raw)
   };
@@ -18258,9 +18263,11 @@ var LABELS = {
   conflict: "Conflict",
   deferred: "Waiting to apply",
   "reconnect-required": "Reconnect required",
+  "recovery-required": "Recovery required",
   "reset-required": "Reset required"
 };
 var RESET_REQUIRED_DETAIL = "The stored connection data is incomplete or unreadable. Reset the connection and pair this device again.";
+var RECOVERY_REQUIRED_DETAIL = "The local sync state is incomplete or inconsistent. Sync was stopped before any files were changed.";
 var NO_E2EE_NOTE = "Private Tailscale network only, no end-to-end encryption.";
 var PANE_NETWORK_NOTE = "Private Tailscale network \xB7 Encrypted in transit";
 var DEFERRED_DETAIL = "A change waits for an open note to settle before applying.";
@@ -18363,6 +18370,13 @@ var PANEL_STYLES = {
     spin: false,
     showForm: true
   },
+  "recovery-required": {
+    icon: "shield-alert",
+    label: "Recovery required",
+    colorToken: "--text-error",
+    spin: false,
+    showForm: false
+  },
   // The paste form stays available alongside the Reset button: pairing this
   // device afresh overwrites the broken record and is an equally valid way out.
   "reset-required": {
@@ -18390,6 +18404,9 @@ function buildConnectionPanel(input) {
   }
   if (input.status === "reset-required") {
     parts.push(input.errorMessage ?? RESET_REQUIRED_DETAIL);
+  }
+  if (input.status === "recovery-required") {
+    parts.push(input.errorMessage ?? RECOVERY_REQUIRED_DETAIL);
   }
   parts.push(PANE_NETWORK_NOTE);
   return {
@@ -20712,12 +20729,16 @@ function registerVaultChangeListeners(vault, handlers) {
 // src/runtime/adapters/producer-state.ts
 var EMPTY_PRODUCER_STATE = { mappings: [], heads: {} };
 function isValidProducerMapping(entry) {
-  return isRecord9(entry) && typeof entry.collisionKey === "string" && typeof entry.content === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
+  return isRecord9(entry) && typeof entry.collisionKey === "string" && (typeof entry.content === "string" || entry.content === null && entry.contentKind === "binary") && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
 }
 function buildProducerMapping(entry) {
+  const isBinary = entry.contentKind === "binary";
   return {
     collisionKey: entry.collisionKey,
-    content: entry.content,
+    // AUD-12 migration: a legacy binary mapping may still carry a multi-MB
+    // base64 body. Its raw-byte hash is the complete comparison key, so compact
+    // the body during parse and let the store persist this projection once.
+    content: isBinary ? null : entry.content,
     contentHash: entry.contentHash,
     // Preserve the binary/markdown discriminator across every load→save
     // cycle. Dropping it here silently converts a persisted binary mapping
@@ -20736,7 +20757,8 @@ function parseProducerStateResult(raw) {
     return {
       status: "absent",
       state: EMPTY_PRODUCER_STATE,
-      quarantinedMappings: []
+      quarantinedMappings: [],
+      migrated: false
     };
   }
   if (!isRecord9(raw) || !Array.isArray(raw.mappings) || !isRecord9(raw.heads)) {
@@ -20746,13 +20768,18 @@ function parseProducerStateResult(raw) {
     return {
       status: "corrupt",
       state: EMPTY_PRODUCER_STATE,
-      quarantinedMappings: []
+      quarantinedMappings: [],
+      migrated: false
     };
   }
   const mappings = [];
   const quarantinedMappings = [];
+  let migrated = false;
   for (const entry of raw.mappings) {
     if (isValidProducerMapping(entry)) {
+      if (entry.contentKind === "binary" && typeof entry.content === "string") {
+        migrated = true;
+      }
       mappings.push(buildProducerMapping(entry));
     } else {
       quarantinedMappings.push(entry);
@@ -20767,7 +20794,12 @@ function parseProducerStateResult(raw) {
   for (const [fileId, revisionId] of Object.entries(raw.heads)) {
     if (typeof revisionId === "string") heads[fileId] = revisionId;
   }
-  return { status: "ok", state: { mappings, heads }, quarantinedMappings };
+  return {
+    status: "ok",
+    state: { mappings, heads },
+    quarantinedMappings,
+    migrated
+  };
 }
 
 // src/runtime/connect-driver.ts
@@ -21824,6 +21856,9 @@ var HAVEMIND_STATUS_DISCONNECTED = formatStatusBar({
 var HAVEMIND_STATUS_RESET_REQUIRED = formatStatusBar({
   status: "reset-required"
 });
+var HAVEMIND_STATUS_RECOVERY_REQUIRED = formatStatusBar({
+  status: "recovery-required"
+});
 
 // src/runtime/access-token.ts
 var EXPIRY_SKEW_MS = 3e4;
@@ -22021,6 +22056,55 @@ function createRemoteApplyProducerSync(getProducer) {
   };
 }
 
+// src/runtime/adapters/local-state-gate.ts
+function parseSyncEvidence(raw) {
+  if (!isRecord9(raw) || raw.version !== 1 || !Number.isSafeInteger(raw.cursor) || raw.cursor < 0 || !Array.isArray(raw.outbox) || !Array.isArray(raw.locallyAuthored) || !Array.isArray(raw.deferred)) {
+    return null;
+  }
+  return {
+    cursor: raw.cursor,
+    locallyAuthoredCount: raw.locallyAuthored.length,
+    outboxCount: raw.outbox.length,
+    ownedPathCount: isRecord9(raw.pathOwners) ? Object.keys(raw.pathOwners).length : 0
+  };
+}
+function producerHasHistory(state) {
+  return state.mappings.length > 0 || Object.keys(state.heads).length > 0;
+}
+function syncHasHistory(evidence) {
+  return evidence.cursor > 0 || evidence.locallyAuthoredCount > 0 || evidence.outboxCount > 0 || evidence.ownedPathCount > 0;
+}
+function gateLocalSyncState(rawData) {
+  const data = isRecord9(rawData) ? rawData : {};
+  const rawSync = data.syncState;
+  const rawBackup = data["syncState.bak"];
+  const rawProducer = data.pushProducer;
+  const syncAbsent = rawSync === null || rawSync === void 0;
+  const producerAbsent = rawProducer === null || rawProducer === void 0;
+  if (syncAbsent && producerAbsent) return { kind: "allow" };
+  let sync = syncAbsent ? null : parseSyncEvidence(rawSync);
+  if (!syncAbsent && sync === null) {
+    sync = parseSyncEvidence(rawBackup);
+    if (sync === null) {
+      return { kind: "recovery-required", reason: "corrupt-sync-state" };
+    }
+  }
+  const producer = parseProducerStateResult(rawProducer);
+  if (!producerAbsent && producer.status === "corrupt") {
+    return { kind: "recovery-required", reason: "corrupt-producer-state" };
+  }
+  if (syncAbsent) {
+    return producerHasHistory(producer.state) ? { kind: "recovery-required", reason: "missing-sync-state" } : { kind: "allow" };
+  }
+  if (producerAbsent) {
+    return sync !== null && syncHasHistory(sync) ? { kind: "recovery-required", reason: "missing-producer-state" } : { kind: "allow" };
+  }
+  if (sync !== null && sync.cursor === 0 && producerHasHistory(producer.state) && sync.locallyAuthoredCount === 0 && sync.outboxCount === 0 && sync.ownedPathCount === 0) {
+    return { kind: "recovery-required", reason: "cursor-reset" };
+  }
+  return { kind: "allow" };
+}
+
 // src/runtime/adapters/push-producer.ts
 var import_obsidian5 = require("obsidian");
 
@@ -22196,8 +22280,14 @@ function upsertMapping(mappings, upsert) {
   const next = mappings.filter(
     (mapping) => mapping.fileId !== upsert.fileId && mapping.collisionKey !== upsert.collisionKey
   );
-  next.push(upsert);
+  next.push(withoutBinaryBody(upsert));
   return next;
+}
+function withoutBinaryBody(mapping) {
+  if (mapping.contentKind !== "binary" || mapping.content === null) {
+    return mapping;
+  }
+  return { ...mapping, content: null };
 }
 function resolveOperation(kind, head) {
   const mapped = OPERATION_BY_KIND[kind];
@@ -22257,12 +22347,13 @@ async function readEligibleContent(vault, readPath, kind) {
   if (kind === "binary") {
     const bytes = await vault.readBinary(readPath);
     if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return "too-large";
-    return { content: bytesToBase642(bytes) };
+    return { content: bytesToBase642(bytes), contentHash: await hashBlob(bytes) };
   }
   return {
     content: normalizeContent2(
       normalizeConfigContent(readPath, await vault.readText(readPath))
-    )
+    ),
+    contentHash: null
   };
 }
 async function reconcileVaultState(options) {
@@ -22313,14 +22404,14 @@ async function reconcileVaultState(options) {
       mappingsByCollision.delete(collisionKey);
       continue;
     }
-    const { content } = read;
+    const { content, contentHash } = read;
     const mapping = mappingsByCollision.get(collisionKey);
     if (mapping === void 0) {
-      unmatchedVault.push({ collisionKey, content, readPath });
+      unmatchedVault.push({ collisionKey, content, contentHash, kind, readPath });
       continue;
     }
     mappingsByCollision.delete(collisionKey);
-    if (mapping.content === content) {
+    if (kind === "binary" ? mapping.contentHash === contentHash : mapping.content === content) {
       unchanged += 1;
     } else if (await observeResilient(readPath, recordSkip, () => observer.observeModify(readPath))) {
       updated += 1;
@@ -22369,8 +22460,14 @@ function describeSkipReason(error51) {
   return "unknown error";
 }
 async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip) {
-  const vaultByContent = groupBy(unmatchedVault, (file2) => file2.content);
-  const mappingsByContent = groupBy(unmatchedMappings, (m) => m.content);
+  const vaultByContent = groupBy(
+    unmatchedVault,
+    (file2) => file2.kind === "binary" ? `binary:${file2.contentHash ?? ""}` : `markdown:${file2.content}`
+  );
+  const mappingsByContent = groupBy(
+    unmatchedMappings,
+    (mapping) => mapping.contentKind === "binary" ? `binary:${mapping.contentHash}` : `markdown:${mapping.content ?? ""}`
+  );
   const consumedVault = /* @__PURE__ */ new Set();
   const consumedMappings = /* @__PURE__ */ new Set();
   let renamed = 0;
@@ -22605,6 +22702,12 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
         console.warn(
           "Havemind: failed to preserve corrupt producer state to a sidecar."
         );
+      }
+      if (result.status === "ok" && result.migrated) {
+        await getPluginDataMutex(plugin).update((base) => ({
+          ...base,
+          [PUSH_PRODUCER_KEY]: result.state
+        }));
       }
       return result.state;
     },
@@ -23954,6 +24057,17 @@ function serverNameFromUrl(apiBaseUrl) {
   }
 }
 async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
+  const localStateGate = gateLocalSyncState(await plugin.loadData());
+  if (localStateGate.kind === "recovery-required") {
+    console.error(
+      `Havemind: local sync state recovery required (${localStateGate.reason}); sync was not started.`
+    );
+    onStatus("recovery-required", HAVEMIND_STATUS_RECOVERY_REQUIRED);
+    return {
+      ...NOOP_HANDLE,
+      serverName: serverNameFromUrl(connection.apiBaseUrl)
+    };
+  }
   const clientInstanceId = await ensureClientInstanceId(
     createClientInstanceRepo(plugin)
   );
