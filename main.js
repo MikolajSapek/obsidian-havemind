@@ -19825,21 +19825,17 @@ var VaultApplyAdapter = class {
     const base = owner === null ? null : this.files.baseHashFor(owner);
     const diskHash = binaryOnDisk !== null ? await hashBlob(binaryOnDisk) : onDisk === null ? null : await this.hashContent(onDisk);
     const unchanged = base !== null && diskHash === base;
-    const bootstrapStale = origin === "bootstrap" && (owner === null || unchanged);
     if (exists && !resolvesLastWriterWins(path)) {
-      if (owner === fileId && !unchanged && !bootstrapStale) {
+      if (owner === fileId && !unchanged) {
         await this.writeConflict(event, decoded);
         return "conflict";
       }
       if (owner !== null && owner !== fileId && !unchanged) {
-        if (origin === "bootstrap") {
-          await this.writeConflict(event, decoded);
-          return "conflict";
-        }
-        return "applied";
+        await this.writeConflict(event, decoded);
+        return "conflict";
       }
     }
-    if (origin !== "bootstrap" && owner !== fileId) return "applied";
+    if (!exists && owner !== fileId) return "applied";
     if (owner !== null && owner !== fileId) {
       await this.producerSync?.onRemoteDelete({ fileId: owner, path });
       await this.files.forgetBaseHash(owner);
@@ -19922,6 +19918,9 @@ var VaultApplyAdapter = class {
         });
         return "noop";
       } else if (!lastWriterWins) {
+        if (decoded.operation === "create" && origin !== "bootstrap") {
+          return "noop";
+        }
         await this.writeConflict(event, decoded);
         return "conflict";
       } else {
@@ -20165,6 +20164,9 @@ var VaultApplyAdapter = class {
         });
         return "noop";
       } else if (!lastWriterWins) {
+        if (decoded.operation === "create" && origin !== "bootstrap") {
+          return "noop";
+        }
         await this.writeConflict(event, decoded);
         return "conflict";
       } else {
