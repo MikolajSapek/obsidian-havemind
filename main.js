@@ -19807,35 +19807,54 @@ var VaultApplyAdapter = class {
       () => this.applyDecoded(event, decoded, fileId, origin)
     );
   }
+  async applyDelete(event, decoded, fileId, origin) {
+    const path = decoded.path;
+    const owner = this.files.fileIdAtPath(path);
+    const binary = decoded.kind === "binary";
+    const onDisk = binary ? null : await this.files.readByPath(path);
+    const binaryOnDisk = binary ? await this.files.readBinaryByPath(path) : null;
+    const exists = onDisk !== null || binaryOnDisk !== null;
+    const base = owner === null ? null : this.files.baseHashFor(owner);
+    const diskHash = binaryOnDisk !== null ? await hashBlob(binaryOnDisk) : onDisk === null ? null : await this.hashContent(onDisk);
+    const unchanged = base !== null && diskHash === base;
+    const bootstrapStale = origin === "bootstrap" && (owner === null || unchanged);
+    if (exists && !resolvesLastWriterWins(path)) {
+      if (owner === fileId && !unchanged && !bootstrapStale) {
+        await this.writeConflict(event, decoded);
+        return "conflict";
+      }
+      if (owner !== null && owner !== fileId && !unchanged) {
+        if (origin === "bootstrap") {
+          await this.writeConflict(event, decoded);
+          return "conflict";
+        }
+        return "applied";
+      }
+    }
+    if (origin !== "bootstrap" && owner !== fileId) return "applied";
+    if (owner !== null && owner !== fileId) {
+      await this.producerSync?.onRemoteDelete({ fileId: owner, path });
+      await this.files.forgetBaseHash(owner);
+      await this.files.forgetBaseContent(owner);
+    }
+    await this.producerSync?.onRemoteDelete({ fileId, path });
+    await this.files.deleteByPath(path);
+    await this.files.forgetPath(path);
+    await this.files.forgetBaseHash(fileId);
+    await this.files.forgetBaseContent(fileId);
+    this.onRemoteApplied?.({
+      revisionId: event.revision.revisionId,
+      fileId,
+      path,
+      operation: decoded.operation,
+      origin,
+      ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
+    });
+    return "applied";
+  }
   async applyDecoded(event, decoded, fileId, origin) {
     if (decoded.operation === "delete") {
-      if (this.files.fileIdAtPath(decoded.path) === fileId) {
-        if (!resolvesLastWriterWins(decoded.path)) {
-          const onDisk2 = await this.files.readByPath(decoded.path);
-          if (onDisk2 !== null) {
-            const base = this.files.baseHashFor(fileId);
-            const onDiskHash = await this.hashContent(onDisk2);
-            if (base === null || onDiskHash !== base) {
-              await this.writeConflict(event, decoded);
-              return "conflict";
-            }
-          }
-        }
-        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        await this.files.deleteByPath(decoded.path);
-        await this.files.forgetPath(decoded.path);
-        await this.files.forgetBaseHash(fileId);
-        await this.files.forgetBaseContent(fileId);
-        this.onRemoteApplied?.({
-          revisionId: event.revision.revisionId,
-          fileId,
-          path: decoded.path,
-          operation: decoded.operation,
-          origin,
-          ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
-        });
-      }
-      return "applied";
+      return this.applyDelete(event, decoded, fileId, origin);
     }
     if (decoded.kind === "binary") {
       return this.applyRemoteBinary(event, decoded, fileId, origin);
@@ -19871,7 +19890,9 @@ var VaultApplyAdapter = class {
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
       const bootstrapVacant = origin === "bootstrap" && onDisk !== null && isVacantMarkdown(onDisk);
-      if (bootstrapVacant) {
+      const ownerBase = this.files.baseHashFor(owner);
+      const bootstrapUnchanged = origin === "bootstrap" && onDisk !== null && ownerBase !== null && await this.hashContent(onDisk) === ownerBase;
+      if (bootstrapVacant || bootstrapUnchanged) {
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
         await this.files.forgetBaseContent(owner);
