@@ -20377,7 +20377,14 @@ async function ensureParentFolders(vault, path) {
     prefix = prefix === "" ? segment : `${prefix}/${segment}`;
     const existing = vault.getAbstractFileByPath(prefix);
     if (existing === null) {
-      await vault.createFolder(prefix);
+      try {
+        await vault.createFolder(prefix);
+      } catch (error51) {
+        const raced = vault.getAbstractFileByPath(prefix);
+        if (raced instanceof import_obsidian3.TFolder) continue;
+        if (raced !== null) throw new ParentFolderOccupiedError(prefix);
+        throw error51;
+      }
       continue;
     }
     if (existing instanceof import_obsidian3.TFolder) {
@@ -22739,8 +22746,8 @@ var ModifyDebouncer = class {
 function toActivityKind(kind) {
   return kind === "update" ? "edit" : kind;
 }
-function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock) {
-  const vault = plugin.app.vault;
+function createPushProducerRepository(options) {
+  const { plugin, state, identity } = options;
   const store = {
     async load() {
       const data = await plugin.loadData();
@@ -22776,25 +22783,18 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       }));
     }
   };
-  const repository = new OutboxLocalChangeRepository({
+  return new OutboxLocalChangeRepository({
     identity,
     store,
     enqueue: (envelope) => state.enqueue(envelope),
     generateRevisionId: () => globalThis.crypto.randomUUID(),
-    // FIX 1: seed the SHARED apply store for every file this device authors or
-    // pushes, so a later peer edit to a locally-authored file resolves to its
-    // real fileId and updates in place instead of forever forking to a conflict
-    // artifact. A rename also forgets the stale owner of the previous path.
-    //
-    // DATA-SAFETY (rule 3): the base is SEEDED only on first authorship and is
-    // NEVER advanced by a local push, advancing it here reopened the silent-
-    // overwrite window (a concurrent peer revision matching the just-authored
-    // base slips past the on-disk guard). The single source of truth for that
-    // rule lives in `local-base-lifecycle.ts`, shared with the integration
-    // harness so a regression can't hide behind a differently-modelled test.
     onLocalMaterialized: (materialization) => applyLocalMaterialization(state, materialization),
     onLocalForgotten: (forget) => forgetLocalMaterialization(state, forget)
   });
+}
+function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock) {
+  const vault = plugin.app.vault;
+  const repository = producerRef.current ?? createPushProducerRepository({ plugin, state, identity });
   producerRef.current = repository;
   const snapshot = {
     async listSyncablePaths() {
@@ -24360,6 +24360,17 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     producerSync,
     fileApplyLock
   );
+  if (hasPushIdentity) {
+    producerRef.current = createPushProducerRepository({
+      plugin,
+      state,
+      identity: {
+        vaultId: connection.vaultId,
+        memberId: connection.memberId,
+        deviceId: connection.deviceId
+      }
+    });
+  }
   await runCanonicalizationRebase(plugin);
   await controller.syncNow();
   let producer = null;
