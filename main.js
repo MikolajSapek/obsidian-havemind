@@ -17239,8 +17239,16 @@ var DurableSyncState = class {
    */
   async safePutPayload(revisionId, payloadBase64) {
     if (this.payloadStore === void 0) return false;
+    if (payloadBase64.length === 0) return false;
     try {
       await this.payloadStore.putPayload(revisionId, payloadBase64);
+      const roundTrip = await this.payloadStore.getPayload(revisionId);
+      if (roundTrip !== payloadBase64) {
+        console.warn(
+          `Havemind: outbox payload for ${revisionId} failed round-trip verify; keeping it inline in data.json.`
+        );
+        return false;
+      }
       return true;
     } catch {
       console.warn(
@@ -17289,7 +17297,7 @@ var DurableSyncState = class {
     for (const env of state.outbox) {
       if (env.payloadExternalized === true) {
         const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string") {
+        if (typeof payload === "string" && payload.length > 0) {
           this.externalized.add(env.revisionId);
           nextOutbox.push({ ...env, payloadBase64: payload });
           cacheChanged = true;
@@ -17307,7 +17315,7 @@ var DurableSyncState = class {
         }
       } else {
         nextOutbox.push(env);
-        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+        if (env.payloadBase64.length > 0 && await this.safePutPayload(env.revisionId, env.payloadBase64)) {
           this.externalized.add(env.revisionId);
           persistNeeded = true;
         }
@@ -17317,7 +17325,7 @@ var DurableSyncState = class {
     for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
       if (env.payloadExternalized === true) {
         const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string") {
+        if (typeof payload === "string" && payload.length > 0) {
           this.externalized.add(env.revisionId);
           nextStash[key] = { ...env, payloadBase64: payload };
           cacheChanged = true;
@@ -17326,7 +17334,7 @@ var DurableSyncState = class {
         }
       } else {
         nextStash[key] = env;
-        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+        if (env.payloadBase64.length > 0 && await this.safePutPayload(env.revisionId, env.payloadBase64)) {
           this.externalized.add(env.revisionId);
           persistNeeded = true;
         }
@@ -19862,6 +19870,33 @@ var VaultApplyAdapter = class {
   }
   async openBuffers(fileId) {
     return this.files.openBufferStates(fileId);
+  }
+  /**
+   * Own-revision echo from the server. Never rewrites the file. When on-disk
+   * content already matches the echoed revision, advances the synced base so
+   * solo pushes do not leave `baseHash` stuck forever after suppress.
+   */
+  async acknowledgeOwnEcho(event) {
+    if (event.revision.contentHash.length === 0) return;
+    let decoded;
+    try {
+      decoded = await this.resolveRevision(event);
+    } catch {
+      return;
+    }
+    if (decoded.operation === "delete") {
+      return;
+    }
+    const onDisk = await this.files.readByPath(decoded.path);
+    if (onDisk === null) return;
+    const text = decoded.content ?? "";
+    const diskHash = await this.hashContent(onDisk);
+    const matches = diskHash === event.revision.contentHash || contentMatches(onDisk, text);
+    if (!matches) return;
+    const fileId = event.revision.fileId;
+    await this.files.recordBaseHash(fileId, event.revision.contentHash);
+    await this.files.recordBaseContent(fileId, onDisk);
+    await this.files.recordPathOwner(fileId, decoded.path);
   }
   /**
    * The per-file lock key: the file's canonical collision key, so remote apply
@@ -22734,6 +22769,21 @@ async function forgetLocalMaterialization(store, input) {
   await store.forgetBaseHash(input.fileId);
   await store.forgetBaseContent(input.fileId);
 }
+async function healStaleBasesAfterLocalPush(store, heals, headFor) {
+  let healed = 0;
+  for (const heal of heals) {
+    const head = headFor(heal.fileId);
+    if (head === null || !await store.isLocallyAuthored(head)) continue;
+    const base = store.baseHashFor(heal.fileId);
+    if (base === heal.contentHash) continue;
+    await store.recordBaseHash(heal.fileId, heal.contentHash);
+    if (heal.content !== null) {
+      await store.recordBaseContent(heal.fileId, heal.content);
+    }
+    healed += 1;
+  }
+  return healed;
+}
 
 // src/runtime/modify-debounce.ts
 var MODIFY_SETTLE_MS = 1500;
@@ -23019,6 +23069,34 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     onFolderRename: (oldPath, newPath) => observedMany(observer.observeFolderRename(oldPath, newPath)),
     onFolderDelete: (folderPath) => observedMany(observer.observeFolderDelete(folderPath))
   });
+  afterChange(
+    (async () => {
+      const mappings = await repository.listMappings();
+      const heads = /* @__PURE__ */ new Map();
+      for (const mapping of mappings) {
+        const head = await repository.headFor(mapping.fileId);
+        if (head !== null) heads.set(mapping.fileId, head);
+      }
+      await healStaleBasesAfterLocalPush(
+        {
+          baseHashFor: (fileId) => state.baseHashFor(fileId),
+          recordPathOwner: (fileId, path) => state.recordPathOwner(fileId, path),
+          recordBaseHash: (fileId, hash2) => state.recordBaseHash(fileId, hash2),
+          recordBaseContent: (fileId, content) => state.recordBaseContent(fileId, content),
+          forgetPath: (path) => state.forgetPath(path),
+          forgetBaseHash: (fileId) => state.forgetBaseHash(fileId),
+          forgetBaseContent: (fileId) => state.forgetBaseContent(fileId),
+          isLocallyAuthored: (revisionId) => state.isLocallyAuthored(revisionId)
+        },
+        mappings.map((mapping) => ({
+          fileId: mapping.fileId,
+          contentHash: mapping.contentHash,
+          content: mapping.contentKind === "binary" ? null : mapping.content
+        })),
+        (fileId) => heads.get(fileId) ?? null
+      );
+    })()
+  );
   if (options?.skipInitialReconcile !== true) {
     afterChange(
       reconcileVaultState({ observer, repository, vault: snapshot }).then(
@@ -23585,6 +23663,7 @@ var SyncRunner = class {
   /** Applies one pulled event without advancing the cursor. */
   async applyPulledEvent(remoteEvent, bootstrap) {
     if (await this.options.state.isLocallyAuthored(remoteEvent.revision.revisionId)) {
+      await this.options.vault.acknowledgeOwnEcho?.(remoteEvent);
       return "suppressed";
     }
     const buffers = await this.options.vault.openBuffers(remoteEvent.revision.fileId);
