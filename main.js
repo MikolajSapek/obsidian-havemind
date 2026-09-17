@@ -23544,10 +23544,19 @@ var SyncRunner = class {
   }
   async runPull() {
     let cursor = await this.options.state.loadCursor();
-    const pulled = await this.options.transport.pull(
-      cursor,
-      cursor === 0 ? { snapshot: true } : void 0
-    );
+    let pulled;
+    try {
+      pulled = await this.options.transport.pull(
+        cursor,
+        cursor === 0 ? { snapshot: true } : void 0
+      );
+    } catch (error51) {
+      if (!isCursorInvalid(error51) || cursor === 0) throw error51;
+      await this.options.state.saveCursor(0);
+      cursor = 0;
+      this.bootstrapTarget = null;
+      pulled = await this.options.transport.pull(0, { snapshot: true });
+    }
     const { cursor: serverHead, events } = pulled;
     if (this.bootstrapTarget === null && serverHead > 0) {
       this.bootstrapTarget = serverHead;
@@ -23765,6 +23774,9 @@ var SyncRunner = class {
 function isAuthDenied(error51) {
   return typeof error51 === "object" && error51 !== null && error51.authDenied === true;
 }
+function isCursorInvalid(error51) {
+  return typeof error51 === "object" && error51 !== null && error51.cursorInvalid === true;
+}
 function isPermanentError(error51) {
   return typeof error51 === "object" && error51 !== null && error51.permanent === true;
 }
@@ -23971,6 +23983,15 @@ var RequestUrlTransportError = class extends Error {
     /** True on HTTP 401, the session was refused; the loop must stop, not retry. */
     __publicField(this, "authDenied");
     /**
+     * HTTP 409 CURSOR_INVALID: this device holds a position the server cannot
+     * serve, because the server's sequence numbering moved underneath it (a
+     * restore from backup, or the repair that renumbers a log damaged by the old
+     * compaction). Neither an auth failure nor a transport failure, and retrying
+     * the same cursor can never succeed, so the runner resets to zero and
+     * re-bootstraps rather than reporting a permanent offline.
+     */
+    __publicField(this, "cursorInvalid");
+    /**
      * True on a whole-request 4xx the same bytes will never satisfy (400 bad
      * request, 413 payload too large, 422 invalid batch). The runner quarantines
      * the offending revision instead of retrying it forever. 5xx and network
@@ -23978,6 +23999,7 @@ var RequestUrlTransportError = class extends Error {
      */
     __publicField(this, "permanent");
     this.authDenied = options?.authDenied ?? false;
+    this.cursorInvalid = options?.cursorInvalid ?? false;
     this.permanent = options?.permanent ?? false;
   }
 };
@@ -24082,7 +24104,8 @@ var RequestUrlTransport = class {
         `Server returned HTTP ${response.status}.`,
         {
           authDenied: response.status === 401,
-          permanent: isPermanentStatus(response.status)
+          permanent: isPermanentStatus(response.status),
+          cursorInvalid: response.status === 409
         }
       );
     }
