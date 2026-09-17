@@ -19890,11 +19890,10 @@ var VaultApplyAdapter = class {
     const onDisk = await this.files.readByPath(decoded.path);
     if (onDisk === null) return;
     const text = decoded.content ?? "";
-    const diskHash = await this.hashContent(onDisk);
-    const matches = diskHash === event.revision.contentHash || contentMatches(onDisk, text);
-    if (!matches) return;
+    if (!contentMatches(onDisk, text)) return;
     const fileId = event.revision.fileId;
-    await this.files.recordBaseHash(fileId, event.revision.contentHash);
+    const baseHash = await this.hashContent(onDisk);
+    await this.files.recordBaseHash(fileId, baseHash);
     await this.files.recordBaseContent(fileId, onDisk);
     await this.files.recordPathOwner(fileId, decoded.path);
   }
@@ -20050,7 +20049,7 @@ var VaultApplyAdapter = class {
         return "noop";
       }
       const base = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(onDisk, base))) {
+      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(onDisk))) {
       } else {
         const onDiskHash = await this.hashContent(onDisk);
         const diverged = base === null || onDiskHash !== base;
@@ -20086,7 +20085,7 @@ var VaultApplyAdapter = class {
     const preWriteOnDisk = await this.files.readByPath(decoded.path);
     if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, text)) {
       const preWriteBase = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(preWriteOnDisk, preWriteBase))) {
+      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(preWriteOnDisk))) {
       } else {
         const preWriteHash = await this.hashContent(preWriteOnDisk);
         if (preWriteBase === null || preWriteHash !== preWriteBase) {
@@ -20436,7 +20435,7 @@ function contentMatches(onDisk, incoming) {
 function isVacantMarkdown(text) {
   return canonicalizeMarkdown(text).trim().length === 0;
 }
-function isBootstrapReplaceable(onDisk, _base) {
+function isBootstrapReplaceable(onDisk) {
   return isVacantMarkdown(onDisk);
 }
 
@@ -20513,10 +20512,11 @@ function createVaultFilePort(options) {
       const baseHash = state.baseHashFor(fileId);
       const buffers = [];
       for (const leaf of workspace.getLeavesOfType("markdown")) {
-        if (!isMarkdownEditorView(leaf.view)) {
+        const leafView = leaf.view;
+        if (!isMarkdownEditorView(leafView)) {
           continue;
         }
-        const editor = leaf.view;
+        const editor = leafView;
         const file2 = editor.file;
         if (file2 === null || file2.path !== path) {
           continue;
@@ -22367,6 +22367,7 @@ var OutboxLocalChangeRepository = class {
   async commitLocalChange(commit) {
     const state = await this.options.store.load();
     const { operation } = commit;
+    const previousContent = this.previousContentFor(state, operation);
     const head = state.heads[operation.fileId];
     const kind = operation.kind;
     const envelopeOperation = resolveOperation(kind, head);
@@ -22413,7 +22414,7 @@ var OutboxLocalChangeRepository = class {
           isDelete: kind === "delete"
         })
       );
-      await this.seedSharedState(operation);
+      await this.seedSharedState(operation, previousContent);
       return built.revisionId;
     }
     await this.options.store.save(
@@ -22423,7 +22424,7 @@ var OutboxLocalChangeRepository = class {
         isDelete: true
       })
     );
-    await this.seedSharedState(operation);
+    await this.seedSharedState(operation, previousContent);
     return null;
   }
   /**
@@ -22432,7 +22433,7 @@ var OutboxLocalChangeRepository = class {
    * of forever diverting to a conflict artifact. A create/update/rename seeds the
    * owner+base (and forgets the prior path on a rename); a delete forgets both.
    */
-  async seedSharedState(operation) {
+  async seedSharedState(operation, replacedContent) {
     if (operation.kind === "delete") {
       await this.options.onLocalForgotten?.({
         fileId: operation.fileId,
@@ -22448,8 +22449,20 @@ var OutboxLocalChangeRepository = class {
       // Seed the merge ancestor from the authored markdown text; a binary file
       // (base64 in `content`) never merges, so it passes null.
       content: operation.contentKind === "binary" ? null : operation.content,
-      previousPath: operation.previousPath
+      previousPath: operation.previousPath,
+      replacedContent: operation.contentKind === "binary" ? null : replacedContent ?? null
     });
+  }
+  /**
+   * The producer's last known text for the file this operation touches, read
+   * from the pre-commit state. A binary mapping keeps no body, so it yields null.
+   */
+  previousContentFor(state, operation) {
+    const mapping = state.mappings.find(
+      (entry) => entry.fileId === operation.fileId
+    );
+    if (mapping === void 0 || mapping.contentKind === "binary") return null;
+    return mapping.content;
   }
   /**
    * Adopts, without enqueuing, the producer mapping+head for a file the apply
