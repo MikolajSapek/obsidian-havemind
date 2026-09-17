@@ -19993,6 +19993,7 @@ var VaultApplyAdapter = class {
       await this.files.forgetPath(decoded.previousPath);
     }
     const onDisk = await this.files.readByPath(decoded.path);
+    let bootstrapTakeServerHead = false;
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
       const bootstrapVacant = origin === "bootstrap" && onDisk !== null && isVacantMarkdown(onDisk);
@@ -20002,6 +20003,7 @@ var VaultApplyAdapter = class {
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
         await this.files.forgetBaseContent(owner);
+        bootstrapTakeServerHead = true;
       } else if (onDisk !== null && contentMatches(onDisk, text)) {
         const contentHash2 = await this.hashContent(text);
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
@@ -20048,7 +20050,7 @@ var VaultApplyAdapter = class {
         return "noop";
       }
       const base = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && isBootstrapReplaceable(onDisk, base)) {
+      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(onDisk, base))) {
       } else {
         const onDiskHash = await this.hashContent(onDisk);
         const diverged = base === null || onDiskHash !== base;
@@ -20084,7 +20086,7 @@ var VaultApplyAdapter = class {
     const preWriteOnDisk = await this.files.readByPath(decoded.path);
     if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, text)) {
       const preWriteBase = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && isBootstrapReplaceable(preWriteOnDisk, preWriteBase)) {
+      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(preWriteOnDisk, preWriteBase))) {
       } else {
         const preWriteHash = await this.hashContent(preWriteOnDisk);
         if (preWriteBase === null || preWriteHash !== preWriteBase) {
@@ -20434,8 +20436,8 @@ function contentMatches(onDisk, incoming) {
 function isVacantMarkdown(text) {
   return canonicalizeMarkdown(text).trim().length === 0;
 }
-function isBootstrapReplaceable(onDisk, base) {
-  return base === null || isVacantMarkdown(onDisk);
+function isBootstrapReplaceable(onDisk, _base) {
+  return isVacantMarkdown(onDisk);
 }
 
 // src/runtime/adapters/vault-file-port.ts
@@ -20498,10 +20500,31 @@ async function ensureParentFolders(vault, path) {
   }
 }
 function createVaultFilePort(options) {
-  const { vault, state, configApply } = options;
+  const { vault, state, configApply, workspace, hashContent } = options;
   return {
-    openBufferStates() {
-      return [];
+    async openBufferStates(fileId) {
+      if (workspace === void 0 || hashContent === void 0) {
+        return [];
+      }
+      const path = state.pathForFileId(fileId);
+      if (path === null) {
+        return [];
+      }
+      const baseHash = state.baseHashFor(fileId);
+      const buffers = [];
+      for (const leaf of workspace.getLeavesOfType("markdown")) {
+        if (!isMarkdownEditorView(leaf.view)) {
+          continue;
+        }
+        const editor = leaf.view;
+        const file2 = editor.file;
+        if (file2 === null || file2.path !== path) {
+          continue;
+        }
+        const currentHash = await hashContent(editor.getViewData());
+        buffers.push({ baseHash, currentHash });
+      }
+      return buffers;
     },
     fileIdAtPath(path) {
       return state.fileIdAtPath(path);
@@ -20606,6 +20629,13 @@ function createVaultFilePort(options) {
     recordPathOwner: (fileId, path) => state.recordPathOwner(fileId, path),
     forgetPath: (path) => state.forgetPath(path)
   };
+}
+function isMarkdownEditorView(view) {
+  if (typeof view !== "object" || view === null) {
+    return false;
+  }
+  const candidate = view;
+  return typeof candidate.getViewData === "function" && "file" in candidate;
 }
 
 // src/runtime/onboarding-secrets.ts
@@ -22769,13 +22799,17 @@ async function forgetLocalMaterialization(store, input) {
   await store.forgetBaseHash(input.fileId);
   await store.forgetBaseContent(input.fileId);
 }
-async function healStaleBasesAfterLocalPush(store, heals, headFor) {
+async function healStaleBasesAfterLocalPush(store, heals, headFor, diskContentHashFor) {
   let healed = 0;
   for (const heal of heals) {
     const head = headFor(heal.fileId);
     if (head === null || !await store.isLocallyAuthored(head)) continue;
     const base = store.baseHashFor(heal.fileId);
     if (base === heal.contentHash) continue;
+    if (diskContentHashFor !== void 0) {
+      const diskHash = await diskContentHashFor(heal.fileId);
+      if (diskHash !== heal.contentHash) continue;
+    }
     await store.recordBaseHash(heal.fileId, heal.contentHash);
     if (heal.content !== null) {
       await store.recordBaseContent(heal.fileId, heal.content);
@@ -23093,7 +23127,16 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
           contentHash: mapping.contentHash,
           content: mapping.contentKind === "binary" ? null : mapping.content
         })),
-        (fileId) => heads.get(fileId) ?? null
+        (fileId) => heads.get(fileId) ?? null,
+        async (fileId) => {
+          const mapping = mappings.find((entry) => entry.fileId === fileId);
+          if (mapping === void 0) return null;
+          if (!await snapshot.exists(mapping.path)) return null;
+          if (mapping.contentKind === "binary") {
+            return hashBlob(await snapshot.readBinary(mapping.path));
+          }
+          return hashPlaintext(await snapshot.readText(mapping.path));
+        }
       );
     })()
   );
@@ -24361,7 +24404,11 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
       // receiving device restarted Obsidian, because Obsidian caches its config
       // in memory and the plugin never signalled a reload. `css-change` is the
       // documented workspace event that makes it re-read snippets and themes.
-      configApply
+      configApply,
+      // Report open markdown editors so a peer edit cannot silently overwrite
+      // unsaved local buffer content (PC↔PC and desktop generally).
+      workspace: plugin.app.workspace,
+      hashContent: (content) => hashPlaintext(content)
     }),
     conflictFolder: CONFLICT_FOLDER,
     resolveRevision: connection.resolveRevision,
