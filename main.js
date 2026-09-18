@@ -23395,6 +23395,36 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
   };
 }
 
+// src/runtime/adapters/access-token-diagnostics.ts
+function describe3(error51) {
+  if (error51 instanceof Error && error51.message !== "") return error51.message;
+  if (typeof error51 === "string" && error51 !== "") return error51;
+  try {
+    return JSON.stringify(error51) ?? "unknown error";
+  } catch {
+    return "unknown error";
+  }
+}
+function createDiagnosticAccessToken(mint, options = {}) {
+  const report = options.onFailure ?? ((reason) => {
+    console.warn(`Havemind: could not mint an access token: ${reason}`);
+  });
+  const getToken = (async () => {
+    try {
+      const token = await mint();
+      getToken.lastFailure = null;
+      return token;
+    } catch (error51) {
+      const reason = describe3(error51);
+      getToken.lastFailure = reason;
+      report(reason);
+      return null;
+    }
+  });
+  getToken.lastFailure = null;
+  return getToken;
+}
+
 // src/runtime/adapters/sync-controller.ts
 var import_obsidian6 = require("obsidian");
 
@@ -24849,13 +24879,13 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     ...selfMembership === void 0 ? {} : { selfMembership },
     apiBaseUrl: connection.apiBaseUrl,
     vaultId: connection.vaultId,
-    getAccessToken: async () => {
-      try {
-        return await accessProvider.getAccessToken();
-      } catch {
-        return null;
-      }
-    },
+    // A failure still yields null (callers treat that as "offline for now"),
+    // but the reason is reported and remembered instead of discarded. Swallowing
+    // it produced a device that issued no requests while the panel still showed
+    // the last successful cycle, with nothing anywhere saying why.
+    getAccessToken: createDiagnosticAccessToken(
+      () => accessProvider.getAccessToken()
+    ),
     // The live durable state, so the plugin can read the send-queue (SND-01) and
     // drive the auto-repair sweep (MRG-05) off the same store the runner uses.
     state,
