@@ -4,6 +4,9 @@ var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __typeError = (msg) => {
+  throw TypeError(msg);
+};
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __export = (target, all) => {
   for (var name in all)
@@ -19,6 +22,10 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
+var __privateAdd = (obj, member, value) => member.has(obj) ? __typeError("Cannot add the same private member more than once") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
 // src/main.ts
 var main_exports = {};
@@ -16600,6 +16607,199 @@ function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// src/sync/file-registry.ts
+function isValidRecord(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const record2 = value;
+  return typeof record2.fileId === "string" && typeof record2.path === "string" && typeof record2.collisionKey === "string" && typeof record2.localHash === "string";
+}
+var _byFileId, _fileIdByPath, _fileIdByCollisionKey, _FileRegistry_instances, replace_fn, insert_fn;
+var FileRegistry = class {
+  constructor(records = []) {
+    __privateAdd(this, _FileRegistry_instances);
+    /** The single source of truth; every lookup below is an index over it. */
+    __privateAdd(this, _byFileId, /* @__PURE__ */ new Map());
+    __privateAdd(this, _fileIdByPath, /* @__PURE__ */ new Map());
+    __privateAdd(this, _fileIdByCollisionKey, /* @__PURE__ */ new Map());
+    for (const record2 of records) {
+      if (!isValidRecord(record2)) continue;
+      __privateMethod(this, _FileRegistry_instances, insert_fn).call(this, record2);
+    }
+  }
+  /**
+   * This device wrote the file and queued a revision for it. The local view and
+   * the head move; the agreed state does NOT, except on first authorship, where
+   * there is no older agreement to protect and a file with no ancestor could
+   * never merge at all.
+   */
+  authoredLocally(event) {
+    const existing = __privateGet(this, _byFileId).get(event.fileId);
+    const kind = event.contentKind ?? existing?.contentKind ?? "markdown";
+    const firstAuthorship = existing === void 0 || existing.agreedHash === null;
+    __privateMethod(this, _FileRegistry_instances, replace_fn).call(this, {
+      fileId: event.fileId,
+      path: event.path,
+      collisionKey: event.collisionKey,
+      localContent: event.content,
+      localHash: event.contentHash,
+      agreedContent: firstAuthorship ? event.content : existing.agreedContent,
+      agreedHash: firstAuthorship ? event.contentHash : existing.agreedHash,
+      headRevisionId: event.headRevisionId,
+      contentKind: kind
+    });
+  }
+  /**
+   * Both peers are known to hold this content: a remote revision was applied, a
+   * convergence was observed, or the server echoed this device's own push back.
+   * Local view, agreed state and head all move together, which is the whole
+   * point of this class.
+   */
+  agreedWithPeer(event) {
+    const existing = __privateGet(this, _byFileId).get(event.fileId);
+    __privateMethod(this, _FileRegistry_instances, replace_fn).call(this, {
+      fileId: event.fileId,
+      path: event.path,
+      collisionKey: event.collisionKey,
+      localContent: event.content,
+      localHash: event.contentHash,
+      agreedContent: event.content,
+      agreedHash: event.contentHash,
+      headRevisionId: event.headRevisionId,
+      contentKind: event.contentKind ?? existing?.contentKind ?? "markdown"
+    });
+  }
+  /**
+   * Sets individual fields of a record, leaving the others untouched.
+   *
+   * MIGRATION ONLY. `vault-apply.ts` still writes the agreed state through six
+   * separate methods (record/forget over path, hash and content), so a caller
+   * sometimes holds just one of those fields. `patch` lets it write that field
+   * without blanking its partners, while keeping every field on ONE record, so
+   * the drift the six-method shape allowed is impossible even mid-migration.
+   * Once the call sites speak in events, this method goes.
+   */
+  patch(fileId, changes) {
+    const existing = __privateGet(this, _byFileId).get(fileId);
+    const path = changes.path ?? existing?.path ?? "";
+    __privateMethod(this, _FileRegistry_instances, replace_fn).call(this, {
+      fileId,
+      path,
+      collisionKey: changes.collisionKey ?? (changes.path !== void 0 ? changes.path.normalize("NFC").toLowerCase() : existing?.collisionKey ?? path.normalize("NFC").toLowerCase()),
+      localContent: existing?.localContent ?? null,
+      localHash: existing?.localHash ?? "",
+      agreedContent: changes.agreedContent !== void 0 ? changes.agreedContent : existing?.agreedContent ?? null,
+      agreedHash: changes.agreedHash !== void 0 ? changes.agreedHash : existing?.agreedHash ?? null,
+      headRevisionId: changes.headRevisionId !== void 0 ? changes.headRevisionId : existing?.headRevisionId ?? null,
+      contentKind: existing?.contentKind ?? "markdown"
+    });
+  }
+  /** The file is gone. Every index drops with the record, in one step. */
+  removed(fileId) {
+    const existing = __privateGet(this, _byFileId).get(fileId);
+    if (existing === void 0) return;
+    __privateGet(this, _byFileId).delete(fileId);
+    __privateGet(this, _fileIdByPath).delete(existing.path);
+    __privateGet(this, _fileIdByCollisionKey).delete(existing.collisionKey);
+  }
+  byFileId(fileId) {
+    return __privateGet(this, _byFileId).get(fileId);
+  }
+  byPath(path) {
+    const fileId = __privateGet(this, _fileIdByPath).get(path);
+    return fileId === void 0 ? void 0 : __privateGet(this, _byFileId).get(fileId);
+  }
+  byCollisionKey(collisionKey) {
+    const fileId = __privateGet(this, _fileIdByCollisionKey).get(collisionKey);
+    return fileId === void 0 ? void 0 : __privateGet(this, _byFileId).get(fileId);
+  }
+  all() {
+    return __privateGet(this, _byFileId).values();
+  }
+  /** The persisted form: a plain array, so the blob stays inspectable by hand. */
+  toJSON() {
+    return [...__privateGet(this, _byFileId).values()];
+  }
+};
+_byFileId = new WeakMap();
+_fileIdByPath = new WeakMap();
+_fileIdByCollisionKey = new WeakMap();
+_FileRegistry_instances = new WeakSet();
+/**
+ * Installs `record` as the sole owner of its fileId, path and collision key,
+ * retiring whatever held those slots before. This is where the old split's
+ * ordering bugs lived: a rename had to forget the old path and record the new
+ * one in the right order, and a path changing hands had to retire the previous
+ * owner's state before adopting the new one. Both are now one operation that
+ * cannot be half-performed.
+ */
+replace_fn = function(record2) {
+  const previousSelf = __privateGet(this, _byFileId).get(record2.fileId);
+  if (previousSelf !== void 0) {
+    __privateGet(this, _fileIdByPath).delete(previousSelf.path);
+    __privateGet(this, _fileIdByCollisionKey).delete(previousSelf.collisionKey);
+  }
+  for (const displacedId of [
+    __privateGet(this, _fileIdByPath).get(record2.path),
+    __privateGet(this, _fileIdByCollisionKey).get(record2.collisionKey)
+  ]) {
+    if (displacedId === void 0 || displacedId === record2.fileId) continue;
+    this.removed(displacedId);
+  }
+  __privateMethod(this, _FileRegistry_instances, insert_fn).call(this, record2);
+};
+insert_fn = function(record2) {
+  __privateGet(this, _byFileId).set(record2.fileId, record2);
+  __privateGet(this, _fileIdByPath).set(record2.path, record2.fileId);
+  __privateGet(this, _fileIdByCollisionKey).set(record2.collisionKey, record2.fileId);
+};
+
+// src/sync/registry-persistence.ts
+function collisionKeyFor(path) {
+  return path.normalize("NFC").toLowerCase();
+}
+function registryFromPersistedState(state) {
+  const pathByFileId = /* @__PURE__ */ new Map();
+  for (const [path, fileId] of Object.entries(state.pathOwners)) {
+    pathByFileId.set(fileId, path);
+  }
+  const fileIds = /* @__PURE__ */ new Set([
+    ...pathByFileId.keys(),
+    ...Object.keys(state.baseHashes),
+    ...Object.keys(state.baseContents)
+  ]);
+  const records = [];
+  for (const fileId of fileIds) {
+    const path = pathByFileId.get(fileId) ?? "";
+    records.push({
+      fileId,
+      path,
+      collisionKey: path === "" ? `\0${fileId}` : collisionKeyFor(path),
+      // The local view is not part of the persisted apply-side state; it is
+      // rebuilt from the vault on the next scan.
+      localContent: null,
+      localHash: "",
+      agreedContent: state.baseContents[fileId] ?? null,
+      agreedHash: state.baseHashes[fileId] ?? null,
+      headRevisionId: null,
+      contentKind: "markdown"
+    });
+  }
+  return new FileRegistry(records);
+}
+function registryToPersistedState(registry2) {
+  const pathOwners = {};
+  const baseHashes = {};
+  const baseContents = {};
+  for (const record2 of registry2.all()) {
+    if (record2.path !== "") pathOwners[record2.path] = record2.fileId;
+    if (record2.agreedHash !== null) baseHashes[record2.fileId] = record2.agreedHash;
+    if (record2.agreedContent !== null) {
+      baseContents[record2.fileId] = record2.agreedContent;
+    }
+  }
+  return { pathOwners, baseHashes, baseContents };
+}
+
 // src/runtime/sync-state.ts
 var PAYLOAD_MISSING_REASON = "payload-missing";
 var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
@@ -16646,6 +16846,9 @@ function base64ByteLength(base643) {
   if (base643.endsWith("==")) padding = 2;
   else if (base643.endsWith("=")) padding = 1;
   return Math.floor(length * 3 / 4) - padding;
+}
+function collisionKeyFor2(path) {
+  return path.normalize("NFC").toLowerCase();
 }
 var DurableSyncState = class {
   constructor(options) {
@@ -16889,21 +17092,15 @@ var DurableSyncState = class {
     return this.cache?.pathOwners[path] ?? null;
   }
   async recordPathOwner(fileId, path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        pathOwners: { ...state.pathOwners, [path]: fileId }
-      });
+    return this.mutateFiles((files) => {
+      files.patch(fileId, { path, collisionKey: collisionKeyFor2(path) });
     });
   }
   async forgetPath(path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(path in state.pathOwners)) return;
-      const pathOwners = { ...state.pathOwners };
-      delete pathOwners[path];
-      await this.mutate({ ...state, pathOwners });
+    return this.mutateFiles((files) => {
+      const record2 = files.byPath(path);
+      if (record2 === void 0) return;
+      files.patch(record2.fileId, { path: "", collisionKey: `\0${record2.fileId}` });
     });
   }
   /**
@@ -16916,21 +17113,14 @@ var DurableSyncState = class {
     return this.cache?.baseHashes[fileId] ?? null;
   }
   async recordBaseHash(fileId, hash2) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        baseHashes: { ...state.baseHashes, [fileId]: hash2 }
-      });
+    return this.mutateFiles((files) => {
+      files.patch(fileId, { agreedHash: hash2 });
     });
   }
   async forgetBaseHash(fileId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(fileId in state.baseHashes)) return;
-      const baseHashes = { ...state.baseHashes };
-      delete baseHashes[fileId];
-      await this.mutate({ ...state, baseHashes });
+    return this.mutateFiles((files) => {
+      if (files.byFileId(fileId) === void 0) return;
+      files.patch(fileId, { agreedHash: null });
     });
   }
   /**
@@ -16941,21 +17131,31 @@ var DurableSyncState = class {
     return this.cache?.baseContents[fileId] ?? null;
   }
   async recordBaseContent(fileId, content) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        baseContents: { ...state.baseContents, [fileId]: content }
-      });
+    return this.mutateFiles((files) => {
+      files.patch(fileId, { agreedContent: content });
     });
   }
   async forgetBaseContent(fileId) {
+    return this.mutateFiles((files) => {
+      if (files.byFileId(fileId) === void 0) return;
+      files.patch(fileId, { agreedContent: null });
+    });
+  }
+  /**
+   * Runs one change against the file registry and persists the result.
+   *
+   * Every file-state write goes through here, so the three persisted maps are
+   * always written together from ONE in-memory record. That is what makes the
+   * old drift impossible: `baseHashes[fileId]` and `baseContents[fileId]` can no
+   * longer be updated independently, because there is no longer an independent
+   * place to update them.
+   */
+  async mutateFiles(change) {
     return this.runExclusive(async () => {
       const state = await this.ensureLoaded();
-      if (!(fileId in state.baseContents)) return;
-      const baseContents = { ...state.baseContents };
-      delete baseContents[fileId];
-      await this.mutate({ ...state, baseContents });
+      const files = registryFromPersistedState(state);
+      change(files);
+      await this.mutate({ ...state, ...registryToPersistedState(files) });
     });
   }
   /**
@@ -22367,7 +22567,6 @@ var OutboxLocalChangeRepository = class {
   async commitLocalChange(commit) {
     const state = await this.options.store.load();
     const { operation } = commit;
-    const previousContent = this.previousContentFor(state, operation);
     const head = state.heads[operation.fileId];
     const kind = operation.kind;
     const envelopeOperation = resolveOperation(kind, head);
@@ -22414,7 +22613,7 @@ var OutboxLocalChangeRepository = class {
           isDelete: kind === "delete"
         })
       );
-      await this.seedSharedState(operation, previousContent);
+      await this.seedSharedState(operation);
       return built.revisionId;
     }
     await this.options.store.save(
@@ -22424,7 +22623,7 @@ var OutboxLocalChangeRepository = class {
         isDelete: true
       })
     );
-    await this.seedSharedState(operation, previousContent);
+    await this.seedSharedState(operation);
     return null;
   }
   /**
@@ -22433,7 +22632,7 @@ var OutboxLocalChangeRepository = class {
    * of forever diverting to a conflict artifact. A create/update/rename seeds the
    * owner+base (and forgets the prior path on a rename); a delete forgets both.
    */
-  async seedSharedState(operation, replacedContent) {
+  async seedSharedState(operation) {
     if (operation.kind === "delete") {
       await this.options.onLocalForgotten?.({
         fileId: operation.fileId,
@@ -22449,20 +22648,8 @@ var OutboxLocalChangeRepository = class {
       // Seed the merge ancestor from the authored markdown text; a binary file
       // (base64 in `content`) never merges, so it passes null.
       content: operation.contentKind === "binary" ? null : operation.content,
-      previousPath: operation.previousPath,
-      replacedContent: operation.contentKind === "binary" ? null : replacedContent ?? null
+      previousPath: operation.previousPath
     });
-  }
-  /**
-   * The producer's last known text for the file this operation touches, read
-   * from the pre-commit state. A binary mapping keeps no body, so it yields null.
-   */
-  previousContentFor(state, operation) {
-    const mapping = state.mappings.find(
-      (entry) => entry.fileId === operation.fileId
-    );
-    if (mapping === void 0 || mapping.contentKind === "binary") return null;
-    return mapping.content;
   }
   /**
    * Adopts, without enqueuing, the producer mapping+head for a file the apply
