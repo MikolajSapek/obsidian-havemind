@@ -4,9 +4,6 @@ var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __typeError = (msg) => {
-  throw TypeError(msg);
-};
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __export = (target, all) => {
   for (var name in all)
@@ -22,10 +19,6 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
-var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
-var __privateAdd = (obj, member, value) => member.has(obj) ? __typeError("Cannot add the same private member more than once") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);
-var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
 // src/main.ts
 var main_exports = {};
@@ -16607,199 +16600,6 @@ function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// src/sync/file-registry.ts
-function isValidRecord(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const record2 = value;
-  return typeof record2.fileId === "string" && typeof record2.path === "string" && typeof record2.collisionKey === "string" && typeof record2.localHash === "string";
-}
-var _byFileId, _fileIdByPath, _fileIdByCollisionKey, _FileRegistry_instances, replace_fn, insert_fn;
-var FileRegistry = class {
-  constructor(records = []) {
-    __privateAdd(this, _FileRegistry_instances);
-    /** The single source of truth; every lookup below is an index over it. */
-    __privateAdd(this, _byFileId, /* @__PURE__ */ new Map());
-    __privateAdd(this, _fileIdByPath, /* @__PURE__ */ new Map());
-    __privateAdd(this, _fileIdByCollisionKey, /* @__PURE__ */ new Map());
-    for (const record2 of records) {
-      if (!isValidRecord(record2)) continue;
-      __privateMethod(this, _FileRegistry_instances, insert_fn).call(this, record2);
-    }
-  }
-  /**
-   * This device wrote the file and queued a revision for it. The local view and
-   * the head move; the agreed state does NOT, except on first authorship, where
-   * there is no older agreement to protect and a file with no ancestor could
-   * never merge at all.
-   */
-  authoredLocally(event) {
-    const existing = __privateGet(this, _byFileId).get(event.fileId);
-    const kind = event.contentKind ?? existing?.contentKind ?? "markdown";
-    const firstAuthorship = existing === void 0 || existing.agreedHash === null;
-    __privateMethod(this, _FileRegistry_instances, replace_fn).call(this, {
-      fileId: event.fileId,
-      path: event.path,
-      collisionKey: event.collisionKey,
-      localContent: event.content,
-      localHash: event.contentHash,
-      agreedContent: firstAuthorship ? event.content : existing.agreedContent,
-      agreedHash: firstAuthorship ? event.contentHash : existing.agreedHash,
-      headRevisionId: event.headRevisionId,
-      contentKind: kind
-    });
-  }
-  /**
-   * Both peers are known to hold this content: a remote revision was applied, a
-   * convergence was observed, or the server echoed this device's own push back.
-   * Local view, agreed state and head all move together, which is the whole
-   * point of this class.
-   */
-  agreedWithPeer(event) {
-    const existing = __privateGet(this, _byFileId).get(event.fileId);
-    __privateMethod(this, _FileRegistry_instances, replace_fn).call(this, {
-      fileId: event.fileId,
-      path: event.path,
-      collisionKey: event.collisionKey,
-      localContent: event.content,
-      localHash: event.contentHash,
-      agreedContent: event.content,
-      agreedHash: event.contentHash,
-      headRevisionId: event.headRevisionId,
-      contentKind: event.contentKind ?? existing?.contentKind ?? "markdown"
-    });
-  }
-  /**
-   * Sets individual fields of a record, leaving the others untouched.
-   *
-   * MIGRATION ONLY. `vault-apply.ts` still writes the agreed state through six
-   * separate methods (record/forget over path, hash and content), so a caller
-   * sometimes holds just one of those fields. `patch` lets it write that field
-   * without blanking its partners, while keeping every field on ONE record, so
-   * the drift the six-method shape allowed is impossible even mid-migration.
-   * Once the call sites speak in events, this method goes.
-   */
-  patch(fileId, changes) {
-    const existing = __privateGet(this, _byFileId).get(fileId);
-    const path = changes.path ?? existing?.path ?? "";
-    __privateMethod(this, _FileRegistry_instances, replace_fn).call(this, {
-      fileId,
-      path,
-      collisionKey: changes.collisionKey ?? (changes.path !== void 0 ? changes.path.normalize("NFC").toLowerCase() : existing?.collisionKey ?? path.normalize("NFC").toLowerCase()),
-      localContent: existing?.localContent ?? null,
-      localHash: existing?.localHash ?? "",
-      agreedContent: changes.agreedContent !== void 0 ? changes.agreedContent : existing?.agreedContent ?? null,
-      agreedHash: changes.agreedHash !== void 0 ? changes.agreedHash : existing?.agreedHash ?? null,
-      headRevisionId: changes.headRevisionId !== void 0 ? changes.headRevisionId : existing?.headRevisionId ?? null,
-      contentKind: existing?.contentKind ?? "markdown"
-    });
-  }
-  /** The file is gone. Every index drops with the record, in one step. */
-  removed(fileId) {
-    const existing = __privateGet(this, _byFileId).get(fileId);
-    if (existing === void 0) return;
-    __privateGet(this, _byFileId).delete(fileId);
-    __privateGet(this, _fileIdByPath).delete(existing.path);
-    __privateGet(this, _fileIdByCollisionKey).delete(existing.collisionKey);
-  }
-  byFileId(fileId) {
-    return __privateGet(this, _byFileId).get(fileId);
-  }
-  byPath(path) {
-    const fileId = __privateGet(this, _fileIdByPath).get(path);
-    return fileId === void 0 ? void 0 : __privateGet(this, _byFileId).get(fileId);
-  }
-  byCollisionKey(collisionKey) {
-    const fileId = __privateGet(this, _fileIdByCollisionKey).get(collisionKey);
-    return fileId === void 0 ? void 0 : __privateGet(this, _byFileId).get(fileId);
-  }
-  all() {
-    return __privateGet(this, _byFileId).values();
-  }
-  /** The persisted form: a plain array, so the blob stays inspectable by hand. */
-  toJSON() {
-    return [...__privateGet(this, _byFileId).values()];
-  }
-};
-_byFileId = new WeakMap();
-_fileIdByPath = new WeakMap();
-_fileIdByCollisionKey = new WeakMap();
-_FileRegistry_instances = new WeakSet();
-/**
- * Installs `record` as the sole owner of its fileId, path and collision key,
- * retiring whatever held those slots before. This is where the old split's
- * ordering bugs lived: a rename had to forget the old path and record the new
- * one in the right order, and a path changing hands had to retire the previous
- * owner's state before adopting the new one. Both are now one operation that
- * cannot be half-performed.
- */
-replace_fn = function(record2) {
-  const previousSelf = __privateGet(this, _byFileId).get(record2.fileId);
-  if (previousSelf !== void 0) {
-    __privateGet(this, _fileIdByPath).delete(previousSelf.path);
-    __privateGet(this, _fileIdByCollisionKey).delete(previousSelf.collisionKey);
-  }
-  for (const displacedId of [
-    __privateGet(this, _fileIdByPath).get(record2.path),
-    __privateGet(this, _fileIdByCollisionKey).get(record2.collisionKey)
-  ]) {
-    if (displacedId === void 0 || displacedId === record2.fileId) continue;
-    this.removed(displacedId);
-  }
-  __privateMethod(this, _FileRegistry_instances, insert_fn).call(this, record2);
-};
-insert_fn = function(record2) {
-  __privateGet(this, _byFileId).set(record2.fileId, record2);
-  __privateGet(this, _fileIdByPath).set(record2.path, record2.fileId);
-  __privateGet(this, _fileIdByCollisionKey).set(record2.collisionKey, record2.fileId);
-};
-
-// src/sync/registry-persistence.ts
-function collisionKeyFor(path) {
-  return path.normalize("NFC").toLowerCase();
-}
-function registryFromPersistedState(state) {
-  const pathByFileId = /* @__PURE__ */ new Map();
-  for (const [path, fileId] of Object.entries(state.pathOwners)) {
-    pathByFileId.set(fileId, path);
-  }
-  const fileIds = /* @__PURE__ */ new Set([
-    ...pathByFileId.keys(),
-    ...Object.keys(state.baseHashes),
-    ...Object.keys(state.baseContents)
-  ]);
-  const records = [];
-  for (const fileId of fileIds) {
-    const path = pathByFileId.get(fileId) ?? "";
-    records.push({
-      fileId,
-      path,
-      collisionKey: path === "" ? `\0${fileId}` : collisionKeyFor(path),
-      // The local view is not part of the persisted apply-side state; it is
-      // rebuilt from the vault on the next scan.
-      localContent: null,
-      localHash: "",
-      agreedContent: state.baseContents[fileId] ?? null,
-      agreedHash: state.baseHashes[fileId] ?? null,
-      headRevisionId: null,
-      contentKind: "markdown"
-    });
-  }
-  return new FileRegistry(records);
-}
-function registryToPersistedState(registry2) {
-  const pathOwners = {};
-  const baseHashes = {};
-  const baseContents = {};
-  for (const record2 of registry2.all()) {
-    if (record2.path !== "") pathOwners[record2.path] = record2.fileId;
-    if (record2.agreedHash !== null) baseHashes[record2.fileId] = record2.agreedHash;
-    if (record2.agreedContent !== null) {
-      baseContents[record2.fileId] = record2.agreedContent;
-    }
-  }
-  return { pathOwners, baseHashes, baseContents };
-}
-
 // src/runtime/sync-state.ts
 var PAYLOAD_MISSING_REASON = "payload-missing";
 var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
@@ -16812,11 +16612,6 @@ function parseFailedToQueuePath(revisionId) {
   if (!revisionId.startsWith(FAILED_TO_QUEUE_PREFIX)) return null;
   const path = revisionId.slice(FAILED_TO_QUEUE_PREFIX.length);
   return path.length === 0 ? null : path;
-}
-function readableCursor(raw) {
-  if (!isRecord3(raw)) return 0;
-  const cursor = raw.cursor;
-  return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
 }
 function emptyState() {
   return {
@@ -16846,9 +16641,6 @@ function base64ByteLength(base643) {
   if (base643.endsWith("==")) padding = 2;
   else if (base643.endsWith("=")) padding = 1;
   return Math.floor(length * 3 / 4) - padding;
-}
-function collisionKeyFor2(path) {
-  return path.normalize("NFC").toLowerCase();
 }
 var DurableSyncState = class {
   constructor(options) {
@@ -16912,22 +16704,6 @@ var DurableSyncState = class {
      * synchronous assignment, so any read sees a complete, consistent snapshot.
      */
     __publicField(this, "mutationTail", Promise.resolve());
-    /**
-     * Depth of nested {@link runBatched} sections. Above zero, `mutate` updates the
-     * in-memory cache but does NOT hit the persist port; the outermost section
-     * flushes once on the way out.
-     *
-     * Why: every `record*` call used to re-serialise the WHOLE blob, and the
-     * persist port turns one save into two full load+save round trips (stage, then
-     * promote) over a blob that itself grows with the vault, because it carries the
-     * base CONTENT of every note. Materialising N heads was therefore O(N) writes
-     * of an O(N) blob: a few hundred notes took twenty minutes to join on a phone,
-     * which is long enough for iOS to background the app mid-bootstrap and leave
-     * the half-applied state this batching also makes recoverable.
-     */
-    __publicField(this, "batchDepth", 0);
-    /** True when a `mutate` was swallowed by an open batch and still needs a flush. */
-    __publicField(this, "batchDirty", false);
     this.persist = options.persist;
     this.maxLocallyAuthored = options.maxLocallyAuthored ?? DEFAULT_MAX_LOCALLY_AUTHORED;
     this.now = options.now ?? (() => Date.now());
@@ -17092,15 +16868,21 @@ var DurableSyncState = class {
     return this.cache?.pathOwners[path] ?? null;
   }
   async recordPathOwner(fileId, path) {
-    return this.mutateFiles((files) => {
-      files.patch(fileId, { path, collisionKey: collisionKeyFor2(path) });
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        pathOwners: { ...state.pathOwners, [path]: fileId }
+      });
     });
   }
   async forgetPath(path) {
-    return this.mutateFiles((files) => {
-      const record2 = files.byPath(path);
-      if (record2 === void 0) return;
-      files.patch(record2.fileId, { path: "", collisionKey: `\0${record2.fileId}` });
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(path in state.pathOwners)) return;
+      const pathOwners = { ...state.pathOwners };
+      delete pathOwners[path];
+      await this.mutate({ ...state, pathOwners });
     });
   }
   /**
@@ -17113,14 +16895,21 @@ var DurableSyncState = class {
     return this.cache?.baseHashes[fileId] ?? null;
   }
   async recordBaseHash(fileId, hash2) {
-    return this.mutateFiles((files) => {
-      files.patch(fileId, { agreedHash: hash2 });
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        baseHashes: { ...state.baseHashes, [fileId]: hash2 }
+      });
     });
   }
   async forgetBaseHash(fileId) {
-    return this.mutateFiles((files) => {
-      if (files.byFileId(fileId) === void 0) return;
-      files.patch(fileId, { agreedHash: null });
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(fileId in state.baseHashes)) return;
+      const baseHashes = { ...state.baseHashes };
+      delete baseHashes[fileId];
+      await this.mutate({ ...state, baseHashes });
     });
   }
   /**
@@ -17131,49 +16920,21 @@ var DurableSyncState = class {
     return this.cache?.baseContents[fileId] ?? null;
   }
   async recordBaseContent(fileId, content) {
-    return this.mutateFiles((files) => {
-      files.patch(fileId, { agreedContent: content });
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        baseContents: { ...state.baseContents, [fileId]: content }
+      });
     });
   }
   async forgetBaseContent(fileId) {
-    return this.mutateFiles((files) => {
-      if (files.byFileId(fileId) === void 0) return;
-      files.patch(fileId, { agreedContent: null });
-    });
-  }
-  /**
-   * Runs one change against the file registry and persists the result.
-   *
-   * Every file-state write goes through here, so the three persisted maps are
-   * always written together from ONE in-memory record. That is what makes the
-   * old drift impossible: `baseHashes[fileId]` and `baseContents[fileId]` can no
-   * longer be updated independently, because there is no longer an independent
-   * place to update them.
-   */
-  /**
-   * The persisted file state as the three maps, read from the warmed cache.
-   *
-   * Used to build the join-time adoption index: what this device holds as agreed
-   * IS the vault's current content, so a local file matching any of it should
-   * adopt that identity rather than be pushed as a second copy.
-   */
-  fileStateSnapshot() {
-    const cache = this.cache;
-    if (cache === null) {
-      return { pathOwners: {}, baseHashes: {}, baseContents: {} };
-    }
-    return {
-      pathOwners: cache.pathOwners,
-      baseHashes: cache.baseHashes,
-      baseContents: cache.baseContents
-    };
-  }
-  async mutateFiles(change) {
     return this.runExclusive(async () => {
       const state = await this.ensureLoaded();
-      const files = registryFromPersistedState(state);
-      change(files);
-      await this.mutate({ ...state, ...registryToPersistedState(files) });
+      if (!(fileId in state.baseContents)) return;
+      const baseContents = { ...state.baseContents };
+      delete baseContents[fileId];
+      await this.mutate({ ...state, baseContents });
     });
   }
   /**
@@ -17374,46 +17135,13 @@ var DurableSyncState = class {
     if (outcome.salvage !== null) {
       this.cache = outcome.salvage;
     } else {
-      this.cache = outcome.state;
+      this.cache = emptyState();
       if (outcome.outboxAtRisk) this.recoveryRequired = true;
     }
     await this.persist.save(this.toDiskForm(this.cache));
   }
-  /**
-   * Runs `body` with persistence coalesced into ONE write at the end.
-   *
-   * Every mutation inside still updates the in-memory cache immediately, so
-   * readers (`fileIdAtPath`, `baseHashFor`, …) behave exactly as they do outside
-   * a batch and the on-disk result is identical, only the number of writes
-   * changes. Re-entrant: a nested call joins the outer batch and the flush
-   * happens once, when the outermost section exits.
-   *
-   * The flush also runs when `body` REJECTS, then the error is re-thrown. That
-   * is the important half for the bootstrap: an interrupted join must still
-   * durably record the heads it already materialised, or the next connect finds
-   * cursor zero over a populated vault and replays the whole history onto it.
-   */
-  async runBatched(body) {
-    this.batchDepth += 1;
-    try {
-      return await body();
-    } finally {
-      this.batchDepth -= 1;
-      if (this.batchDepth === 0 && this.batchDirty) {
-        this.batchDirty = false;
-        const current = this.cache;
-        if (current !== null) {
-          await this.persist.save(this.toDiskForm(current));
-        }
-      }
-    }
-  }
   async mutate(next) {
     this.cache = next;
-    if (this.batchDepth > 0) {
-      this.batchDirty = true;
-      return;
-    }
     await this.persist.save(this.toDiskForm(next));
   }
   /**
@@ -17457,16 +17185,8 @@ var DurableSyncState = class {
    */
   async safePutPayload(revisionId, payloadBase64) {
     if (this.payloadStore === void 0) return false;
-    if (payloadBase64.length === 0) return false;
     try {
       await this.payloadStore.putPayload(revisionId, payloadBase64);
-      const roundTrip = await this.payloadStore.getPayload(revisionId);
-      if (roundTrip !== payloadBase64) {
-        console.warn(
-          `Havemind: outbox payload for ${revisionId} failed round-trip verify; keeping it inline in data.json.`
-        );
-        return false;
-      }
       return true;
     } catch {
       console.warn(
@@ -17515,7 +17235,7 @@ var DurableSyncState = class {
     for (const env of state.outbox) {
       if (env.payloadExternalized === true) {
         const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string" && payload.length > 0) {
+        if (typeof payload === "string") {
           this.externalized.add(env.revisionId);
           nextOutbox.push({ ...env, payloadBase64: payload });
           cacheChanged = true;
@@ -17533,7 +17253,7 @@ var DurableSyncState = class {
         }
       } else {
         nextOutbox.push(env);
-        if (env.payloadBase64.length > 0 && await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
           this.externalized.add(env.revisionId);
           persistNeeded = true;
         }
@@ -17543,7 +17263,7 @@ var DurableSyncState = class {
     for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
       if (env.payloadExternalized === true) {
         const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string" && payload.length > 0) {
+        if (typeof payload === "string") {
           this.externalized.add(env.revisionId);
           nextStash[key] = { ...env, payloadBase64: payload };
           cacheChanged = true;
@@ -17552,7 +17272,7 @@ var DurableSyncState = class {
         }
       } else {
         nextStash[key] = env;
-        if (env.payloadBase64.length > 0 && await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
           this.externalized.add(env.revisionId);
           persistNeeded = true;
         }
@@ -17615,7 +17335,7 @@ function parsePersistedState(raw) {
   }
   return {
     status: "corrupt",
-    state: { ...emptyState(), cursor: readableCursor(raw) },
+    state: emptyState(),
     salvage: salvageState(raw),
     outboxAtRisk: outboxAtRisk(raw)
   };
@@ -18103,9 +17823,6 @@ function createSerializedDataPort(mutex) {
         }
         return next;
       });
-    },
-    update(mutator) {
-      return mutex.update(mutator);
     }
   };
 }
@@ -18369,12 +18086,10 @@ var RosterStore = class {
   }
   /** Upserts a member (idempotent by membershipId) and persists the roster. */
   async recordMember(member) {
-    let next = [];
-    await this.persist.update((data) => {
-      const base = isRecord5(data) ? data : {};
-      next = upsertRosterMember(parseRoster(base), member);
-      return { ...base, [ROSTER_KEY]: next };
-    });
+    const data = await this.persist.load();
+    const base = isRecord5(data) ? data : {};
+    const next = upsertRosterMember(parseRoster(data), member);
+    await this.persist.save({ ...base, [ROSTER_KEY]: next });
     return next;
   }
   /**
@@ -18384,11 +18099,10 @@ var RosterStore = class {
    * is rewritten; every other plugin-data key is preserved.
    */
   async replaceMembers(members) {
+    const data = await this.persist.load();
+    const base = isRecord5(data) ? data : {};
     const next = [...members];
-    await this.persist.update((data) => {
-      const base = isRecord5(data) ? data : {};
-      return { ...base, [ROSTER_KEY]: next };
-    });
+    await this.persist.save({ ...base, [ROSTER_KEY]: next });
     return next;
   }
   /**
@@ -18398,12 +18112,10 @@ var RosterStore = class {
    * drops the departed member.
    */
   async removeMember(membershipId) {
-    let next = [];
-    await this.persist.update((data) => {
-      const base = isRecord5(data) ? data : {};
-      next = removeRosterMember(parseRoster(base), membershipId);
-      return { ...base, [ROSTER_KEY]: next };
-    });
+    const data = await this.persist.load();
+    const base = isRecord5(data) ? data : {};
+    const next = removeRosterMember(parseRoster(data), membershipId);
+    await this.persist.save({ ...base, [ROSTER_KEY]: next });
     return next;
   }
 };
@@ -18545,17 +18257,13 @@ var LABELS = {
   offline: "Offline",
   conflict: "Conflict",
   deferred: "Waiting to apply",
-  unsent: "Changes not sent yet",
   "reconnect-required": "Reconnect required",
-  "recovery-required": "Recovery required",
   "reset-required": "Reset required"
 };
 var RESET_REQUIRED_DETAIL = "The stored connection data is incomplete or unreadable. Reset the connection and pair this device again.";
-var RECOVERY_REQUIRED_DETAIL = "The local sync state is incomplete or inconsistent. Sync was stopped before any files were changed.";
 var NO_E2EE_NOTE = "Private Tailscale network only, no end-to-end encryption.";
 var PANE_NETWORK_NOTE = "Private Tailscale network \xB7 Encrypted in transit";
 var DEFERRED_DETAIL = "A change waits for an open note to settle before applying.";
-var UNSENT_DETAIL = "A local change is still queued to send and will retry automatically.";
 function connectionStatusFromCycle(status) {
   switch (status) {
     case "synced":
@@ -18568,10 +18276,6 @@ function connectionStatusFromCycle(status) {
     // its own waiting state rather than the conflict warning.
     case "deferred":
       return "deferred";
-    // Reached the server, but a queued revision did not land. Quieter than
-    // offline, never "synced".
-    case "unsent":
-      return "unsent";
     case "unauthenticated":
       return "reconnect-required";
   }
@@ -18652,28 +18356,12 @@ var PANEL_STYLES = {
     spin: false,
     showForm: false
   },
-  // Nothing is broken and no user action is required: the next cycle retries the
-  // send, so this is muted like `deferred` rather than a warning.
-  unsent: {
-    icon: "clock",
-    label: "Changes not sent yet",
-    colorToken: "--text-muted",
-    spin: false,
-    showForm: false
-  },
   "reconnect-required": {
     icon: "alert-triangle",
     label: "Reconnect required",
     colorToken: "--text-error",
     spin: false,
     showForm: true
-  },
-  "recovery-required": {
-    icon: "shield-alert",
-    label: "Recovery required",
-    colorToken: "--text-error",
-    spin: false,
-    showForm: false
   },
   // The paste form stays available alongside the Reset button: pairing this
   // device afresh overwrites the broken record and is an equally valid way out.
@@ -18700,14 +18388,8 @@ function buildConnectionPanel(input) {
   if (input.status === "deferred") {
     parts.push(DEFERRED_DETAIL);
   }
-  if (input.status === "unsent") {
-    parts.push(UNSENT_DETAIL);
-  }
   if (input.status === "reset-required") {
     parts.push(input.errorMessage ?? RESET_REQUIRED_DETAIL);
-  }
-  if (input.status === "recovery-required") {
-    parts.push(input.errorMessage ?? RECOVERY_REQUIRED_DETAIL);
   }
   parts.push(PANE_NETWORK_NOTE);
   return {
@@ -20090,32 +19772,6 @@ var VaultApplyAdapter = class {
     return this.files.openBufferStates(fileId);
   }
   /**
-   * Own-revision echo from the server. Never rewrites the file. When on-disk
-   * content already matches the echoed revision, advances the synced base so
-   * solo pushes do not leave `baseHash` stuck forever after suppress.
-   */
-  async acknowledgeOwnEcho(event) {
-    if (event.revision.contentHash.length === 0) return;
-    let decoded;
-    try {
-      decoded = await this.resolveRevision(event);
-    } catch {
-      return;
-    }
-    if (decoded.operation === "delete") {
-      return;
-    }
-    const onDisk = await this.files.readByPath(decoded.path);
-    if (onDisk === null) return;
-    const text = decoded.content ?? "";
-    if (!contentMatches(onDisk, text)) return;
-    const fileId = event.revision.fileId;
-    const baseHash = await this.hashContent(onDisk);
-    await this.files.recordBaseHash(fileId, baseHash);
-    await this.files.recordBaseContent(fileId, onDisk);
-    await this.files.recordPathOwner(fileId, decoded.path);
-  }
-  /**
    * The per-file lock key: the file's canonical collision key, so remote apply
    * and the local producer (which keys on the same collision key) share ONE
    * critical section per file. Falls back to the raw path for a non-syncable
@@ -20134,50 +19790,35 @@ var VaultApplyAdapter = class {
       () => this.applyDecoded(event, decoded, fileId, origin)
     );
   }
-  async applyDelete(event, decoded, fileId, origin) {
-    const path = decoded.path;
-    const owner = this.files.fileIdAtPath(path);
-    const binary = decoded.kind === "binary";
-    const onDisk = binary ? null : await this.files.readByPath(path);
-    const binaryOnDisk = binary ? await this.files.readBinaryByPath(path) : null;
-    const exists = onDisk !== null || binaryOnDisk !== null;
-    const base = owner === null ? null : this.files.baseHashFor(owner);
-    const diskHash = binaryOnDisk !== null ? await hashBlob(binaryOnDisk) : onDisk === null ? null : await this.hashContent(onDisk);
-    const unchanged = base !== null && diskHash === base;
-    if (exists && !resolvesLastWriterWins(path)) {
-      if (owner === fileId && !unchanged) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-      if (owner !== null && owner !== fileId && !unchanged) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-    }
-    if (!exists && owner !== fileId) return "applied";
-    if (owner !== null && owner !== fileId) {
-      await this.producerSync?.onRemoteDelete({ fileId: owner, path });
-      await this.files.forgetBaseHash(owner);
-      await this.files.forgetBaseContent(owner);
-    }
-    await this.producerSync?.onRemoteDelete({ fileId, path });
-    await this.files.deleteByPath(path);
-    await this.files.forgetPath(path);
-    await this.files.forgetBaseHash(fileId);
-    await this.files.forgetBaseContent(fileId);
-    this.onRemoteApplied?.({
-      revisionId: event.revision.revisionId,
-      fileId,
-      path,
-      operation: decoded.operation,
-      origin,
-      ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
-    });
-    return "applied";
-  }
   async applyDecoded(event, decoded, fileId, origin) {
     if (decoded.operation === "delete") {
-      return this.applyDelete(event, decoded, fileId, origin);
+      if (this.files.fileIdAtPath(decoded.path) === fileId) {
+        if (!resolvesLastWriterWins(decoded.path)) {
+          const onDisk2 = await this.files.readByPath(decoded.path);
+          if (onDisk2 !== null) {
+            const base = this.files.baseHashFor(fileId);
+            const onDiskHash = await this.hashContent(onDisk2);
+            if (base === null || onDiskHash !== base) {
+              await this.writeConflict(event, decoded);
+              return "conflict";
+            }
+          }
+        }
+        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
+        await this.files.deleteByPath(decoded.path);
+        await this.files.forgetPath(decoded.path);
+        await this.files.forgetBaseHash(fileId);
+        await this.files.forgetBaseContent(fileId);
+        this.onRemoteApplied?.({
+          revisionId: event.revision.revisionId,
+          fileId,
+          path: decoded.path,
+          operation: decoded.operation,
+          origin,
+          ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
+        });
+      }
+      return "applied";
     }
     if (decoded.kind === "binary") {
       return this.applyRemoteBinary(event, decoded, fileId, origin);
@@ -20210,18 +19851,9 @@ var VaultApplyAdapter = class {
       await this.files.forgetPath(decoded.previousPath);
     }
     const onDisk = await this.files.readByPath(decoded.path);
-    let bootstrapTakeServerHead = false;
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
-      const bootstrapVacant = origin === "bootstrap" && onDisk !== null && isVacantMarkdown(onDisk);
-      const ownerBase = this.files.baseHashFor(owner);
-      const bootstrapUnchanged = origin === "bootstrap" && onDisk !== null && ownerBase !== null && await this.hashContent(onDisk) === ownerBase;
-      if (bootstrapVacant || bootstrapUnchanged) {
-        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-        await this.files.forgetBaseHash(owner);
-        await this.files.forgetBaseContent(owner);
-        bootstrapTakeServerHead = true;
-      } else if (onDisk !== null && contentMatches(onDisk, text)) {
+      if (onDisk !== null && contentMatches(onDisk, text)) {
         const contentHash2 = await this.hashContent(text);
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
@@ -20238,17 +19870,14 @@ var VaultApplyAdapter = class {
           revisionId: event.revision.revisionId
         });
         return "noop";
-      } else if (!lastWriterWins) {
-        if (decoded.operation === "create" && origin !== "bootstrap") {
-          return "noop";
-        }
+      }
+      if (!lastWriterWins) {
         await this.writeConflict(event, decoded);
         return "conflict";
-      } else {
-        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-        await this.files.forgetBaseHash(owner);
-        await this.files.forgetBaseContent(owner);
       }
+      await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+      await this.files.forgetBaseHash(owner);
+      await this.files.forgetBaseContent(owner);
     }
     if (onDisk !== null) {
       if (contentMatches(onDisk, text)) {
@@ -20267,27 +19896,24 @@ var VaultApplyAdapter = class {
         return "noop";
       }
       const base = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(onDisk))) {
-      } else {
-        const onDiskHash = await this.hashContent(onDisk);
-        const diverged = base === null || onDiskHash !== base;
-        if (diverged || !await this.isCausalFastForward(fileId, event)) {
-          const merged = await this.tryMergeApply(
-            event,
-            decoded,
-            fileId,
-            onDisk,
-            text,
-            base,
-            origin
-          );
-          if (merged !== null) {
-            return merged;
-          }
-          if (!lastWriterWins) {
-            await this.writeConflict(event, decoded);
-            return "conflict";
-          }
+      const onDiskHash = await this.hashContent(onDisk);
+      const diverged = base === null || onDiskHash !== base;
+      if (diverged || !await this.isCausalFastForward(fileId, event)) {
+        const merged = await this.tryMergeApply(
+          event,
+          decoded,
+          fileId,
+          onDisk,
+          text,
+          base,
+          origin
+        );
+        if (merged !== null) {
+          return merged;
+        }
+        if (!lastWriterWins) {
+          await this.writeConflict(event, decoded);
+          return "conflict";
         }
       }
     }
@@ -20303,26 +19929,23 @@ var VaultApplyAdapter = class {
     const preWriteOnDisk = await this.files.readByPath(decoded.path);
     if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, text)) {
       const preWriteBase = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && (bootstrapTakeServerHead || isBootstrapReplaceable(preWriteOnDisk))) {
-      } else {
-        const preWriteHash = await this.hashContent(preWriteOnDisk);
-        if (preWriteBase === null || preWriteHash !== preWriteBase) {
-          await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-          const merged = await this.tryMergeApply(
-            event,
-            decoded,
-            fileId,
-            preWriteOnDisk,
-            text,
-            preWriteBase,
-            origin
-          );
-          if (merged !== null) {
-            return merged;
-          }
-          await this.writeConflict(event, decoded);
-          return "conflict";
+      const preWriteHash = await this.hashContent(preWriteOnDisk);
+      if (preWriteBase === null || preWriteHash !== preWriteBase) {
+        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
+        const merged = await this.tryMergeApply(
+          event,
+          decoded,
+          fileId,
+          preWriteOnDisk,
+          text,
+          preWriteBase,
+          origin
+        );
+        if (merged !== null) {
+          return merged;
         }
+        await this.writeConflict(event, decoded);
+        return "conflict";
       }
     }
     try {
@@ -20465,12 +20088,7 @@ var VaultApplyAdapter = class {
     const onDisk = await this.files.readBinaryByPath(decoded.path);
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
-      const bootstrapVacant = origin === "bootstrap" && onDisk !== null && onDisk.byteLength === 0;
-      if (bootstrapVacant) {
-        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-        await this.files.forgetBaseHash(owner);
-        await this.files.forgetBaseContent(owner);
-      } else if (onDisk !== null && bytesEqual(onDisk, bytes)) {
+      if (onDisk !== null && bytesEqual(onDisk, bytes)) {
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
         await this.files.recordPathOwner(fileId, decoded.path);
@@ -20484,17 +20102,14 @@ var VaultApplyAdapter = class {
           revisionId: event.revision.revisionId
         });
         return "noop";
-      } else if (!lastWriterWins) {
-        if (decoded.operation === "create" && origin !== "bootstrap") {
-          return "noop";
-        }
+      }
+      if (!lastWriterWins) {
         await this.writeConflict(event, decoded);
         return "conflict";
-      } else {
-        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-        await this.files.forgetBaseHash(owner);
-        await this.files.forgetBaseContent(owner);
       }
+      await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
+      await this.files.forgetBaseHash(owner);
+      await this.files.forgetBaseContent(owner);
     }
     if (onDisk !== null) {
       if (bytesEqual(onDisk, bytes)) {
@@ -20511,17 +20126,14 @@ var VaultApplyAdapter = class {
         return "noop";
       }
       const base = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && (base === null || onDisk.byteLength === 0)) {
-      } else {
-        const onDiskHash = await hashBlob(onDisk);
-        if (!lastWriterWins && (base === null || onDiskHash !== base)) {
-          await this.writeConflict(event, decoded);
-          return "conflict";
-        }
-        if (!lastWriterWins && !await this.isCausalFastForward(fileId, event)) {
-          await this.writeConflict(event, decoded);
-          return "conflict";
-        }
+      const onDiskHash = await hashBlob(onDisk);
+      if (!lastWriterWins && (base === null || onDiskHash !== base)) {
+        await this.writeConflict(event, decoded);
+        return "conflict";
+      }
+      if (!lastWriterWins && !await this.isCausalFastForward(fileId, event)) {
+        await this.writeConflict(event, decoded);
+        return "conflict";
       }
     }
     await this.producerSync?.onRemoteWrite({
@@ -20535,14 +20147,11 @@ var VaultApplyAdapter = class {
     const preWriteOnDisk = await this.files.readBinaryByPath(decoded.path);
     if (preWriteOnDisk !== null && !lastWriterWins && !bytesEqual(preWriteOnDisk, bytes)) {
       const preWriteBase = this.files.baseHashFor(fileId);
-      if (origin === "bootstrap" && (preWriteBase === null || preWriteOnDisk.byteLength === 0)) {
-      } else {
-        const preWriteHash = await hashBlob(preWriteOnDisk);
-        if (preWriteBase === null || preWriteHash !== preWriteBase) {
-          await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-          await this.writeConflict(event, decoded);
-          return "conflict";
-        }
+      const preWriteHash = await hashBlob(preWriteOnDisk);
+      if (preWriteBase === null || preWriteHash !== preWriteBase) {
+        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
+        await this.writeConflict(event, decoded);
+        return "conflict";
       }
     }
     try {
@@ -20650,12 +20259,6 @@ function bytesEqual(a, b) {
 function contentMatches(onDisk, incoming) {
   return canonicalizeMarkdown(onDisk) === canonicalizeMarkdown(incoming);
 }
-function isVacantMarkdown(text) {
-  return canonicalizeMarkdown(text).trim().length === 0;
-}
-function isBootstrapReplaceable(onDisk) {
-  return isVacantMarkdown(onDisk);
-}
 
 // src/runtime/adapters/vault-file-port.ts
 async function ensureWritableConflictFolder(vault, folder) {
@@ -20700,14 +20303,7 @@ async function ensureParentFolders(vault, path) {
     prefix = prefix === "" ? segment : `${prefix}/${segment}`;
     const existing = vault.getAbstractFileByPath(prefix);
     if (existing === null) {
-      try {
-        await vault.createFolder(prefix);
-      } catch (error51) {
-        const raced = vault.getAbstractFileByPath(prefix);
-        if (raced instanceof import_obsidian3.TFolder) continue;
-        if (raced !== null) throw new ParentFolderOccupiedError(prefix);
-        throw error51;
-      }
+      await vault.createFolder(prefix);
       continue;
     }
     if (existing instanceof import_obsidian3.TFolder) {
@@ -20717,32 +20313,10 @@ async function ensureParentFolders(vault, path) {
   }
 }
 function createVaultFilePort(options) {
-  const { vault, state, configApply, workspace, hashContent } = options;
+  const { vault, state, configApply } = options;
   return {
-    async openBufferStates(fileId) {
-      if (workspace === void 0 || hashContent === void 0) {
-        return [];
-      }
-      const path = state.pathForFileId(fileId);
-      if (path === null) {
-        return [];
-      }
-      const baseHash = state.baseHashFor(fileId);
-      const buffers = [];
-      for (const leaf of workspace.getLeavesOfType("markdown")) {
-        const leafView = leaf.view;
-        if (!isMarkdownEditorView(leafView)) {
-          continue;
-        }
-        const editor = leafView;
-        const file2 = editor.file;
-        if (file2 === null || file2.path !== path) {
-          continue;
-        }
-        const currentHash = await hashContent(editor.getViewData());
-        buffers.push({ baseHash, currentHash });
-      }
-      return buffers;
+    openBufferStates() {
+      return [];
     },
     fileIdAtPath(path) {
       return state.fileIdAtPath(path);
@@ -20847,13 +20421,6 @@ function createVaultFilePort(options) {
     recordPathOwner: (fileId, path) => state.recordPathOwner(fileId, path),
     forgetPath: (path) => state.forgetPath(path)
   };
-}
-function isMarkdownEditorView(view) {
-  if (typeof view !== "object" || view === null) {
-    return false;
-  }
-  const candidate = view;
-  return typeof candidate.getViewData === "function" && "file" in candidate;
 }
 
 // src/runtime/onboarding-secrets.ts
@@ -21145,16 +20712,12 @@ function registerVaultChangeListeners(vault, handlers) {
 // src/runtime/adapters/producer-state.ts
 var EMPTY_PRODUCER_STATE = { mappings: [], heads: {} };
 function isValidProducerMapping(entry) {
-  return isRecord9(entry) && typeof entry.collisionKey === "string" && (typeof entry.content === "string" || entry.content === null && entry.contentKind === "binary") && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
+  return isRecord9(entry) && typeof entry.collisionKey === "string" && typeof entry.content === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
 }
 function buildProducerMapping(entry) {
-  const isBinary = entry.contentKind === "binary";
   return {
     collisionKey: entry.collisionKey,
-    // AUD-12 migration: a legacy binary mapping may still carry a multi-MB
-    // base64 body. Its raw-byte hash is the complete comparison key, so compact
-    // the body during parse and let the store persist this projection once.
-    content: isBinary ? null : entry.content,
+    content: entry.content,
     contentHash: entry.contentHash,
     // Preserve the binary/markdown discriminator across every load→save
     // cycle. Dropping it here silently converts a persisted binary mapping
@@ -21173,8 +20736,7 @@ function parseProducerStateResult(raw) {
     return {
       status: "absent",
       state: EMPTY_PRODUCER_STATE,
-      quarantinedMappings: [],
-      migrated: false
+      quarantinedMappings: []
     };
   }
   if (!isRecord9(raw) || !Array.isArray(raw.mappings) || !isRecord9(raw.heads)) {
@@ -21184,18 +20746,13 @@ function parseProducerStateResult(raw) {
     return {
       status: "corrupt",
       state: EMPTY_PRODUCER_STATE,
-      quarantinedMappings: [],
-      migrated: false
+      quarantinedMappings: []
     };
   }
   const mappings = [];
   const quarantinedMappings = [];
-  let migrated = false;
   for (const entry of raw.mappings) {
     if (isValidProducerMapping(entry)) {
-      if (entry.contentKind === "binary" && typeof entry.content === "string") {
-        migrated = true;
-      }
       mappings.push(buildProducerMapping(entry));
     } else {
       quarantinedMappings.push(entry);
@@ -21210,12 +20767,7 @@ function parseProducerStateResult(raw) {
   for (const [fileId, revisionId] of Object.entries(raw.heads)) {
     if (typeof revisionId === "string") heads[fileId] = revisionId;
   }
-  return {
-    status: "ok",
-    state: { mappings, heads },
-    quarantinedMappings,
-    migrated
-  };
+  return { status: "ok", state: { mappings, heads }, quarantinedMappings };
 }
 
 // src/runtime/connect-driver.ts
@@ -21251,7 +20803,6 @@ async function driveToConnected(options) {
     );
     if (resumed === CANCELLED) return { phase: "cancelled" };
     state = resumed;
-    options.onPhase?.(state.phase);
     if (state.phase === "connected" || state.phase === "rejected") {
       return state;
     }
@@ -22273,9 +21824,6 @@ var HAVEMIND_STATUS_DISCONNECTED = formatStatusBar({
 var HAVEMIND_STATUS_RESET_REQUIRED = formatStatusBar({
   status: "reset-required"
 });
-var HAVEMIND_STATUS_RECOVERY_REQUIRED = formatStatusBar({
-  status: "recovery-required"
-});
 
 // src/runtime/access-token.ts
 var EXPIRY_SKEW_MS = 3e4;
@@ -22473,58 +22021,6 @@ function createRemoteApplyProducerSync(getProducer) {
   };
 }
 
-// src/runtime/adapters/local-state-gate.ts
-function parseSyncEvidence(raw) {
-  if (!isRecord9(raw) || raw.version !== 1 || !Number.isSafeInteger(raw.cursor) || raw.cursor < 0 || !Array.isArray(raw.outbox) || !Array.isArray(raw.locallyAuthored) || !Array.isArray(raw.deferred)) {
-    return null;
-  }
-  return {
-    cursor: raw.cursor,
-    locallyAuthoredCount: raw.locallyAuthored.length,
-    outboxCount: raw.outbox.length,
-    ownedPathCount: isRecord9(raw.pathOwners) ? Object.keys(raw.pathOwners).length : 0
-  };
-}
-function producerHasHistory(state) {
-  return state.mappings.length > 0 || Object.keys(state.heads).length > 0;
-}
-function syncHasHistory(evidence) {
-  return evidence.cursor > 0 || evidence.locallyAuthoredCount > 0 || evidence.outboxCount > 0 || evidence.ownedPathCount > 0;
-}
-function gateLocalSyncState(rawData) {
-  const data = isRecord9(rawData) ? rawData : {};
-  const rawSync = data.syncState;
-  const rawBackup = data["syncState.bak"];
-  const rawProducer = data.pushProducer;
-  const syncAbsent = rawSync === null || rawSync === void 0;
-  const producerAbsent = rawProducer === null || rawProducer === void 0;
-  if (syncAbsent && producerAbsent) return { kind: "allow" };
-  let sync = syncAbsent ? null : parseSyncEvidence(rawSync);
-  if (!syncAbsent && sync === null) {
-    sync = parseSyncEvidence(rawBackup);
-    if (sync === null) {
-      return { kind: "recovery-required", reason: "corrupt-sync-state" };
-    }
-  }
-  const producer = parseProducerStateResult(rawProducer);
-  if (!producerAbsent && producer.status === "corrupt") {
-    return { kind: "recovery-required", reason: "corrupt-producer-state" };
-  }
-  if (syncAbsent) {
-    return producerHasHistory(producer.state) ? { kind: "recovery-required", reason: "missing-sync-state" } : { kind: "allow" };
-  }
-  if (producerAbsent) {
-    return sync !== null && syncHasHistory(sync) ? { kind: "recovery-required", reason: "missing-producer-state" } : { kind: "allow" };
-  }
-  if (sync !== null && sync.cursor === 0 && producerHasHistory(producer.state) && sync.locallyAuthoredCount === 0 && sync.outboxCount === 0 && sync.ownedPathCount === 0) {
-    return { kind: "recovery-required", reason: "cursor-reset" };
-  }
-  if (sync !== null && sync.cursor === 0 && sync.ownedPathCount > 0) {
-    return { kind: "resume-bootstrap" };
-  }
-  return { kind: "allow" };
-}
-
 // src/runtime/adapters/push-producer.ts
 var import_obsidian5 = require("obsidian");
 
@@ -22700,14 +22196,8 @@ function upsertMapping(mappings, upsert) {
   const next = mappings.filter(
     (mapping) => mapping.fileId !== upsert.fileId && mapping.collisionKey !== upsert.collisionKey
   );
-  next.push(withoutBinaryBody(upsert));
+  next.push(upsert);
   return next;
-}
-function withoutBinaryBody(mapping) {
-  if (mapping.contentKind !== "binary" || mapping.content === null) {
-    return mapping;
-  }
-  return { ...mapping, content: null };
 }
 function resolveOperation(kind, head) {
   const mapped = OPERATION_BY_KIND[kind];
@@ -22735,21 +22225,6 @@ function nextMappings(mappings, commit) {
     next = upsertMapping(next, commit.upsertMapping);
   }
   return next;
-}
-
-// src/sync/join-adoption.ts
-function adoptOrCreate(server, local, claimed = /* @__PURE__ */ new Set()) {
-  const byContent = server.byContentHash(local.contentHash);
-  if (byContent !== void 0 && !claimed.has(byContent.fileId)) {
-    claimed.add(byContent.fileId);
-    return { kind: "adopt", fileId: byContent.fileId };
-  }
-  const atPath = server.byPath(local.path);
-  if (atPath !== void 0 && !claimed.has(atPath.fileId)) {
-    claimed.add(atPath.fileId);
-    return { kind: "adopt-with-edit", fileId: atPath.fileId };
-  }
-  return { kind: "create" };
 }
 
 // src/sync/reconciliation.ts
@@ -22782,13 +22257,12 @@ async function readEligibleContent(vault, readPath, kind) {
   if (kind === "binary") {
     const bytes = await vault.readBinary(readPath);
     if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return "too-large";
-    return { content: bytesToBase642(bytes), contentHash: await hashBlob(bytes) };
+    return { content: bytesToBase642(bytes) };
   }
   return {
     content: normalizeContent2(
       normalizeConfigContent(readPath, await vault.readText(readPath))
-    ),
-    contentHash: null
+    )
   };
 }
 async function reconcileVaultState(options) {
@@ -22839,14 +22313,14 @@ async function reconcileVaultState(options) {
       mappingsByCollision.delete(collisionKey);
       continue;
     }
-    const { content, contentHash } = read;
+    const { content } = read;
     const mapping = mappingsByCollision.get(collisionKey);
     if (mapping === void 0) {
-      unmatchedVault.push({ collisionKey, content, contentHash, kind, readPath });
+      unmatchedVault.push({ collisionKey, content, readPath });
       continue;
     }
     mappingsByCollision.delete(collisionKey);
-    if (kind === "binary" ? mapping.contentHash === contentHash : mapping.content === content) {
+    if (mapping.content === content) {
       unchanged += 1;
     } else if (await observeResilient(readPath, recordSkip, () => observer.observeModify(readPath))) {
       updated += 1;
@@ -22856,7 +22330,6 @@ async function reconcileVaultState(options) {
   }
   const unmatchedMappings = [...mappingsByCollision.values()];
   const {
-    adopted,
     created,
     deleted,
     renamed,
@@ -22865,12 +22338,9 @@ async function reconcileVaultState(options) {
     observer,
     unmatchedVault,
     unmatchedMappings,
-    recordSkip,
-    options.serverIndex,
-    repository
+    recordSkip
   );
   return {
-    adopted,
     attachmentsExcluded,
     binaryExcluded,
     completed: true,
@@ -22898,30 +22368,9 @@ function describeSkipReason(error51) {
   if (error51 instanceof Error && error51.message !== "") return error51.message;
   return "unknown error";
 }
-async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip, serverIndex, repository) {
-  const vaultByContent = groupBy(
-    unmatchedVault,
-    (file2) => file2.kind === "binary" ? `binary:${file2.contentHash ?? ""}` : `markdown:${file2.content}`
-  );
-  const mappingsByContent = groupBy(
-    unmatchedMappings,
-    (mapping) => mapping.contentKind === "binary" ? `binary:${mapping.contentHash}` : `markdown:${mapping.content ?? ""}`
-  );
-  const adoptMapping = serverIndex === void 0 || repository.adoptRemoteMapping === void 0 ? void 0 : async (fileId, file2) => {
-    const classified = classifyVaultPath(file2.readPath);
-    if (!classified.eligible) return;
-    await repository.adoptRemoteMapping?.(
-      {
-        collisionKey: classified.collisionKey,
-        content: file2.kind === "binary" ? null : file2.content,
-        contentHash: file2.contentHash ?? file2.content,
-        ...file2.kind === "binary" ? { contentKind: "binary" } : {},
-        fileId,
-        path: classified.canonicalPath
-      },
-      fileId
-    );
-  };
+async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip) {
+  const vaultByContent = groupBy(unmatchedVault, (file2) => file2.content);
+  const mappingsByContent = groupBy(unmatchedMappings, (m) => m.content);
   const consumedVault = /* @__PURE__ */ new Set();
   const consumedMappings = /* @__PURE__ */ new Set();
   let renamed = 0;
@@ -22945,20 +22394,8 @@ async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMap
     }
   }
   let created = 0;
-  let adopted = 0;
-  const claimed = /* @__PURE__ */ new Set();
   for (const file2 of unmatchedVault) {
     if (consumedVault.has(file2)) continue;
-    const decision = serverIndex === void 0 ? { kind: "create" } : adoptOrCreate(
-      serverIndex,
-      { path: file2.readPath, contentHash: file2.contentHash ?? file2.content },
-      claimed
-    );
-    if (decision.kind !== "create" && adoptMapping !== void 0) {
-      await adoptMapping(decision.fileId, file2);
-      adopted += 1;
-      continue;
-    }
     if (await observeResilient(
       file2.readPath,
       onSkip,
@@ -22982,7 +22419,7 @@ async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMap
       skipped += 1;
     }
   }
-  return { adopted, created, deleted, renamed, skipped };
+  return { created, deleted, renamed, skipped };
 }
 function groupBy(items, key) {
   const groups = /* @__PURE__ */ new Map();
@@ -23062,25 +22499,6 @@ async function forgetLocalMaterialization(store, input) {
   await store.forgetPath(input.path);
   await store.forgetBaseHash(input.fileId);
   await store.forgetBaseContent(input.fileId);
-}
-async function healStaleBasesAfterLocalPush(store, heals, headFor, diskContentHashFor) {
-  let healed = 0;
-  for (const heal of heals) {
-    const head = headFor(heal.fileId);
-    if (head === null || !await store.isLocallyAuthored(head)) continue;
-    const base = store.baseHashFor(heal.fileId);
-    if (base === heal.contentHash) continue;
-    if (diskContentHashFor !== void 0) {
-      const diskHash = await diskContentHashFor(heal.fileId);
-      if (diskHash !== heal.contentHash) continue;
-    }
-    await store.recordBaseHash(heal.fileId, heal.contentHash);
-    if (heal.content !== null) {
-      await store.recordBaseContent(heal.fileId, heal.content);
-    }
-    healed += 1;
-  }
-  return healed;
 }
 
 // src/runtime/modify-debounce.ts
@@ -23162,34 +22580,12 @@ var ModifyDebouncer = class {
   }
 };
 
-// src/sync/registry-server-index.ts
-function serverIndexFromRegistry(registry2, options = {}) {
-  const byHash = /* @__PURE__ */ new Map();
-  const byPath = /* @__PURE__ */ new Map();
-  for (const record2 of registry2.all()) {
-    const hash2 = record2.agreedHash;
-    if (hash2 === null || hash2 === "") continue;
-    if (options.agreedOnly === true && record2.agreedContent === null) continue;
-    const existing = byHash.get(hash2);
-    if (existing === void 0 || record2.fileId < existing.fileId) {
-      byHash.set(hash2, { fileId: record2.fileId, path: record2.path });
-    }
-    if (record2.path !== "") {
-      byPath.set(record2.path, { fileId: record2.fileId, hash: hash2 });
-    }
-  }
-  return {
-    byContentHash: (hash2) => byHash.get(hash2),
-    byPath: (path) => byPath.get(path)
-  };
-}
-
 // src/runtime/adapters/push-producer.ts
 function toActivityKind(kind) {
   return kind === "update" ? "edit" : kind;
 }
-function createPushProducerRepository(options) {
-  const { plugin, state, identity } = options;
+function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock) {
+  const vault = plugin.app.vault;
   const store = {
     async load() {
       const data = await plugin.loadData();
@@ -23210,12 +22606,6 @@ function createPushProducerRepository(options) {
           "Havemind: failed to preserve corrupt producer state to a sidecar."
         );
       }
-      if (result.status === "ok" && result.migrated) {
-        await getPluginDataMutex(plugin).update((base) => ({
-          ...base,
-          [PUSH_PRODUCER_KEY]: result.state
-        }));
-      }
       return result.state;
     },
     async save(next) {
@@ -23225,18 +22615,25 @@ function createPushProducerRepository(options) {
       }));
     }
   };
-  return new OutboxLocalChangeRepository({
+  const repository = new OutboxLocalChangeRepository({
     identity,
     store,
     enqueue: (envelope) => state.enqueue(envelope),
     generateRevisionId: () => globalThis.crypto.randomUUID(),
+    // FIX 1: seed the SHARED apply store for every file this device authors or
+    // pushes, so a later peer edit to a locally-authored file resolves to its
+    // real fileId and updates in place instead of forever forking to a conflict
+    // artifact. A rename also forgets the stale owner of the previous path.
+    //
+    // DATA-SAFETY (rule 3): the base is SEEDED only on first authorship and is
+    // NEVER advanced by a local push, advancing it here reopened the silent-
+    // overwrite window (a concurrent peer revision matching the just-authored
+    // base slips past the on-disk guard). The single source of truth for that
+    // rule lives in `local-base-lifecycle.ts`, shared with the integration
+    // harness so a regression can't hide behind a differently-modelled test.
     onLocalMaterialized: (materialization) => applyLocalMaterialization(state, materialization),
     onLocalForgotten: (forget) => forgetLocalMaterialization(state, forget)
   });
-}
-function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock, options) {
-  const vault = plugin.app.vault;
-  const repository = producerRef.current ?? createPushProducerRepository({ plugin, state, identity });
   producerRef.current = repository;
   const snapshot = {
     async listSyncablePaths() {
@@ -23390,76 +22787,20 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     onFolderDelete: (folderPath) => observedMany(observer.observeFolderDelete(folderPath))
   });
   afterChange(
-    (async () => {
-      const mappings = await repository.listMappings();
-      const heads = /* @__PURE__ */ new Map();
-      for (const mapping of mappings) {
-        const head = await repository.headFor(mapping.fileId);
-        if (head !== null) heads.set(mapping.fileId, head);
+    reconcileVaultState({ observer, repository, vault: snapshot }).then(
+      (result) => {
+        if (result.skipped > 0) {
+          new import_obsidian5.Notice(
+            `Havemind: ${result.skipped} file(s) could not be synced and were skipped.`
+          );
+          warnSkippedPaths(result);
+        }
+        for (const notice of formatReconcileNotices(result)) {
+          new import_obsidian5.Notice(notice);
+        }
       }
-      await healStaleBasesAfterLocalPush(
-        {
-          baseHashFor: (fileId) => state.baseHashFor(fileId),
-          recordPathOwner: (fileId, path) => state.recordPathOwner(fileId, path),
-          recordBaseHash: (fileId, hash2) => state.recordBaseHash(fileId, hash2),
-          recordBaseContent: (fileId, content) => state.recordBaseContent(fileId, content),
-          forgetPath: (path) => state.forgetPath(path),
-          forgetBaseHash: (fileId) => state.forgetBaseHash(fileId),
-          forgetBaseContent: (fileId) => state.forgetBaseContent(fileId),
-          isLocallyAuthored: (revisionId) => state.isLocallyAuthored(revisionId)
-        },
-        mappings.map((mapping) => ({
-          fileId: mapping.fileId,
-          contentHash: mapping.contentHash,
-          content: mapping.contentKind === "binary" ? null : mapping.content
-        })),
-        (fileId) => heads.get(fileId) ?? null,
-        async (fileId) => {
-          const mapping = mappings.find((entry) => entry.fileId === fileId);
-          if (mapping === void 0) return null;
-          if (!await snapshot.exists(mapping.path)) return null;
-          if (mapping.contentKind === "binary") {
-            return hashBlob(await snapshot.readBinary(mapping.path));
-          }
-          return hashPlaintext(await snapshot.readText(mapping.path));
-        }
-      );
-    })()
+    )
   );
-  if (options?.skipInitialReconcile !== true) {
-    afterChange(
-      reconcileVaultState({
-        observer,
-        repository,
-        vault: snapshot,
-        // What the bootstrap just materialised IS the vault's current content, so
-        // a local file matching any of it adopts that identity instead of being
-        // pushed as a second copy. Without this a joining device re-uploads every
-        // note it has just finished downloading: the pilot phone sent 31 notes
-        // back and left each one with two identities.
-        // Absent when the state cannot report a snapshot (an older or partial
-        // state port): reconcile then falls back to creating, which is exactly
-        // the previous behaviour rather than a crash on the connect path.
-        ...typeof state.fileStateSnapshot === "function" ? {
-          serverIndex: serverIndexFromRegistry(
-            registryFromPersistedState(state.fileStateSnapshot())
-          )
-        } : {}
-      }).then(
-        (result) => {
-          if (result.skipped > 0) {
-            new import_obsidian5.Notice(
-              `Havemind: ${result.skipped} file(s) could not be synced and were skipped.`
-            );
-            warnSkippedPaths(result);
-          }
-          for (const notice of formatReconcileNotices(result)) {
-            new import_obsidian5.Notice(notice);
-          }
-        }
-      )
-    );
-  }
   const configObserver = {
     observeModify: (path) => lockedObserve(path, () => observer.observeModify(path)),
     observeDelete: (path) => lockedObserve(path, () => observer.observeDelete(path))
@@ -23498,36 +22839,6 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
   };
 }
 
-// src/runtime/adapters/access-token-diagnostics.ts
-function describe3(error51) {
-  if (error51 instanceof Error && error51.message !== "") return error51.message;
-  if (typeof error51 === "string" && error51 !== "") return error51;
-  try {
-    return JSON.stringify(error51) ?? "unknown error";
-  } catch {
-    return "unknown error";
-  }
-}
-function createDiagnosticAccessToken(mint, options = {}) {
-  const report = options.onFailure ?? ((reason) => {
-    console.warn(`Havemind: could not mint an access token: ${reason}`);
-  });
-  const getToken = (async () => {
-    try {
-      const token = await mint();
-      getToken.lastFailure = null;
-      return token;
-    } catch (error51) {
-      const reason = describe3(error51);
-      getToken.lastFailure = reason;
-      report(reason);
-      return null;
-    }
-  });
-  getToken.lastFailure = null;
-  return getToken;
-}
-
 // src/runtime/adapters/sync-controller.ts
 var import_obsidian6 = require("obsidian");
 
@@ -23558,37 +22869,6 @@ var DEFAULT_BASE_BACKOFF_MS = 5e3;
 var DEFAULT_MAX_BACKOFF_MS = 6e4;
 var DEFAULT_MAX_PUSH_BATCH_BYTES = 512 * 1024;
 var DEFAULT_MAX_PUSH_BATCH_ITEMS = 64;
-var DEFAULT_BOOTSTRAP_APPLY_CONCURRENCY = 8;
-async function mapPool(items, concurrency, worker) {
-  if (items.length === 0) return [];
-  const limit = Math.max(1, Math.min(concurrency, items.length));
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  async function runWorker() {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      const item = items[index];
-      if (item === void 0) return;
-      results[index] = await worker(item);
-    }
-  }
-  await Promise.all(Array.from({ length: limit }, () => runWorker()));
-  return results;
-}
-function tallyApplyOutcomes(outcomes) {
-  let applied = 0;
-  let conflicts = 0;
-  let deferred = 0;
-  let suppressed = 0;
-  for (const outcome of outcomes) {
-    if (outcome === "deferred") deferred += 1;
-    else if (outcome === "suppressed") suppressed += 1;
-    else if (outcome === "conflict") conflicts += 1;
-    else applied += 1;
-  }
-  return { applied, conflicts, deferred, suppressed };
-}
 function decideRemoteApply(buffers, incomingContentHash) {
   const divergent = buffers.filter(
     (buffer) => buffer.currentHash !== buffer.baseHash
@@ -23631,7 +22911,6 @@ var SyncRunner = class {
       random: options.random ?? Math.random,
       maxPushBatchBytes: options.maxPushBatchBytes ?? DEFAULT_MAX_PUSH_BATCH_BYTES,
       maxPushBatchItems: options.maxPushBatchItems ?? DEFAULT_MAX_PUSH_BATCH_ITEMS,
-      bootstrapApplyConcurrency: options.bootstrapApplyConcurrency ?? DEFAULT_BOOTSTRAP_APPLY_CONCURRENCY,
       ...options
     };
   }
@@ -23697,10 +22976,7 @@ var SyncRunner = class {
         deferred: apply.deferred,
         pushed: push.pushed,
         quarantined: push.quarantined,
-        // An outbox this cycle could not ship keeps the status off "synced". A
-        // conflict or a deferred apply still outranks it: both concern content
-        // already on disk, while an unsent revision only needs another cycle.
-        status: apply.status === "synced" && push.unsent > 0 ? "unsent" : apply.status,
+        status: apply.status,
         suppressed: apply.suppressed
       };
     } catch (error51) {
@@ -23740,7 +23016,7 @@ var SyncRunner = class {
   async runPush() {
     const outbox = await this.options.state.listOutbox();
     if (outbox.length === 0) {
-      return { pushed: 0, quarantined: 0, unsent: 0 };
+      return { pushed: 0, quarantined: 0 };
     }
     const queue = this.planPushBatches(outbox);
     const lineage = buildLineageIndex(outbox);
@@ -23814,7 +23090,7 @@ var SyncRunner = class {
         }
       }
     }
-    return { pushed, quarantined: quarantinedIds.size, unsent: pending.size };
+    return { pushed, quarantined: quarantinedIds.size };
   }
   /**
    * Whether a MISSING_PARENT child's lineage is still healthy: at least one of its
@@ -23864,30 +23140,11 @@ var SyncRunner = class {
   }
   async runPull() {
     let cursor = await this.options.state.loadCursor();
-    let pulled;
-    try {
-      pulled = await this.options.transport.pull(
-        cursor,
-        cursor === 0 ? { snapshot: true } : void 0
-      );
-    } catch (error51) {
-      if (!isCursorInvalid(error51) || cursor === 0) throw error51;
-      await this.options.state.saveCursor(0);
-      cursor = 0;
-      this.bootstrapTarget = null;
-      pulled = await this.options.transport.pull(0, { snapshot: true });
-    }
-    const { cursor: serverHead, events } = pulled;
-    if (this.bootstrapTarget === null && serverHead > 0) {
+    const { cursor: serverHead, events } = await this.options.transport.pull(cursor);
+    if (this.bootstrapTarget === null) {
       this.bootstrapTarget = serverHead;
     }
     const bootstrapTarget = this.bootstrapTarget;
-    if (cursor === 0 && pulled.snapshot === true && serverHead > 0) {
-      return this.runSnapshotBootstrap(pulled, serverHead);
-    }
-    if (cursor === 0 && bootstrapTarget !== null && bootstrapTarget > 0) {
-      return this.runCollapsedBootstrap(events, bootstrapTarget);
-    }
     const ordered = [...events].sort(
       (left, right) => left.serverSequence - right.serverSequence
     );
@@ -23902,20 +23159,37 @@ var SyncRunner = class {
       if (remoteEvent.serverSequence !== cursor + 1) {
         break;
       }
-      const outcome = await this.applyPulledEvent(
-        remoteEvent,
-        bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
+      if (await this.options.state.isLocallyAuthored(remoteEvent.revision.revisionId)) {
+        suppressed += 1;
+        cursor = remoteEvent.serverSequence;
+        await this.options.state.saveCursor(cursor);
+        continue;
+      }
+      const buffers = await this.options.vault.openBuffers(
+        remoteEvent.revision.fileId
       );
-      if (outcome === "deferred") {
+      const decision = decideRemoteApply(
+        buffers,
+        remoteEvent.revision.contentHash
+      );
+      if (decision === "defer") {
         deferred += 1;
         break;
       }
-      if (outcome === "suppressed") {
-        suppressed += 1;
-      } else if (outcome === "conflict") {
+      if (decision === "conflict") {
+        await this.options.vault.recordConflict(remoteEvent);
         conflicts += 1;
       } else {
-        applied += 1;
+        const outcome = await this.options.vault.applyRemote(remoteEvent, {
+          // At or below the connect-time head → part of the initial catch-up, so
+          // its Activity entry is suppressed (baseline). Beyond it → a live edit.
+          bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
+        });
+        if (outcome === "conflict") {
+          conflicts += 1;
+        } else {
+          applied += 1;
+        }
       }
       cursor = remoteEvent.serverSequence;
       await this.options.state.saveCursor(cursor);
@@ -23927,139 +23201,6 @@ var SyncRunner = class {
       status: resolveStatus({ conflicts, deferred }),
       suppressed
     };
-  }
-  /**
-   * Materialises a server-supplied snapshot of current file heads. Pages until
-   * `complete` (or an empty page) so a vault larger than one pull still lands
-   * as one all-or-nothing cursor jump.
-   */
-  async runSnapshotBootstrap(firstPage, serverHead) {
-    const collected = [...firstPage.events];
-    let scanCursor = lastSequence(collected);
-    let complete = firstPage.complete === true || firstPage.events.length === 0;
-    while (!complete && scanCursor < serverHead) {
-      const page = await this.options.transport.pull(scanCursor, {
-        snapshot: true
-      });
-      if (page.snapshot !== true || page.events.length === 0) {
-        break;
-      }
-      const pageHigh = lastSequence(page.events);
-      if (pageHigh <= scanCursor) {
-        break;
-      }
-      collected.push(...page.events);
-      scanCursor = lastSequence(collected);
-      complete = page.complete === true;
-    }
-    const { applied, conflicts, deferred, suppressed } = await this.batched(
-      async () => {
-        const outcomes = await mapPool(
-          collected,
-          this.options.bootstrapApplyConcurrency,
-          (item) => this.applyPulledEvent(item, true)
-        );
-        const tally = tallyApplyOutcomes(outcomes);
-        if (tally.deferred === 0) {
-          await this.options.state.saveCursor(serverHead);
-        }
-        return tally;
-      }
-    );
-    return {
-      applied,
-      conflicts,
-      deferred,
-      status: resolveStatus({ conflicts, deferred }),
-      suppressed
-    };
-  }
-  /**
-   * Reads the complete cursor-zero bootstrap without touching the vault, then
-   * applies only revisions that are not a parent of another revision. The
-   * server's event cursor is the current head, while each page may be bounded;
-   * follow-up pulls advance an in-memory scan cursor until that fixed boundary.
-   */
-  async runCollapsedBootstrap(firstPage, serverHead) {
-    const collected = [];
-    let scanCursor = 0;
-    let page = firstPage;
-    while (scanCursor < serverHead) {
-      const ordered = [...page].sort(
-        (left, right) => left.serverSequence - right.serverSequence
-      );
-      let progressed = false;
-      for (const item of ordered) {
-        if (item.serverSequence <= scanCursor || item.serverSequence > serverHead) {
-          continue;
-        }
-        if (item.serverSequence !== scanCursor + 1) {
-          return emptyPullResult();
-        }
-        collected.push(item);
-        scanCursor = item.serverSequence;
-        progressed = true;
-      }
-      if (scanCursor >= serverHead) break;
-      if (!progressed) return emptyPullResult();
-      page = (await this.options.transport.pull(scanCursor)).events;
-    }
-    const supersededRevisionIds = /* @__PURE__ */ new Set();
-    for (const item of collected) {
-      for (const parentId of item.revision.parentRevisionIds ?? []) {
-        supersededRevisionIds.add(parentId);
-      }
-    }
-    const heads = collected.filter(
-      (item) => !supersededRevisionIds.has(item.revision.revisionId)
-    );
-    const { applied, conflicts, deferred, suppressed } = await this.batched(
-      async () => {
-        const outcomes = await mapPool(
-          heads,
-          this.options.bootstrapApplyConcurrency,
-          (item) => this.applyPulledEvent(item, true)
-        );
-        const tally = tallyApplyOutcomes(outcomes);
-        if (tally.deferred === 0) {
-          await this.options.state.saveCursor(serverHead);
-        }
-        return tally;
-      }
-    );
-    return {
-      applied,
-      conflicts,
-      deferred,
-      status: resolveStatus({ conflicts, deferred }),
-      suppressed
-    };
-  }
-  /**
-   * Runs `body` inside the state port's durable-write batch when it offers one,
-   * otherwise calls it directly (the port method is optional). Used for the
-   * bootstrap apply pass, where the per-mutation persistence is quadratic.
-   */
-  batched(body) {
-    const state = this.options.state;
-    if (state.runBatched === void 0) return body();
-    return state.runBatched(body);
-  }
-  /** Applies one pulled event without advancing the cursor. */
-  async applyPulledEvent(remoteEvent, bootstrap) {
-    if (await this.options.state.isLocallyAuthored(remoteEvent.revision.revisionId)) {
-      await this.options.vault.acknowledgeOwnEcho?.(remoteEvent);
-      return "suppressed";
-    }
-    const buffers = await this.options.vault.openBuffers(remoteEvent.revision.fileId);
-    const decision = decideRemoteApply(buffers, remoteEvent.revision.contentHash);
-    if (decision === "defer") return "deferred";
-    if (decision === "conflict") {
-      await this.options.vault.recordConflict(remoteEvent);
-      return "conflict";
-    }
-    const outcome = await this.options.vault.applyRemote(remoteEvent, { bootstrap });
-    return outcome === "conflict" ? "conflict" : "applied";
   }
   scheduleBackoff() {
     if (this.stopped) {
@@ -24094,9 +23235,6 @@ var SyncRunner = class {
 function isAuthDenied(error51) {
   return typeof error51 === "object" && error51 !== null && error51.authDenied === true;
 }
-function isCursorInvalid(error51) {
-  return typeof error51 === "object" && error51 !== null && error51.cursorInvalid === true;
-}
 function isPermanentError(error51) {
   return typeof error51 === "object" && error51 !== null && error51.permanent === true;
 }
@@ -24107,22 +23245,6 @@ function idleCycleResult() {
     deferred: 0,
     pushed: 0,
     quarantined: 0,
-    status: "synced",
-    suppressed: 0
-  };
-}
-function lastSequence(events) {
-  let highest = 0;
-  for (const event of events) {
-    if (event.serverSequence > highest) highest = event.serverSequence;
-  }
-  return highest;
-}
-function emptyPullResult() {
-  return {
-    applied: 0,
-    conflicts: 0,
-    deferred: 0,
     status: "synced",
     suppressed: 0
   };
@@ -24303,15 +23425,6 @@ var RequestUrlTransportError = class extends Error {
     /** True on HTTP 401, the session was refused; the loop must stop, not retry. */
     __publicField(this, "authDenied");
     /**
-     * HTTP 409 CURSOR_INVALID: this device holds a position the server cannot
-     * serve, because the server's sequence numbering moved underneath it (a
-     * restore from backup, or the repair that renumbers a log damaged by the old
-     * compaction). Neither an auth failure nor a transport failure, and retrying
-     * the same cursor can never succeed, so the runner resets to zero and
-     * re-bootstraps rather than reporting a permanent offline.
-     */
-    __publicField(this, "cursorInvalid");
-    /**
      * True on a whole-request 4xx the same bytes will never satisfy (400 bad
      * request, 413 payload too large, 422 invalid batch). The runner quarantines
      * the offending revision instead of retrying it forever. 5xx and network
@@ -24319,7 +23432,6 @@ var RequestUrlTransportError = class extends Error {
      */
     __publicField(this, "permanent");
     this.authDenied = options?.authDenied ?? false;
-    this.cursorInvalid = options?.cursorInvalid ?? false;
     this.permanent = options?.permanent ?? false;
   }
 };
@@ -24375,35 +23487,14 @@ var RequestUrlTransport = class {
     });
     return parsePushResponse(response);
   }
-  async pull(after, options) {
+  async pull(after) {
     const epoch = this.options.serverEpoch?.() ?? null;
-    const params = [`after=${after}`];
-    if (epoch !== null) {
-      params.push(`epoch=${encodeURIComponent(epoch)}`);
-    }
-    if (options?.snapshot === true) {
-      params.push("snapshot=1");
-    }
-    try {
-      const response = await this.request({
-        method: "GET",
-        url: `${this.options.apiBaseUrl}/vaults/${this.options.vaultId}/events?${params.join("&")}`
-      });
-      return parsePullResponse(response);
-    } catch (error51) {
-      if (options?.snapshot === true && error51 instanceof RequestUrlTransportError && error51.permanent) {
-        const fallback = [`after=${after}`];
-        if (epoch !== null) {
-          fallback.push(`epoch=${encodeURIComponent(epoch)}`);
-        }
-        const response = await this.request({
-          method: "GET",
-          url: `${this.options.apiBaseUrl}/vaults/${this.options.vaultId}/events?${fallback.join("&")}`
-        });
-        return parsePullResponse(response);
-      }
-      throw error51;
-    }
+    const query = epoch === null ? `after=${after}` : `after=${after}&epoch=${encodeURIComponent(epoch)}`;
+    const response = await this.request({
+      method: "GET",
+      url: `${this.options.apiBaseUrl}/vaults/${this.options.vaultId}/events?${query}`
+    });
+    return parsePullResponse(response);
   }
   async request(init) {
     const token = await this.options.getAuthToken();
@@ -24424,8 +23515,7 @@ var RequestUrlTransport = class {
         `Server returned HTTP ${response.status}.`,
         {
           authDenied: response.status === 401,
-          permanent: isPermanentStatus(response.status),
-          cursorInvalid: response.status === 409
+          permanent: isPermanentStatus(response.status)
         }
       );
     }
@@ -24493,12 +23583,7 @@ function parsePullResponse(response) {
       }
     };
   });
-  return {
-    cursor: body.cursor,
-    events,
-    ...body.snapshot === true ? { snapshot: true } : {},
-    ...body.complete === true ? { complete: true } : {}
-  };
+  return { cursor: body.cursor, events };
 }
 function malformed(detail) {
   return new RequestUrlTransportError("malformed-response", detail);
@@ -24760,11 +23845,7 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
       // receiving device restarted Obsidian, because Obsidian caches its config
       // in memory and the plugin never signalled a reload. `css-change` is the
       // documented workspace event that makes it re-read snippets and themes.
-      configApply,
-      // Report open markdown editors so a peer edit cannot silently overwrite
-      // unsaved local buffer content (PC↔PC and desktop generally).
-      workspace: plugin.app.workspace,
-      hashContent: (content) => hashPlaintext(content)
+      configApply
     }),
     conflictFolder: CONFLICT_FOLDER,
     resolveRevision: connection.resolveRevision,
@@ -24873,20 +23954,6 @@ function serverNameFromUrl(apiBaseUrl) {
   }
 }
 async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
-  const localStateGate = gateLocalSyncState(await plugin.loadData());
-  if (localStateGate.kind === "recovery-required") {
-    console.error(
-      `Havemind: local sync state recovery required (${localStateGate.reason}); sync was not started.`
-    );
-    onStatus("recovery-required", HAVEMIND_STATUS_RECOVERY_REQUIRED);
-    return {
-      ...NOOP_HANDLE,
-      apiBaseUrl: connection.apiBaseUrl,
-      vaultId: connection.vaultId,
-      serverName: serverNameFromUrl(connection.apiBaseUrl)
-    };
-  }
-  const resumingBootstrap = localStateGate.kind === "resume-bootstrap";
   const clientInstanceId = await ensureClientInstanceId(
     createClientInstanceRepo(plugin)
   );
@@ -24940,19 +24007,8 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     producerSync,
     fileApplyLock
   );
-  if (hasPushIdentity) {
-    producerRef.current = createPushProducerRepository({
-      plugin,
-      state,
-      identity: {
-        vaultId: connection.vaultId,
-        memberId: connection.memberId,
-        deviceId: connection.deviceId
-      }
-    });
-  }
   await runCanonicalizationRebase(plugin);
-  await controller.syncNow();
+  controller.start();
   let producer = null;
   if (hasPushIdentity) {
     producer = startPushProducer(
@@ -24968,27 +24024,12 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
       },
       producerRef,
       extras.hooks,
-      fileApplyLock,
-      // An interrupted bootstrap left heads on disk that never reached the
-      // producer mapping. The `syncNow` above has just re-run and converged them;
-      // letting reconcile enumerate the vault in the same session would push them
-      // back as fresh local creates (see the gate's `resume-bootstrap`).
-      resumingBootstrap ? { skipInitialReconcile: true } : void 0
+      fileApplyLock
     );
   }
-  controller.start();
   const selfMembership = connection.memberId === void 0 ? void 0 : { membershipId: connection.memberId, role: extras.role ?? "editor" };
   return {
     ...selfMembership === void 0 ? {} : { selfMembership },
-    apiBaseUrl: connection.apiBaseUrl,
-    vaultId: connection.vaultId,
-    // A failure still yields null (callers treat that as "offline for now"),
-    // but the reason is reported and remembered instead of discarded. Swallowing
-    // it produced a device that issued no requests while the panel still showed
-    // the last successful cycle, with nothing anywhere saying why.
-    getAccessToken: createDiagnosticAccessToken(
-      () => accessProvider.getAccessToken()
-    ),
     // The live durable state, so the plugin can read the send-queue (SND-01) and
     // drive the auto-repair sweep (MRG-05) off the same store the runner uses.
     state,
@@ -25015,7 +24056,7 @@ var APPROVAL_POLL_INTERVAL_MS = 5e3;
 var MAX_CONNECT_STEPS = 720;
 var OWNER_DEVICE_LABEL = "Havemind owner device";
 var INVITEE_DEVICE_LABEL = "Havemind device";
-async function startHavemindConnection(plugin, onStatus, hooks, signal, onPhase) {
+async function startHavemindConnection(plugin, onStatus, hooks, signal) {
   const gate = await evaluateOwnerConnection(plugin);
   if (gate.kind === "reset-required") {
     try {
@@ -25043,8 +24084,7 @@ async function startHavemindConnection(plugin, onStatus, hooks, signal, onPhase)
     sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
     pollIntervalMs: APPROVAL_POLL_INTERVAL_MS,
     maxSteps: MAX_CONNECT_STEPS,
-    ...signal === void 0 ? {} : { signal },
-    ...onPhase === void 0 ? {} : { onPhase }
+    ...signal === void 0 ? {} : { signal }
   });
   if (!isConnectedOnboardingState(connectedState)) {
     onStatus("disconnected", HAVEMIND_STATUS_DISCONNECTED);
@@ -25134,8 +24174,7 @@ async function connectAsInvitee(plugin, envelope, options) {
     sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
     pollIntervalMs: APPROVAL_POLL_INTERVAL_MS,
     maxSteps: MAX_CONNECT_STEPS,
-    ...options.signal === void 0 ? {} : { signal: options.signal },
-    ...options.onPhase === void 0 ? {} : { onPhase: options.onPhase }
+    ...options.signal === void 0 ? {} : { signal: options.signal }
   });
   if (state.phase === "rejected") {
     options.report(
@@ -25370,46 +24409,7 @@ function parseMember2(value, selfMembershipId) {
     self
   };
 }
-function parseMembersPayload(json2, selfMembershipId) {
-  const members = isRecord19(json2) ? json2.members : void 0;
-  if (!Array.isArray(members)) {
-    throw new MemberRosterError("The member roster response was malformed.");
-  }
-  return members.map((entry) => parseMember2(entry, selfMembershipId));
-}
-function hasMembershipIds(json2) {
-  const members = isRecord19(json2) ? json2.members : void 0;
-  if (!Array.isArray(members) || members.length === 0) {
-    return Array.isArray(members);
-  }
-  return members.every(
-    (entry) => isRecord19(entry) && typeof entry.membershipId === "string"
-  );
-}
 async function fetchMemberRoster(options) {
-  if (options.vaultId !== null && options.getAccessToken !== void 0) {
-    const accessToken = await options.getAccessToken();
-    if (accessToken !== null) {
-      const bearerResponse = await options.requestUrl({
-        url: `${options.apiBaseUrl}/vaults/${options.vaultId}/members`,
-        method: "GET",
-        headers: { Authorization: `Bearer ${accessToken}` },
-        throw: false
-      });
-      if (bearerResponse.status >= 200 && bearerResponse.status < 300) {
-        if (hasMembershipIds(bearerResponse.json)) {
-          return parseMembersPayload(
-            bearerResponse.json,
-            options.selfMembershipId
-          );
-        }
-      } else if (bearerResponse.status !== 401 && bearerResponse.status !== 403) {
-        throw new MemberRosterError(
-          `The member roster request returned HTTP ${bearerResponse.status}.`
-        );
-      }
-    }
-  }
   const refreshToken = await options.getRefreshToken();
   if (refreshToken === null) {
     throw new MemberRosterError(
@@ -25428,7 +24428,11 @@ async function fetchMemberRoster(options) {
       `The member roster request returned HTTP ${response.status}.`
     );
   }
-  return parseMembersPayload(response.json, options.selfMembershipId);
+  const members = isRecord19(response.json) ? response.json.members : void 0;
+  if (!Array.isArray(members)) {
+    throw new MemberRosterError("The member roster response was malformed.");
+  }
+  return members.map((entry) => parseMember2(entry, options.selfMembershipId));
 }
 
 // src/runtime/remove-member.ts
@@ -25626,7 +24630,7 @@ async function revokeMembershipForOwner(plugin, options) {
   });
 }
 async function fetchMemberRosterForVault(plugin, options) {
-  const connected = options.connected ?? await resolveConnectedVault(plugin).catch(() => null);
+  const connected = await resolveConnectedVault(plugin);
   if (connected === null) {
     return null;
   }
@@ -25637,30 +24641,8 @@ async function fetchMemberRosterForVault(plugin, options) {
     clientInstanceId,
     secretStorage: plugin.app.secretStorage
   });
-  let getAccessToken = options.getAccessToken;
-  if (getAccessToken === void 0) {
-    const accessProvider = new RefreshTokenAccessProvider({
-      requestUrl: createRequestUrlFn(),
-      apiBaseUrl: connected.apiBaseUrl,
-      getRefreshToken: () => secrets.getRefreshToken(),
-      saveRefreshToken: (value) => secrets.saveRefreshToken(value),
-      generateRotationId: generateRotationIdValue,
-      generateSuccessorToken: generateRefreshTokenValue,
-      loadPendingRotation: () => secrets.getPendingRotation(),
-      savePendingRotation: (record2) => secrets.savePendingRotation(record2),
-      clearPendingRotation: () => secrets.clearPendingRotation()
-    });
-    getAccessToken = async () => {
-      try {
-        return await accessProvider.getAccessToken();
-      } catch {
-        return null;
-      }
-    };
-  }
   return fetchMemberRoster({
     apiBaseUrl: connected.apiBaseUrl,
-    getAccessToken,
     getRefreshToken: () => secrets.getRefreshToken(),
     requestUrl: createRequestUrlFn(),
     selfMembershipId: options.selfMembershipId,
@@ -25976,7 +24958,6 @@ function renderGuestWaitingScreen(content, model, actions = {}) {
   }
   content.createDiv({ text: view.liveNote }).addClass("havemind-hint");
   const cancel = content.createEl("button", { text: "Cancel" });
-  cancel.addClass("havemind-handshake-cancel");
   cancel.onClickEvent(() => actions.onCancel?.());
 }
 
@@ -27023,12 +26004,7 @@ function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
         }
       })
     ),
-    onSelectTab: (id, viaKeyboard) => {
-      callbacks.setActiveTab(id, viaKeyboard);
-      if (id === "people") {
-        options.onPeopleVisible?.();
-      }
-    }
+    onSelectTab: callbacks.setActiveTab
   });
   return { focusTabOnRender: state.focusTabOnRender };
 }
@@ -27589,8 +26565,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
      * data.json (endpoint-free). Never derived from sync activity.
      */
     __publicField(this, "rosterMembers", []);
-    /** Serializes roster reads so a slow older response cannot win a race. */
-    __publicField(this, "rosterRefreshTail", Promise.resolve());
     /**
      * F9 Rejoin (owner side). Membership ids the owner has asserted are dead
      * (pilot heuristic, no server liveness signal yet, see renderRejoinRoster):
@@ -27712,9 +26686,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         arrivedWithInvitationProvider: () => this.arrivedWithInvitation,
         onOpenComposer: () => {
           void this.openCreateConnectionView();
-        },
-        onPeopleVisible: () => {
-          void this.refreshRoster();
         },
         onCloseComposer: () => this.closeCreateConnectionView(),
         onSyncNow: () => {
@@ -27972,7 +26943,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.connectionNotice = connectedMessage;
       this.connectionNoticeKind = "success";
       report(connectedMessage);
-      void this.refreshRoster();
       this.views.refreshOnboardingNow();
     } catch (error51) {
       if (error51 instanceof ApproveDeviceError && error51.locked) {
@@ -28017,8 +26987,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         this,
         (status, view) => this.handleStatus(status, view),
         this.activityHooks(),
-        attempt.signal,
-        (phase) => this.leaveHandshake(phase)
+        attempt.signal
       );
       if (this.unloaded || this.connection !== null) {
         handle.stop();
@@ -28027,8 +26996,8 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.connection = handle;
       this.syncState = handle.state ?? null;
       this.connectGeneration += 1;
-      await this.refreshRoster();
-      this.adoptSelfMembershipIfNeeded(this.connection);
+      this.adoptSelfMembership(this.connection);
+      void this.refreshRoster();
       void this.restorePendingApprovals();
       this.scheduleConflictSweep();
     } finally {
@@ -28167,21 +27136,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.views.refreshOnboarding();
     });
   }
-  /**
-   * Seeds "You" only when the server roster did not already identify this
-   * device. Calling this after `refreshRoster` avoids the connect-time race
-   * where a parallel self-seed clobbered the full People list.
-   */
-  adoptSelfMembershipIfNeeded(handle) {
-    const self = handle?.selfMembership;
-    if (self === void 0) return;
-    if (this.rosterMembers.some(
-      (member) => member.self || member.membershipId === self.membershipId
-    )) {
-      return;
-    }
-    this.adoptSelfMembership(handle);
-  }
   /** The durable roster store over the shared plugin-data blob. */
   rosterStore() {
     return new RosterStore({
@@ -28204,23 +27158,10 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
    * blanking the People pane. The next connect or reconnect retries.
    */
   async refreshRoster() {
-    const refresh = this.rosterRefreshTail.then(
-      () => this.fetchAndPersistRoster()
-    );
-    this.rosterRefreshTail = refresh;
-    return refresh;
-  }
-  async fetchAndPersistRoster() {
-    const selfMembershipId = this.connection?.selfMembership?.membershipId ?? this.rosterMembers.find((member) => member.self)?.membershipId ?? null;
-    const connected = this.connection?.apiBaseUrl !== void 0 && this.connection.vaultId !== void 0 ? {
-      apiBaseUrl: this.connection.apiBaseUrl,
-      vaultId: this.connection.vaultId
-    } : void 0;
+    const self = this.rosterMembers.find((member) => member.self);
     try {
       const members = await fetchMemberRosterForVault(this, {
-        selfMembershipId,
-        ...this.connection?.getAccessToken === void 0 ? {} : { getAccessToken: this.connection.getAccessToken },
-        ...connected === void 0 ? {} : { connected }
+        selfMembershipId: self?.membershipId ?? null
       });
       if (members === null || this.unloaded) return;
       this.rosterMembers = await this.rosterStore().replaceMembers(members);
@@ -28264,7 +27205,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
           this.guestInvitationInvalid = true;
           this.views.refreshOnboardingNow();
         },
-        onPhase: (phase) => this.leaveHandshake(phase),
         signal: attempt.signal
       });
       if (handle !== null) {
@@ -28278,13 +27218,9 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         this.connection = handle;
         this.syncState = handle.state ?? null;
         this.connectGeneration += 1;
-        await this.refreshRoster();
-        this.adoptSelfMembershipIfNeeded(handle);
+        this.adoptSelfMembership(handle);
+        void this.refreshRoster();
         this.scheduleConflictSweep();
-        this.views.refreshOnboardingNow();
-      } else if (!attempt.signal.aborted && !this.unloaded) {
-        this.awaitingApproval = null;
-        this.views.refreshOnboardingNow();
       }
     } finally {
       this.connectionAttemptAborters.delete(attempt);
@@ -28320,23 +27256,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     this.awaitingApproval = null;
     this.guestInvitationInvalid = false;
     this.setStatus(formatStatusBar({ status: "disconnected" }));
-    this.views.refreshOnboardingNow();
-  }
-  /**
-   * Drops the six-digit waiting screen as soon as approval or bootstrap starts.
-   * The first vault pull still runs after that, so files appear in the vault
-   * while the pane would otherwise stay on the handshake with no Havemind
-   * buttons.
-   */
-  leaveHandshake(phase) {
-    if (this.unloaded || this.awaitingApproval === null) return;
-    if (phase === "pending-approval" || phase === "idle" || phase === "cancelled") {
-      return;
-    }
-    this.awaitingApproval = null;
-    if (phase !== "rejected") {
-      this.connectionStatus = "syncing";
-    }
     this.views.refreshOnboardingNow();
   }
   /** Starts a tracked connection build; all live attempts are cancelled on teardown. */
