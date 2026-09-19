@@ -17150,6 +17150,24 @@ var DurableSyncState = class {
    * longer be updated independently, because there is no longer an independent
    * place to update them.
    */
+  /**
+   * The persisted file state as the three maps, read from the warmed cache.
+   *
+   * Used to build the join-time adoption index: what this device holds as agreed
+   * IS the vault's current content, so a local file matching any of it should
+   * adopt that identity rather than be pushed as a second copy.
+   */
+  fileStateSnapshot() {
+    const cache = this.cache;
+    if (cache === null) {
+      return { pathOwners: {}, baseHashes: {}, baseContents: {} };
+    }
+    return {
+      pathOwners: cache.pathOwners,
+      baseHashes: cache.baseHashes,
+      baseContents: cache.baseContents
+    };
+  }
   async mutateFiles(change) {
     return this.runExclusive(async () => {
       const state = await this.ensureLoaded();
@@ -22719,6 +22737,21 @@ function nextMappings(mappings, commit) {
   return next;
 }
 
+// src/sync/join-adoption.ts
+function adoptOrCreate(server, local, claimed = /* @__PURE__ */ new Set()) {
+  const byContent = server.byContentHash(local.contentHash);
+  if (byContent !== void 0 && !claimed.has(byContent.fileId)) {
+    claimed.add(byContent.fileId);
+    return { kind: "adopt", fileId: byContent.fileId };
+  }
+  const atPath = server.byPath(local.path);
+  if (atPath !== void 0 && !claimed.has(atPath.fileId)) {
+    claimed.add(atPath.fileId);
+    return { kind: "adopt-with-edit", fileId: atPath.fileId };
+  }
+  return { kind: "create" };
+}
+
 // src/sync/reconciliation.ts
 var SYNCABLE_EXTENSION_SET = /* @__PURE__ */ new Set([
   "md",
@@ -22823,6 +22856,7 @@ async function reconcileVaultState(options) {
   }
   const unmatchedMappings = [...mappingsByCollision.values()];
   const {
+    adopted,
     created,
     deleted,
     renamed,
@@ -22831,9 +22865,12 @@ async function reconcileVaultState(options) {
     observer,
     unmatchedVault,
     unmatchedMappings,
-    recordSkip
+    recordSkip,
+    options.serverIndex,
+    repository
   );
   return {
+    adopted,
     attachmentsExcluded,
     binaryExcluded,
     completed: true,
@@ -22861,7 +22898,7 @@ function describeSkipReason(error51) {
   if (error51 instanceof Error && error51.message !== "") return error51.message;
   return "unknown error";
 }
-async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip) {
+async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip, serverIndex, repository) {
   const vaultByContent = groupBy(
     unmatchedVault,
     (file2) => file2.kind === "binary" ? `binary:${file2.contentHash ?? ""}` : `markdown:${file2.content}`
@@ -22870,6 +22907,21 @@ async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMap
     unmatchedMappings,
     (mapping) => mapping.contentKind === "binary" ? `binary:${mapping.contentHash}` : `markdown:${mapping.content ?? ""}`
   );
+  const adoptMapping = serverIndex === void 0 || repository.adoptRemoteMapping === void 0 ? void 0 : async (fileId, file2) => {
+    const classified = classifyVaultPath(file2.readPath);
+    if (!classified.eligible) return;
+    await repository.adoptRemoteMapping?.(
+      {
+        collisionKey: classified.collisionKey,
+        content: file2.kind === "binary" ? null : file2.content,
+        contentHash: file2.contentHash ?? file2.content,
+        ...file2.kind === "binary" ? { contentKind: "binary" } : {},
+        fileId,
+        path: classified.canonicalPath
+      },
+      fileId
+    );
+  };
   const consumedVault = /* @__PURE__ */ new Set();
   const consumedMappings = /* @__PURE__ */ new Set();
   let renamed = 0;
@@ -22893,8 +22945,20 @@ async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMap
     }
   }
   let created = 0;
+  let adopted = 0;
+  const claimed = /* @__PURE__ */ new Set();
   for (const file2 of unmatchedVault) {
     if (consumedVault.has(file2)) continue;
+    const decision = serverIndex === void 0 ? { kind: "create" } : adoptOrCreate(
+      serverIndex,
+      { path: file2.readPath, contentHash: file2.contentHash ?? file2.content },
+      claimed
+    );
+    if (decision.kind !== "create" && adoptMapping !== void 0) {
+      await adoptMapping(decision.fileId, file2);
+      adopted += 1;
+      continue;
+    }
     if (await observeResilient(
       file2.readPath,
       onSkip,
@@ -22918,7 +22982,7 @@ async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMap
       skipped += 1;
     }
   }
-  return { created, deleted, renamed, skipped };
+  return { adopted, created, deleted, renamed, skipped };
 }
 function groupBy(items, key) {
   const groups = /* @__PURE__ */ new Map();
@@ -23097,6 +23161,28 @@ var ModifyDebouncer = class {
     this.pending.clear();
   }
 };
+
+// src/sync/registry-server-index.ts
+function serverIndexFromRegistry(registry2, options = {}) {
+  const byHash = /* @__PURE__ */ new Map();
+  const byPath = /* @__PURE__ */ new Map();
+  for (const record2 of registry2.all()) {
+    const hash2 = record2.agreedHash;
+    if (hash2 === null || hash2 === "") continue;
+    if (options.agreedOnly === true && record2.agreedContent === null) continue;
+    const existing = byHash.get(hash2);
+    if (existing === void 0 || record2.fileId < existing.fileId) {
+      byHash.set(hash2, { fileId: record2.fileId, path: record2.path });
+    }
+    if (record2.path !== "") {
+      byPath.set(record2.path, { fileId: record2.fileId, hash: hash2 });
+    }
+  }
+  return {
+    byContentHash: (hash2) => byHash.get(hash2),
+    byPath: (path) => byPath.get(path)
+  };
+}
 
 // src/runtime/adapters/push-producer.ts
 function toActivityKind(kind) {
@@ -23342,7 +23428,24 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
   );
   if (options?.skipInitialReconcile !== true) {
     afterChange(
-      reconcileVaultState({ observer, repository, vault: snapshot }).then(
+      reconcileVaultState({
+        observer,
+        repository,
+        vault: snapshot,
+        // What the bootstrap just materialised IS the vault's current content, so
+        // a local file matching any of it adopts that identity instead of being
+        // pushed as a second copy. Without this a joining device re-uploads every
+        // note it has just finished downloading: the pilot phone sent 31 notes
+        // back and left each one with two identities.
+        // Absent when the state cannot report a snapshot (an older or partial
+        // state port): reconcile then falls back to creating, which is exactly
+        // the previous behaviour rather than a crash on the connect path.
+        ...typeof state.fileStateSnapshot === "function" ? {
+          serverIndex: serverIndexFromRegistry(
+            registryFromPersistedState(state.fileStateSnapshot())
+          )
+        } : {}
+      }).then(
         (result) => {
           if (result.skipped > 0) {
             new import_obsidian5.Notice(
