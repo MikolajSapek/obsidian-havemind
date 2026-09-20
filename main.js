@@ -16600,6 +16600,26 @@ function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// src/runtime/producer-recovery.ts
+function validRecovery(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value;
+  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string" && s.length > 0);
+  if (typeof row.id !== "string" || !row.id || !["apply", "resolution"].includes(String(row.kind)) || !strings(row.fileIds) || !strings(row.discardRevisionIds) || typeof row.state !== "object" || row.state === null) return false;
+  if (row.applyState !== void 0) {
+    if (typeof row.applyState !== "object" || row.applyState === null) return false;
+    const saved = row.applyState;
+    if (!["pathOwners", "baseHashes", "baseContents"].every((key) => typeof saved[key] === "object" && saved[key] !== null && !Array.isArray(saved[key]) && Object.values(saved[key]).every((value2) => typeof value2 === "string"))) return false;
+  }
+  const state = row.state;
+  if (!Array.isArray(state.mappings) || typeof state.heads !== "object" || state.heads === null || Array.isArray(state.heads)) return false;
+  return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
+    if (typeof m !== "object" || m === null) return false;
+    const item = m;
+    return ["fileId", "path", "collisionKey", "content", "contentHash"].every((key) => typeof item[key] === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
+  });
+}
+
 // src/runtime/sync-state.ts
 var PAYLOAD_MISSING_REASON = "payload-missing";
 var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
@@ -16719,6 +16739,101 @@ var DurableSyncState = class {
   isRecoveryRequired() {
     return this.recoveryRequired;
   }
+  async pendingProducerRecoveries() {
+    return (await this.ensureLoaded()).producerRecovery ?? [];
+  }
+  async startProducerRecovery(record2, replacement) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if ((state.producerRecovery ?? []).some((r) => r.fileIds.some((id) => record2.fileIds.includes(id)))) {
+        throw new Error("Producer recovery must finish before another transaction.");
+      }
+      const ids = new Set(record2.discardRevisionIds);
+      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
+      if (originals.length !== ids.size || this.hasUncoveredChildren(state, ids)) return false;
+      if (replacement !== void 0 && (ids.has(replacement.revisionId) || parentIdsFromHeader(replacement.header).some((id) => ids.has(id)))) return false;
+      await this.mutate({
+        ...state,
+        outbox: [...state.outbox.filter((e) => !ids.has(e.revisionId)), ...replacement === void 0 ? [] : [{ ...replacement, enqueuedAt: this.now() }]],
+        producerRecovery: [...state.producerRecovery ?? [], record2.kind === "apply" ? {
+          ...record2,
+          applyState: {
+            pathOwners: Object.fromEntries(Object.entries(state.pathOwners).filter(([, id]) => record2.fileIds.includes(id))),
+            baseHashes: Object.fromEntries(Object.entries(state.baseHashes).filter(([id]) => record2.fileIds.includes(id))),
+            baseContents: Object.fromEntries(Object.entries(state.baseContents).filter(([id]) => record2.fileIds.includes(id)))
+          }
+        } : record2],
+        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: originals.map((e) => ({ ...e, payloadExternalized: false })) } }
+      });
+      return true;
+    });
+  }
+  hasUncoveredChildren(state, ids) {
+    return [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((e) => !ids.has(e.revisionId) && parentIdsFromHeader(e.header).some((id) => ids.has(id)));
+  }
+  async recoverProducerQueue(id) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const record2 = state.producerRecovery?.find((r) => r.id === id);
+      if (record2 === void 0) return;
+      if (record2.kind === "resolution") {
+        const pathOwners = { ...state.pathOwners };
+        const baseHashes = { ...state.baseHashes };
+        const baseContents = { ...state.baseContents };
+        for (const fileId of record2.fileIds) {
+          const mapping = record2.state.mappings.find((m) => m.fileId === fileId);
+          for (const [path, owner] of Object.entries(pathOwners)) {
+            if (owner === fileId && path !== mapping?.path) delete pathOwners[path];
+          }
+          if (mapping === void 0) {
+            delete baseHashes[fileId];
+            delete baseContents[fileId];
+          } else {
+            pathOwners[mapping.path] = fileId;
+            baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
+            if (mapping.contentKind !== "binary" && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
+          }
+        }
+        await this.mutate({ ...state, pathOwners, baseHashes, baseContents });
+        return;
+      }
+      const ids = new Set(record2.discardRevisionIds);
+      if (this.hasUncoveredChildren(state, ids)) throw new Error("Recovery would orphan pending work.");
+      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
+      const undo = record2.applyState;
+      await this.mutate({
+        ...state,
+        ...undo === void 0 ? {} : {
+          pathOwners: { ...Object.fromEntries(Object.entries(state.pathOwners).filter(([, fileId]) => !record2.fileIds.includes(fileId))), ...undo.pathOwners },
+          baseHashes: { ...Object.fromEntries(Object.entries(state.baseHashes).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseHashes },
+          baseContents: { ...Object.fromEntries(Object.entries(state.baseContents).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseContents }
+        },
+        outbox: state.outbox.filter((e) => !ids.has(e.revisionId)),
+        ...originals.length === 0 ? {} : { reconciliationBackups: {
+          ...state.reconciliationBackups,
+          [id]: [...state.reconciliationBackups?.[id] ?? [], ...originals.map((e) => ({ ...e, payloadExternalized: false }))]
+        } }
+      });
+    });
+  }
+  async completeProducerRecovery(id) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({ ...state, producerRecovery: (state.producerRecovery ?? []).filter((r) => r.id !== id) });
+    });
+  }
+  async enqueueAutomaticMerge(envelope) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const record2 = state.producerRecovery?.find((r) => r.kind === "apply" && r.fileIds.includes(envelope.fileId));
+      if (record2 === void 0) throw new Error("Automatic merge requires a durable apply transaction.");
+      await this.mutate({
+        ...state,
+        outbox: [...state.outbox, { ...envelope, enqueuedAt: this.now() }],
+        producerRecovery: state.producerRecovery?.map((r) => r.id === record2.id ? { ...r, discardRevisionIds: [...r.discardRevisionIds, envelope.revisionId] } : r) ?? []
+      });
+    });
+  }
   async loadCursor() {
     return (await this.ensureLoaded()).cursor;
   }
@@ -16743,13 +16858,56 @@ var DurableSyncState = class {
       };
     });
   }
+  /**
+   * Two peers can independently publish byte-identical merges of the same heads.
+   * The server accepts one and rejects the other with HEAD_SET_CHANGED. After
+   * applying the accepted merge, discard only a redundant leaf in our queue.
+   * Never claim the rejected ID was accepted, and never orphan a queued child.
+   */
+  async retireEquivalentMerges(event) {
+    const remoteParents = event.revision.parentRevisionIds ?? [];
+    if (remoteParents.length < 2) return;
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const dependentParents = new Set([...state.outbox, ...Object.values(state.quarantinedEnvelopes)].flatMap((entry) => parentIdsFromHeader(entry.header)));
+      const retired = state.outbox.filter((entry) => {
+        const parents = parentIdsFromHeader(entry.header);
+        return entry.fileId === event.revision.fileId && entry.contentHash === event.revision.contentHash && parents.length >= 2 && parents.every((id) => remoteParents.includes(id)) && !dependentParents.has(entry.revisionId);
+      });
+      if (retired.length === 0) return;
+      const ids = new Set(retired.map((entry) => entry.revisionId));
+      await this.mutate({
+        ...state,
+        outbox: state.outbox.filter((entry) => !ids.has(entry.revisionId)),
+        reconciliationBackups: {
+          ...state.reconciliationBackups,
+          [event.revision.revisionId]: [
+            ...state.reconciliationBackups?.[event.revision.revisionId] ?? [],
+            ...retired.map((entry) => ({ ...entry, payloadExternalized: false }))
+          ]
+        }
+      });
+    });
+  }
+  /** Only a freshly queued merge with no descendants can be cancelled on failed apply. */
+  async cancelUnsentMerge(revisionId) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const entry = state.outbox.find((item) => item.revisionId === revisionId);
+      if (entry === void 0) return;
+      if (parentIdsFromHeader(entry.header).length < 2 || [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((item) => parentIdsFromHeader(item.header).includes(revisionId))) {
+        throw new Error("Cannot cancel a pending revision with dependent work.");
+      }
+      await this.mutate({ ...state, outbox: state.outbox.filter((item) => item.revisionId !== revisionId) });
+      await this.dropPayload(revisionId);
+    });
+  }
   async recordPushReceipt(receipt) {
     return this.runExclusive(async () => {
       const state = await this.ensureLoaded();
       const outbox = state.outbox.filter(
         (envelope) => envelope.revisionId !== receipt.revisionId
       );
-      await this.dropPayload(receipt.revisionId);
       await this.mutate({
         ...state,
         outbox,
@@ -16758,6 +16916,7 @@ var DurableSyncState = class {
           receipt.revisionId
         )
       });
+      await this.dropPayload(receipt.revisionId);
     });
   }
   async quarantineOutboxItem(revisionId, reason) {
@@ -16853,6 +17012,11 @@ var DurableSyncState = class {
   }
   async listQuarantine() {
     return (await this.ensureLoaded()).quarantine;
+  }
+  /** Includes unsent authored revisions; used to distinguish local work from history replay. */
+  async hasAuthoredRevision(revisionId) {
+    const state = await this.ensureLoaded();
+    return state.locallyAuthored.includes(revisionId) || state.outbox.some((entry) => entry.revisionId === revisionId);
   }
   async isLocallyAuthored(revisionId) {
     const state = await this.ensureLoaded();
@@ -17041,8 +17205,8 @@ var DurableSyncState = class {
       const quarantine = state.quarantine.filter(
         (item) => item.revisionId !== revisionId
       );
-      await this.dropPayload(revisionId);
       await this.mutate({ ...state, quarantine, quarantinedEnvelopes });
+      await this.dropPayload(revisionId);
     });
   }
   async getEnvelope(revisionId) {
@@ -17112,10 +17276,18 @@ var DurableSyncState = class {
    */
   async hydrate(raw) {
     if (this.cache !== null) return;
+    if (isRecord3(raw) && !validRecoveryFields(raw)) {
+      await this.persist.preserveCorrupt(raw, this.now());
+      throw new Error("Invalid producer recovery journal; sync is paused with original state preserved.");
+    }
     const outcome = parsePersistedState(raw);
     if (outcome.status !== "corrupt") {
       if (this.cache === null) this.cache = outcome.state;
       return;
+    }
+    if (isRecord3(raw) && (raw.producerRecovery !== void 0 || raw.reconciliationBackups !== void 0)) {
+      await this.persist.preserveCorrupt(raw, this.now());
+      throw new Error("Corrupt sync state includes recovery data; original state preserved.");
     }
     const backup = await this.persist.loadBackup();
     if (this.cache !== null) return;
@@ -17141,8 +17313,8 @@ var DurableSyncState = class {
     await this.persist.save(this.toDiskForm(this.cache));
   }
   async mutate(next) {
-    this.cache = next;
     await this.persist.save(this.toDiskForm(next));
+    this.cache = next;
   }
   /**
    * Arch P1: the on-disk projection of `state`. For every outbox/stash envelope
@@ -17340,7 +17512,16 @@ function parsePersistedState(raw) {
     outboxAtRisk: outboxAtRisk(raw)
   };
 }
+function validRecoveryFields(raw) {
+  if (raw.producerRecovery !== void 0 && (!Array.isArray(raw.producerRecovery) || !raw.producerRecovery.every(validRecovery))) return false;
+  if (raw.reconciliationBackups !== void 0) {
+    if (!isRecord3(raw.reconciliationBackups)) return false;
+    if (!Object.values(raw.reconciliationBackups).every((entries) => Array.isArray(entries) && entries.every((entry) => parseEnvelope(entry) !== null && isRecord3(entry) && entry.payloadExternalized !== true))) return false;
+  }
+  return true;
+}
 function strictParse(raw) {
+  if (isRecord3(raw) && !validRecoveryFields(raw)) return null;
   if (!isRecord3(raw) || raw.version !== 1) return null;
   const cursor = raw.cursor;
   const outbox = raw.outbox;
@@ -17368,6 +17549,8 @@ function strictParse(raw) {
   return {
     version: 1,
     cursor,
+    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
+    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
     outbox: parsedOutbox,
     locallyAuthored,
     deferred: parsedDeferred,
@@ -17389,6 +17572,8 @@ function salvageState(raw) {
   return {
     version: 1,
     cursor,
+    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
+    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
     outbox: parsedOutbox,
     locallyAuthored,
     deferred: salvageDeferred(raw.deferred),
@@ -19697,8 +19882,113 @@ async function removeConfig(adapter, path) {
   if (await adapter.exists(path)) await adapter.remove(path);
 }
 
+// src/runtime/revision-history.ts
+var RevisionHistory = class {
+  constructor(options) {
+    __publicField(this, "options", options);
+    __publicField(this, "accepted", /* @__PURE__ */ new Map());
+    __publicField(this, "payloads", /* @__PURE__ */ new Map());
+    __publicField(this, "cursor", 0);
+    __publicField(this, "loaded", false);
+    __publicField(this, "loading", null);
+  }
+  async refresh() {
+    if (this.loading !== null) return this.loading;
+    const load = async () => {
+      let target = null;
+      do {
+        const page = await this.options.transport.pull(this.cursor);
+        target ?? (target = page.cursor);
+        for (const event of page.events) {
+          if (event.serverSequence <= this.cursor) continue;
+          if (event.serverSequence !== this.cursor + 1) throw new Error("Revision history has a gap.");
+          this.accepted.set(event.revision.revisionId, event);
+          this.cursor = event.serverSequence;
+        }
+        if (page.events.length === 0 && this.cursor < target) throw new Error("Revision history is incomplete.");
+      } while (this.cursor < target);
+    };
+    this.loading = load();
+    try {
+      await this.loading;
+      this.loaded = true;
+    } finally {
+      this.loading = null;
+    }
+  }
+  async graph(fileId) {
+    if (!this.loaded) await this.refresh();
+    const graph = new Map([...this.accepted].filter(([, event]) => event.revision.fileId === fileId));
+    for (const queued of await this.options.state.listOutbox()) {
+      if (queued.fileId !== fileId || graph.has(queued.revisionId)) continue;
+      graph.set(queued.revisionId, { serverSequence: 0, revision: queued });
+    }
+    return graph;
+  }
+  /** A pull can receive a revision committed after the cycle snapshot. */
+  async ensureEvent(event) {
+    if (!this.accepted.has(event.revision.revisionId)) await this.refresh();
+    if (!this.accepted.has(event.revision.revisionId)) throw new Error("Incoming revision is missing from history.");
+  }
+  async allHeads() {
+    if (!this.loaded) await this.refresh();
+    const parents = new Set([...this.accepted.values()].flatMap((e) => e.revision.parentRevisionIds ?? []));
+    return [...this.accepted.values()].filter((e) => !parents.has(e.revision.revisionId));
+  }
+  async heads(fileId) {
+    if (!this.loaded) await this.refresh();
+    const events = [...this.accepted.values()].filter((event) => event.revision.fileId === fileId);
+    const parents = new Set(events.flatMap((event) => event.revision.parentRevisionIds ?? []));
+    return events.filter((event) => !parents.has(event.revision.revisionId));
+  }
+  async payload(event) {
+    const id = event.revision.revisionId;
+    const cached2 = this.payloads.get(id);
+    if (cached2 !== void 0) return cached2;
+    const queued = await this.options.state.getEnvelope(id);
+    const payload = queued === void 0 ? await this.options.resolveRevision(event) : decodeRevisionPayload(Uint8Array.from(atob(queued.payloadBase64), (char) => char.charCodeAt(0)));
+    this.payloads.set(id, payload);
+    return payload;
+  }
+};
+function ancestors(graph, start) {
+  const result = /* @__PURE__ */ new Set();
+  const queue = [start];
+  while (queue.length > 0) {
+    const id = queue.pop();
+    if (result.has(id)) continue;
+    result.add(id);
+    queue.push(...graph.get(id)?.revision.parentRevisionIds ?? []);
+  }
+  return result;
+}
+function commonAncestor(graph, left, right) {
+  const leftAncestors = ancestors(graph, left);
+  const common = [...ancestors(graph, right)].filter((id) => leftAncestors.has(id) && graph.has(id));
+  const commonSet = new Set(common);
+  const superseded = new Set(common.flatMap((id) => graph.get(id)?.revision.parentRevisionIds ?? []).filter((id) => commonSet.has(id)));
+  const nearest = common.filter((id) => !superseded.has(id));
+  return nearest.length === 1 ? graph.get(nearest[0]) ?? null : null;
+}
+
+// src/runtime/apply-deferred.ts
+var ApplyDeferredError = class extends Error {
+  constructor() {
+    super("Local content changed during remote apply.");
+    __publicField(this, "name", "ApplyDeferredError");
+  }
+};
+
 // src/runtime/keyed-mutex.ts
 function noop2() {
+}
+function withKeys(lock, keys, task) {
+  const ordered = [...new Set(keys)].sort();
+  const next = (index) => {
+    const key = ordered[index];
+    return key === void 0 ? task() : lock.runExclusive(key, () => next(index + 1));
+  };
+  return next(0);
 }
 var KeyedMutex = class {
   constructor() {
@@ -19748,6 +20038,8 @@ var VaultApplyAdapter = class {
     __publicField(this, "fallbackAuthorName");
     __publicField(this, "onConflictWritten");
     __publicField(this, "lock");
+    __publicField(this, "history");
+    this.history = options.history;
     this.files = options.files;
     this.conflictFolder = options.conflictFolder;
     this.resolveRevision = options.resolveRevision;
@@ -19783,22 +20075,49 @@ var VaultApplyAdapter = class {
   }
   async applyRemote(event, options) {
     const decoded = await this.resolveRevision(event);
+    await this.history?.ensureEvent(event);
     const fileId = event.revision.fileId;
     const origin = options?.bootstrap === true ? "bootstrap" : "live";
-    return this.lock.runExclusive(
-      this.lockKey(decoded.path),
-      () => this.applyDecoded(event, decoded, fileId, origin)
-    );
+    return withKeys(this.lock, [this.lockKey(decoded.path), ...decoded.previousPath === null ? [] : [this.lockKey(decoded.previousPath)]], async () => {
+      if ((await this.openBuffers(fileId)).some((buffer) => buffer.unsaved)) return "deferred";
+      const localHead = await this.producerSync?.localHeadFor?.(fileId);
+      if (this.history !== void 0 && options?.bootstrap === true && localHead == null) {
+        const heads = await this.history.heads(fileId);
+        if (!heads.some((head) => head.revision.revisionId === event.revision.revisionId)) return "noop";
+      }
+      if (this.history !== void 0 && localHead != null) {
+        const graph = await this.history.graph(fileId);
+        if (ancestors(graph, localHead).has(event.revision.revisionId)) return "noop";
+      }
+      const rollback = await this.producerSync?.checkpointApply?.(
+        fileId,
+        [decoded.path, ...decoded.previousPath === null ? [] : [decoded.previousPath]]
+      );
+      try {
+        const result = await this.applyDecoded(event, decoded, fileId, origin);
+        if ((result === "applied" || result === "noop") && decoded.operation === "rename" && decoded.previousPath !== null && decoded.previousPath !== decoded.path && this.files.fileIdAtPath(decoded.previousPath) === fileId) {
+          await this.files.deleteByPath(decoded.previousPath);
+          await this.files.forgetPath(decoded.previousPath);
+        }
+        if (result === "conflict") await rollback?.();
+        else await rollback?.complete?.();
+        return result;
+      } catch (error51) {
+        await rollback?.();
+        if (error51 instanceof ApplyDeferredError) return "deferred";
+        throw error51;
+      }
+    });
   }
   async applyDecoded(event, decoded, fileId, origin) {
     if (decoded.operation === "delete") {
       if (this.files.fileIdAtPath(decoded.path) === fileId) {
         if (!resolvesLastWriterWins(decoded.path)) {
-          const onDisk2 = await this.files.readByPath(decoded.path);
+          const onDisk2 = decoded.kind === "binary" ? await this.files.readBinaryByPath(decoded.path) : await this.files.readByPath(decoded.path);
           if (onDisk2 !== null) {
             const base = this.files.baseHashFor(fileId);
-            const onDiskHash = await this.hashContent(onDisk2);
-            if (base === null || onDiskHash !== base) {
+            const onDiskHash = typeof onDisk2 === "string" ? await this.hashContent(onDisk2) : await hashBlob(onDisk2);
+            if ((base === null || onDiskHash !== base) && await this.cleanCausalHash(fileId, event, onDiskHash) === null) {
               await this.writeConflict(event, decoded);
               return "conflict";
             }
@@ -19830,15 +20149,14 @@ var VaultApplyAdapter = class {
       if (previousOnDisk !== null && !lastWriterWins) {
         const base = this.files.baseHashFor(fileId);
         const previousHash = await this.hashContent(previousOnDisk);
-        if (base === null || previousHash !== base) {
+        if ((base === null || previousHash !== base) && await this.cleanCausalHash(fileId, event, previousHash) === null) {
           await this.writeConflict(event, decoded);
           return "conflict";
         }
       }
-      const destinationOwner = this.files.fileIdAtPath(decoded.path);
-      if (destinationOwner !== null && destinationOwner !== fileId && !lastWriterWins) {
+      if (!lastWriterWins) {
         const destinationOnDisk = await this.files.readByPath(decoded.path);
-        if (destinationOnDisk === null || !contentMatches(destinationOnDisk, text)) {
+        if (destinationOnDisk !== null && !contentMatches(destinationOnDisk, text)) {
           await this.writeConflict(event, decoded);
           return "conflict";
         }
@@ -19847,13 +20165,12 @@ var VaultApplyAdapter = class {
         fileId,
         path: decoded.previousPath
       });
-      await this.files.deleteByPath(decoded.previousPath);
-      await this.files.forgetPath(decoded.previousPath);
     }
     const onDisk = await this.files.readByPath(decoded.path);
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
       if (onDisk !== null && contentMatches(onDisk, text)) {
+        if (this.history !== void 0 && owner < fileId && (await this.history.heads(owner)).length > 0) return "noop";
         const contentHash2 = await this.hashContent(text);
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
@@ -19879,6 +20196,11 @@ var VaultApplyAdapter = class {
       await this.files.forgetBaseHash(owner);
       await this.files.forgetBaseContent(owner);
     }
+    const cleanCausalHash = onDisk === null ? null : await this.cleanCausalHash(
+      fileId,
+      event,
+      await this.hashContent(onDisk)
+    );
     if (onDisk !== null) {
       if (contentMatches(onDisk, text)) {
         const contentHash2 = await this.hashContent(text);
@@ -19898,7 +20220,7 @@ var VaultApplyAdapter = class {
       const base = this.files.baseHashFor(fileId);
       const onDiskHash = await this.hashContent(onDisk);
       const diverged = base === null || onDiskHash !== base;
-      if (diverged || !await this.isCausalFastForward(fileId, event)) {
+      if (cleanCausalHash === null && (diverged || !await this.isCausalFastForward(fileId, event))) {
         const merged = await this.tryMergeApply(
           event,
           decoded,
@@ -19930,7 +20252,7 @@ var VaultApplyAdapter = class {
     if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, text)) {
       const preWriteBase = this.files.baseHashFor(fileId);
       const preWriteHash = await this.hashContent(preWriteOnDisk);
-      if (preWriteBase === null || preWriteHash !== preWriteBase) {
+      if ((preWriteBase === null || preWriteHash !== preWriteBase) && preWriteHash !== cleanCausalHash) {
         await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
         const merged = await this.tryMergeApply(
           event,
@@ -19949,7 +20271,7 @@ var VaultApplyAdapter = class {
       }
     }
     try {
-      await this.files.writeByPath(decoded.path, text);
+      await this.files.writeByPath(decoded.path, text, lastWriterWins ? void 0 : preWriteOnDisk);
     } catch (error51) {
       if (error51 instanceof ParentFolderOccupiedError && !lastWriterWins) {
         await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
@@ -19979,41 +20301,50 @@ var VaultApplyAdapter = class {
    * longer matches the base hash, or the changes overlap), the caller then
    * writes a conflict copy.
    *
-   * ANCESTOR is the locally-persisted base content; LOCAL is the current on-disk
-   * content; REMOTE is the incoming revision. A successful merge IS a
-   * convergence event, so the base advances to the merged state. The merged
-   * content is deliberately NOT adopted into the producer mapping: it is a NEW
-   * local revision this device authored, so letting the reflected vault write
-   * flow through the normal local-edit path pushes the merged result to the peer
-   * (who converges by content-equality, no ping-pong).
+   * Keep the ancestor while branches are concurrent. A merged file is not an
+   * accepted remote revision: publish it explicitly, with its resolved parents,
+   * before changing the disk. The observer then deduplicates the reflected write.
    */
   async tryMergeApply(event, decoded, fileId, onDisk, incoming, base, origin) {
-    if (base === null) {
-      return null;
+    let ancestor;
+    if (this.history !== void 0) {
+      const head = await this.producerSync?.localHeadFor?.(fileId);
+      if (head == null) return null;
+      const graph = await this.history.graph(fileId);
+      const shared = commonAncestor(graph, head, event.revision.revisionId);
+      if (shared === null) return null;
+      const payload = await this.history.payload(shared);
+      if (payload.kind === "binary" || payload.operation === "delete" || payload.path !== decoded.path) return null;
+      ancestor = payload.content;
+    } else {
+      if (base === null) return null;
+      ancestor = this.files.baseContentFor(fileId);
+      if (ancestor === null || await this.hashContent(ancestor) !== base) return null;
     }
-    const ancestor = this.files.baseContentFor(fileId);
-    if (ancestor === null) {
-      return null;
-    }
-    if (await this.hashContent(ancestor) !== base) {
-      return null;
-    }
+    if (ancestor === null) return null;
     const result = mergeText(ancestor, onDisk, incoming);
     if (result.status !== "merged") {
       return null;
     }
     const merged = result.text;
     const mergedHash = await this.hashContent(merged);
+    if (this.producerSync?.onMergedWrite !== void 0) {
+      const queued = await this.producerSync.onMergedWrite({
+        fileId,
+        path: decoded.path,
+        content: merged,
+        contentHash: mergedHash,
+        remoteRevisionId: event.revision.revisionId,
+        remoteParentRevisionIds: event.revision.parentRevisionIds ?? []
+      });
+      if (!queued) return null;
+    }
     if (merged === onDisk) {
       await this.files.recordPathOwner(fileId, decoded.path);
-      await this.files.recordBaseHash(fileId, mergedHash);
-      await this.files.recordBaseContent(fileId, merged);
       return "noop";
     }
-    await this.files.writeByPath(decoded.path, merged);
+    await this.files.writeByPath(decoded.path, merged, onDisk);
     await this.files.recordPathOwner(fileId, decoded.path);
-    await this.files.recordBaseHash(fileId, mergedHash);
-    await this.files.recordBaseContent(fileId, merged);
     this.onRemoteApplied?.({
       revisionId: event.revision.revisionId,
       fileId,
@@ -20023,6 +20354,14 @@ var VaultApplyAdapter = class {
       ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
     });
     return "applied";
+  }
+  /** Server acceptance alone never proves that an offline peer saw our version. */
+  async cleanCausalHash(fileId, event, diskHash) {
+    const local = await this.producerSync?.localVersionFor?.(fileId);
+    if (local == null || diskHash !== local.contentHash) return null;
+    if (event.revision.parentRevisionIds?.includes(local.revisionId) === true) return diskHash;
+    if (this.history !== void 0 && ancestors(await this.history.graph(fileId), event.revision.revisionId).has(local.revisionId)) return diskHash;
+    return null;
   }
   /**
    * Causal apply-vs-conflict decision (rule 3): true when the incoming
@@ -20052,7 +20391,7 @@ var VaultApplyAdapter = class {
     if (localHead === null) {
       return false;
     }
-    return parents.includes(localHead);
+    return parents.includes(localHead) || this.history !== void 0 && ancestors(await this.history.graph(fileId), event.revision.revisionId).has(localHead);
   }
   /**
    * Applies a whole-file binary revision (F9). Structurally mirrors the markdown
@@ -20073,22 +20412,26 @@ var VaultApplyAdapter = class {
       if (previousOnDisk !== null && !lastWriterWins) {
         const base = this.files.baseHashFor(fileId);
         const previousHash = await hashBlob(previousOnDisk);
-        if (base === null || previousHash !== base) {
+        if ((base === null || previousHash !== base) && await this.cleanCausalHash(fileId, event, previousHash) === null) {
           await this.writeConflict(event, decoded);
           return "conflict";
         }
+      }
+      const destination = await this.files.readBinaryByPath(decoded.path);
+      if (!lastWriterWins && destination !== null && !bytesEqual(destination, bytes)) {
+        await this.writeConflict(event, decoded);
+        return "conflict";
       }
       await this.producerSync?.onRemoteDelete({
         fileId,
         path: decoded.previousPath
       });
-      await this.files.deleteByPath(decoded.previousPath);
-      await this.files.forgetPath(decoded.previousPath);
     }
     const onDisk = await this.files.readBinaryByPath(decoded.path);
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
       if (onDisk !== null && bytesEqual(onDisk, bytes)) {
+        if (this.history !== void 0 && owner < fileId && (await this.history.heads(owner)).length > 0) return "noop";
         await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
         await this.files.forgetBaseHash(owner);
         await this.files.recordPathOwner(fileId, decoded.path);
@@ -20111,6 +20454,11 @@ var VaultApplyAdapter = class {
       await this.files.forgetBaseHash(owner);
       await this.files.forgetBaseContent(owner);
     }
+    const cleanCausalHash = onDisk === null ? null : await this.cleanCausalHash(
+      fileId,
+      event,
+      await hashBlob(onDisk)
+    );
     if (onDisk !== null) {
       if (bytesEqual(onDisk, bytes)) {
         await this.files.recordBaseHash(fileId, incomingHash);
@@ -20127,7 +20475,7 @@ var VaultApplyAdapter = class {
       }
       const base = this.files.baseHashFor(fileId);
       const onDiskHash = await hashBlob(onDisk);
-      if (!lastWriterWins && (base === null || onDiskHash !== base)) {
+      if (!lastWriterWins && cleanCausalHash === null && (base === null || onDiskHash !== base)) {
         await this.writeConflict(event, decoded);
         return "conflict";
       }
@@ -20148,7 +20496,7 @@ var VaultApplyAdapter = class {
     if (preWriteOnDisk !== null && !lastWriterWins && !bytesEqual(preWriteOnDisk, bytes)) {
       const preWriteBase = this.files.baseHashFor(fileId);
       const preWriteHash = await hashBlob(preWriteOnDisk);
-      if (preWriteBase === null || preWriteHash !== preWriteBase) {
+      if ((preWriteBase === null || preWriteHash !== preWriteBase) && preWriteHash !== cleanCausalHash) {
         await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
         await this.writeConflict(event, decoded);
         return "conflict";
@@ -20260,6 +20608,19 @@ function contentMatches(onDisk, incoming) {
   return canonicalizeMarkdown(onDisk) === canonicalizeMarkdown(incoming);
 }
 
+// src/runtime/adapters/editor-buffers.ts
+function editorTexts(workspace, path) {
+  const texts = [];
+  workspace?.iterateAllLeaves((leaf) => {
+    if (leaf.view.getViewType() !== "markdown") return;
+    const view = leaf.view;
+    if (view.file?.path === path && view.getMode() === "source") {
+      texts.push(canonicalizeMarkdown(view.editor.getValue()));
+    }
+  });
+  return texts;
+}
+
 // src/runtime/adapters/vault-file-port.ts
 async function ensureWritableConflictFolder(vault, folder) {
   const abstract = vault.getAbstractFileByPath(folder);
@@ -20313,10 +20674,19 @@ async function ensureParentFolders(vault, path) {
   }
 }
 function createVaultFilePort(options) {
-  const { vault, state, configApply } = options;
+  const { vault, state, configApply, workspace } = options;
   return {
-    openBufferStates() {
-      return [];
+    async openBufferStates(fileId) {
+      const path = state.pathForFileId(fileId);
+      if (path === null) return [];
+      const file2 = vault.getAbstractFileByPath(path);
+      const disk = file2 === null ? null : canonicalizeMarkdown(await vault.read(file2));
+      const texts = editorTexts(workspace, path);
+      return Promise.all(texts.map(async (content) => ({
+        baseHash: disk === null ? null : await hashPlaintext(disk),
+        currentHash: await hashPlaintext(content),
+        unsaved: content !== disk
+      })));
     },
     fileIdAtPath(path) {
       return state.fileIdAtPath(path);
@@ -20354,7 +20724,7 @@ function createVaultFilePort(options) {
     },
     conflictArtifactPathFor: (revisionId) => state.conflictArtifactPathFor(revisionId),
     recordConflictArtifactPath: (revisionId, path) => state.recordConflictArtifactPath(revisionId, path),
-    async writeByPath(path, content) {
+    async writeByPath(path, content, expectedContent) {
       if (isSyncableConfigPath(path)) {
         const local = await vault.adapter.exists(path) ? await vault.adapter.read(path) : null;
         await writeConfigText(
@@ -20367,11 +20737,23 @@ function createVaultFilePort(options) {
       }
       const existing = vault.getAbstractFileByPath(path);
       if (existing === null) {
+        if (expectedContent !== void 0 && expectedContent !== null) throw new ApplyDeferredError();
         await ensureParentFolders(vault, path);
+        if (editorTexts(workspace, path).length > 0) throw new ApplyDeferredError();
         await vault.create(path, content);
         return;
       }
-      await vault.modify(existing, content);
+      if (expectedContent !== void 0) {
+        await vault.process(existing, (current) => {
+          const canonical = canonicalizeMarkdown(current);
+          if (canonical !== expectedContent || editorTexts(workspace, path).some((text) => text !== canonical)) {
+            throw new ApplyDeferredError();
+          }
+          return content;
+        });
+      } else {
+        await vault.modify(existing, content);
+      }
     },
     async writeBinaryByPath(path, bytes) {
       if (isSyncableConfigPath(path)) {
@@ -20396,7 +20778,12 @@ function createVaultFilePort(options) {
       }
       const existing = vault.getAbstractFileByPath(path);
       if (existing !== null) {
-        await vault.delete(existing);
+        const buffers = editorTexts(workspace, path);
+        if (buffers.length > 0) {
+          const disk = canonicalizeMarkdown(await vault.read(existing));
+          if (editorTexts(workspace, path).some((text) => text !== disk)) throw new ApplyDeferredError();
+        }
+        await vault.trash(existing, false);
       }
     },
     async writeConflictArtifact(path, content) {
@@ -21987,6 +22374,9 @@ function isRecord13(value) {
 // src/runtime/remote-apply-coordinator.ts
 function createRemoteApplyProducerSync(getProducer) {
   return {
+    async checkpointApply(fileId, paths) {
+      return await getProducer()?.checkpointApply?.(fileId, paths) ?? (async () => void 0);
+    },
     async onRemoteWrite({ fileId, path, content, contentHash, revisionId, contentKind }) {
       const producer = getProducer();
       if (producer === null) return;
@@ -22005,6 +22395,25 @@ function createRemoteApplyProducerSync(getProducer) {
         path: classified.canonicalPath
       };
       await producer.adoptRemoteMapping(mapping, revisionId);
+    },
+    async localVersionFor(fileId) {
+      return await getProducer()?.versionFor?.(fileId) ?? null;
+    },
+    async onMergedWrite(input) {
+      const producer = getProducer();
+      const classified = classifyVaultPath(input.path);
+      if (producer?.commitMergedChange === void 0 || !classified.eligible) return false;
+      return producer.commitMergedChange({
+        mapping: {
+          fileId: input.fileId,
+          path: classified.canonicalPath,
+          collisionKey: classified.collisionKey,
+          content: input.content,
+          contentHash: input.contentHash
+        },
+        remoteRevisionId: input.remoteRevisionId,
+        remoteParentRevisionIds: input.remoteParentRevisionIds
+      });
     },
     async onRemoteDelete({ fileId, path }) {
       const producer = getProducer();
@@ -22062,9 +22471,99 @@ var OPERATION_BY_KIND = {
 var OutboxLocalChangeRepository = class {
   constructor(options) {
     __publicField(this, "options");
+    // All files share one persisted mapping document. Per-file observer locks
+    // cannot prevent two different files from saving snapshots over each other.
+    __publicField(this, "mutations", new KeyedMutex());
+    __publicField(this, "activeApplies", /* @__PURE__ */ new Set());
     this.options = options;
   }
+  async recover() {
+    await this.mutations.runExclusive("state", () => this.recoverLocked());
+  }
+  async recoverLocked() {
+    for (const record2 of await this.options.recovery?.pendingProducerRecoveries() ?? []) {
+      if (this.activeApplies.has(record2.id)) continue;
+      await this.options.recovery?.recoverProducerQueue(record2.id);
+      const current = await this.options.store.load();
+      const ids = new Set(record2.fileIds);
+      const heads = Object.fromEntries(Object.entries(current.heads).filter(([id]) => !ids.has(id)));
+      await this.options.store.save({
+        mappings: [...current.mappings.filter((m) => !ids.has(m.fileId)), ...record2.state.mappings],
+        heads: { ...heads, ...record2.state.heads }
+      });
+      await this.options.recovery?.completeProducerRecovery(record2.id);
+    }
+  }
+  /** Persist undo intent before adoption or enqueue. Interrupted applies are
+   * rolled back before any subsequent push; original payloads remain archived. */
+  async checkpointApply(fileId, paths) {
+    return this.mutations.runExclusive("state", async () => {
+      await this.recoverLocked();
+      const before = await this.options.store.load();
+      const affected = /* @__PURE__ */ new Set([fileId, ...before.mappings.filter((m) => paths.includes(m.path)).map((m) => m.fileId)]);
+      const record2 = {
+        id: this.options.generateRevisionId(),
+        kind: "apply",
+        fileIds: [...affected],
+        discardRevisionIds: [],
+        state: {
+          mappings: before.mappings.filter((m) => affected.has(m.fileId)),
+          heads: Object.fromEntries(Object.entries(before.heads).filter(([id]) => affected.has(id)))
+        }
+      };
+      if (this.options.recovery !== void 0) {
+        await this.options.recovery.startProducerRecovery(record2);
+        this.activeApplies.add(record2.id);
+        const rollback = async () => {
+          this.activeApplies.delete(record2.id);
+          await this.recover();
+        };
+        return Object.assign(rollback, { complete: async () => {
+          await this.options.recovery?.completeProducerRecovery(record2.id);
+          this.activeApplies.delete(record2.id);
+        } });
+      }
+      return () => this.mutations.runExclusive("state", async () => {
+        const current = await this.options.store.load();
+        const currentHead = current.heads[fileId];
+        if (currentHead !== void 0 && currentHead !== before.heads[fileId]) await this.options.cancelUnsentMerge?.(currentHead);
+        await this.options.store.save({
+          mappings: [...current.mappings.filter((m) => !affected.has(m.fileId)), ...record2.state.mappings],
+          heads: { ...Object.fromEntries(Object.entries(current.heads).filter(([id]) => !affected.has(id))), ...record2.state.heads }
+        });
+      });
+    });
+  }
+  async commitHeadResolution(input) {
+    await this.mutations.runExclusive("state", async () => {
+      await this.recoverLocked();
+      const recovery = this.options.recovery;
+      if (recovery === void 0) return;
+      const current = await this.options.store.load();
+      if (current.heads[input.mapping.fileId] !== input.expectedHead) return;
+      const revisionId = input.existingRevisionId ?? this.options.generateRevisionId();
+      const built = input.existingRevisionId === void 0 ? await buildRevisionEnvelope({
+        identity: { ...this.options.identity, fileId: input.mapping.fileId },
+        revisionId,
+        parentRevisionIds: input.parents,
+        operation: "update",
+        path: input.mapping.path,
+        content: input.mapping.content,
+        idempotencyKey: revisionId
+      }) : void 0;
+      const replacement = built === void 0 ? void 0 : { ...built, operationId: revisionId };
+      const record2 = {
+        id: this.options.generateRevisionId(),
+        kind: "resolution",
+        fileIds: [input.mapping.fileId],
+        discardRevisionIds: input.pendingIds,
+        state: { mappings: [input.mapping], heads: { [input.mapping.fileId]: revisionId } }
+      };
+      if (await recovery.startProducerRecovery(record2, replacement)) await this.recoverLocked();
+    });
+  }
   async listMappings() {
+    await this.mutations.runExclusive("state", () => this.recoverLocked());
     return (await this.options.store.load()).mappings;
   }
   /**
@@ -22078,67 +22577,154 @@ var OutboxLocalChangeRepository = class {
     const state = await this.options.store.load();
     return state.heads[fileId] ?? null;
   }
-  async commitLocalChange(commit) {
+  async versionFor(fileId) {
     const state = await this.options.store.load();
-    const { operation } = commit;
-    const head = state.heads[operation.fileId];
-    const kind = operation.kind;
-    const envelopeOperation = resolveOperation(kind, head);
-    if (!(kind === "delete" && head === void 0)) {
-      const parentRevisionIds = envelopeOperation === "create" || head === void 0 ? [] : [head];
+    const mapping = state.mappings.find((item) => item.fileId === fileId);
+    const revisionId = state.heads[fileId];
+    return mapping === void 0 || revisionId === void 0 ? null : {
+      revisionId,
+      contentHash: mapping.contentHash
+    };
+  }
+  async commitMergedChange(input) {
+    return this.mutations.runExclusive("state", async () => {
+      const state = await this.options.store.load();
+      const { mapping, remoteRevisionId, remoteParentRevisionIds } = input;
+      const localHead = state.heads[mapping.fileId];
+      if (localHead === void 0 || !await this.options.hasAuthoredRevision?.(localHead)) return false;
+      const parents = remoteParentRevisionIds.includes(localHead) || localHead === remoteRevisionId ? [remoteRevisionId] : [localHead, remoteRevisionId];
       const revisionId = this.options.generateRevisionId();
-      const isBinary = operation.contentKind === "binary";
       const built = await buildRevisionEnvelope({
-        identity: {
-          vaultId: this.options.identity.vaultId,
-          fileId: operation.fileId,
-          memberId: this.options.identity.memberId,
-          deviceId: this.options.identity.deviceId
-        },
+        identity: { ...this.options.identity, fileId: mapping.fileId },
         revisionId,
-        parentRevisionIds,
-        operation: envelopeOperation,
-        path: operation.path,
-        previousPath: operation.previousPath,
-        ...isBinary ? {
-          kind: "binary",
-          content: null,
-          binaryContent: decodeBase64ToBytes(operation.content ?? ""),
-          maxPayloadBytes: MAX_BINARY_PAYLOAD_BYTES
-        } : {
-          content: operation.content,
-          ...this.options.maxPayloadBytes === void 0 ? {} : { maxPayloadBytes: this.options.maxPayloadBytes }
-        },
-        idempotencyKey: operation.operationId
+        parentRevisionIds: parents,
+        operation: "update",
+        path: mapping.path,
+        content: mapping.content,
+        idempotencyKey: revisionId,
+        ...this.options.maxPayloadBytes === void 0 ? {} : { maxPayloadBytes: this.options.maxPayloadBytes }
       });
-      await this.options.enqueue({
+      await (this.options.recovery?.enqueueAutomaticMerge.bind(this.options.recovery) ?? this.options.enqueue)({
         header: built.header,
         idempotencyKey: built.idempotencyKey,
         payloadBase64: built.payloadBase64,
-        operationId: operation.operationId,
-        revisionId: built.revisionId,
-        fileId: built.fileId,
+        operationId: revisionId,
+        revisionId,
+        fileId: mapping.fileId,
         contentHash: built.contentHash
       });
-      await this.options.store.save(
-        applyCommit(state, commit, {
+      await this.options.store.save({
+        mappings: upsertMapping(state.mappings, mapping),
+        heads: { ...state.heads, [mapping.fileId]: revisionId }
+      });
+      return true;
+    });
+  }
+  /**
+   * Publishes a local change so the queue entry and the producer mapping can
+   * never be observed apart. The journal records the producer state this commit
+   * INTENDS, alongside the envelope, in a single durable write; `recoverLocked`
+   * then replays that state on the next call, before any scan can look for a
+   * mapping and fail to find one.
+   *
+   * `kind: 'resolution'` (not `'apply'`) because there is nothing to roll back:
+   * this is a new local edit, so recovery must finish it forwards rather than
+   * restore a previous state.
+   *
+   * With no recovery port wired the old two-write path is kept, so a caller
+   * that does not supply one (unit tests, the preview harness) behaves exactly
+   * as before.
+   */
+  async commitWithRecovery(envelope, next, operation) {
+    const recovery = this.options.recovery;
+    if (recovery === void 0) {
+      await this.options.enqueue(envelope);
+      await this.options.store.save(next);
+      await this.seedSharedState(operation);
+      return;
+    }
+    const record2 = {
+      id: this.options.generateRevisionId(),
+      kind: "resolution",
+      fileIds: [operation.fileId],
+      state: {
+        mappings: next.mappings.filter((m) => m.fileId === operation.fileId),
+        heads: Object.fromEntries(
+          Object.entries(next.heads).filter(([id]) => id === operation.fileId)
+        )
+      },
+      discardRevisionIds: []
+    };
+    const started = await recovery.startProducerRecovery(record2, envelope);
+    if (!started) {
+      throw new Error("Local commit recovery transaction was refused.");
+    }
+    await this.options.store.save(next);
+    await this.seedSharedState(operation);
+    await recovery.completeProducerRecovery(record2.id);
+  }
+  async commitLocalChange(commit) {
+    return this.mutations.runExclusive("state", async () => {
+      await this.recoverLocked();
+      const state = await this.options.store.load();
+      const { operation } = commit;
+      const head = state.heads[operation.fileId];
+      const kind = operation.kind;
+      const envelopeOperation = resolveOperation(kind, head);
+      if (!(kind === "delete" && head === void 0)) {
+        const parentRevisionIds = envelopeOperation === "create" || head === void 0 ? [] : [head];
+        const revisionId = this.options.generateRevisionId();
+        const isBinary = operation.contentKind === "binary";
+        const built = await buildRevisionEnvelope({
+          identity: {
+            vaultId: this.options.identity.vaultId,
+            fileId: operation.fileId,
+            memberId: this.options.identity.memberId,
+            deviceId: this.options.identity.deviceId
+          },
+          revisionId,
+          parentRevisionIds,
+          operation: envelopeOperation,
+          path: operation.path,
+          previousPath: operation.previousPath,
+          ...isBinary ? {
+            kind: "binary",
+            content: null,
+            binaryContent: decodeBase64ToBytes(operation.content ?? ""),
+            maxPayloadBytes: MAX_BINARY_PAYLOAD_BYTES
+          } : {
+            content: operation.content,
+            ...this.options.maxPayloadBytes === void 0 ? {} : { maxPayloadBytes: this.options.maxPayloadBytes }
+          },
+          idempotencyKey: operation.operationId
+        });
+        const envelope = {
+          header: built.header,
+          idempotencyKey: built.idempotencyKey,
+          payloadBase64: built.payloadBase64,
+          operationId: operation.operationId,
+          revisionId: built.revisionId,
+          fileId: built.fileId,
+          contentHash: built.contentHash
+        };
+        const next = applyCommit(state, commit, {
           fileId: operation.fileId,
           revisionId,
           isDelete: kind === "delete"
+        });
+        await this.commitWithRecovery(envelope, next, operation);
+        return built.revisionId;
+      }
+      await this.options.store.save(
+        applyCommit(state, commit, {
+          fileId: operation.fileId,
+          revisionId: null,
+          isDelete: true
         })
       );
       await this.seedSharedState(operation);
-      return built.revisionId;
-    }
-    await this.options.store.save(
-      applyCommit(state, commit, {
-        fileId: operation.fileId,
-        revisionId: null,
-        isDelete: true
-      })
-    );
-    await this.seedSharedState(operation);
-    return null;
+      return null;
+    });
   }
   /**
    * Mirrors a committed local change into the SHARED apply-side ownership+base
@@ -22174,22 +22760,26 @@ var OutboxLocalChangeRepository = class {
    * fileId for the same path (a duplicate fileId across devices).
    */
   async adoptRemoteMapping(mapping, headRevisionId) {
-    const state = await this.options.store.load();
-    const mappings = upsertMapping(state.mappings, mapping);
-    await this.options.store.save({
-      mappings,
-      heads: { ...state.heads, [mapping.fileId]: headRevisionId }
+    return this.mutations.runExclusive("state", async () => {
+      const state = await this.options.store.load();
+      const mappings = upsertMapping(state.mappings, mapping);
+      await this.options.store.save({
+        mappings,
+        heads: { ...state.heads, [mapping.fileId]: headRevisionId }
+      });
     });
   }
   /** Forgets the producer mapping+head for a file the apply side just deleted. */
   async forgetRemoteMapping(collisionKey, fileId) {
-    const state = await this.options.store.load();
-    const mappings = state.mappings.filter(
-      (mapping) => mapping.collisionKey !== collisionKey && mapping.fileId !== fileId
-    );
-    const heads = { ...state.heads };
-    delete heads[fileId];
-    await this.options.store.save({ mappings, heads });
+    return this.mutations.runExclusive("state", async () => {
+      const state = await this.options.store.load();
+      const mappings = state.mappings.filter(
+        (mapping) => mapping.collisionKey !== collisionKey && mapping.fileId !== fileId
+      );
+      const heads = { ...state.heads };
+      delete heads[fileId];
+      await this.options.store.save({ mappings, heads });
+    });
   }
 };
 function upsertMapping(mappings, upsert) {
@@ -22584,7 +23174,7 @@ var ModifyDebouncer = class {
 function toActivityKind(kind) {
   return kind === "update" ? "edit" : kind;
 }
-function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock) {
+function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock, initializeIdentities) {
   const vault = plugin.app.vault;
   const store = {
     async load() {
@@ -22617,8 +23207,11 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
   };
   const repository = new OutboxLocalChangeRepository({
     identity,
+    recovery: state,
     store,
     enqueue: (envelope) => state.enqueue(envelope),
+    cancelUnsentMerge: (revisionId) => state.cancelUnsentMerge(revisionId),
+    hasAuthoredRevision: (revisionId) => state.hasAuthoredRevision(revisionId),
     generateRevisionId: () => globalThis.crypto.randomUUID(),
     // FIX 1: seed the SHARED apply store for every file this device authors or
     // pushes, so a later peer edit to a locally-authored file resolves to its
@@ -22668,6 +23261,38 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       return vault.getAbstractFileByPath(path) !== null;
     }
   };
+  let disposed = false;
+  let initialized = false;
+  let initializing = null;
+  let blocked = /* @__PURE__ */ new Set();
+  const initialize = async () => {
+    if (initialized || disposed) return;
+    if (initializing !== null) return initializing;
+    initializing = (async () => {
+      await repository.recover();
+      blocked = await initializeIdentities?.(repository, snapshot) ?? /* @__PURE__ */ new Set();
+      if (disposed) return;
+      if (blocked.size > 0) new import_obsidian5.Notice(`Havemind: ${blocked.size} existing file(s) need conflict resolution before upload.`);
+      const result = await reconcileVaultState({ observer, repository, vault: {
+        ...snapshot,
+        listSyncablePaths: async () => (await snapshot.listSyncablePaths()).filter((path) => {
+          const classified = classifyVaultPath(path);
+          return !classified.eligible || !blocked.has(classified.collisionKey);
+        })
+      } });
+      if (result.skipped > 0) {
+        new import_obsidian5.Notice(`Havemind: ${result.skipped} file(s) could not be synced and were skipped.`);
+        warnSkippedPaths(result);
+      }
+      for (const notice of formatReconcileNotices(result)) new import_obsidian5.Notice(notice);
+      initialized = true;
+    })();
+    try {
+      await initializing;
+    } finally {
+      initializing = null;
+    }
+  };
   const observer = new VaultChangeObserver({
     clock: () => Date.now(),
     generateFileId: () => globalThis.crypto.randomUUID(),
@@ -22675,7 +23300,11 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     repository,
     vault: snapshot
   });
-  const lockedObserve = (path, run) => {
+  const lockedObserve = async (path, run) => {
+    await initialize();
+    if (disposed) return null;
+    const classifiedPath = classifyVaultPath(path);
+    if (classifiedPath.eligible && blocked.has(classifiedPath.collisionKey) && !(await repository.listMappings()).some((m) => m.collisionKey === classifiedPath.collisionKey)) return null;
     if (fileApplyLock === void 0) return run();
     const classified = classifyVaultPath(path);
     const key = classified.eligible ? classified.collisionKey : path;
@@ -22781,26 +23410,19 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     },
     onRename: (oldPath, newPath) => {
       modifyDebouncer.cancel(oldPath);
-      observed(observer.observeRename(oldPath, newPath));
+      const keys = [oldPath, newPath].map((path) => {
+        const classified = classifyVaultPath(path);
+        return classified.eligible ? classified.collisionKey : path;
+      });
+      observed(initialize().then(async () => {
+        if (disposed || keys.some((key) => blocked.has(key))) return null;
+        return fileApplyLock === void 0 ? observer.observeRename(oldPath, newPath) : withKeys(fileApplyLock, keys, () => observer.observeRename(oldPath, newPath));
+      }));
     },
-    onFolderRename: (oldPath, newPath) => observedMany(observer.observeFolderRename(oldPath, newPath)),
-    onFolderDelete: (folderPath) => observedMany(observer.observeFolderDelete(folderPath))
+    onFolderRename: (oldPath, newPath) => observedMany(initialize().then(() => disposed ? [] : observer.observeFolderRename(oldPath, newPath))),
+    onFolderDelete: (folderPath) => observedMany(initialize().then(() => disposed ? [] : observer.observeFolderDelete(folderPath)))
   });
-  afterChange(
-    reconcileVaultState({ observer, repository, vault: snapshot }).then(
-      (result) => {
-        if (result.skipped > 0) {
-          new import_obsidian5.Notice(
-            `Havemind: ${result.skipped} file(s) could not be synced and were skipped.`
-          );
-          warnSkippedPaths(result);
-        }
-        for (const notice of formatReconcileNotices(result)) {
-          new import_obsidian5.Notice(notice);
-        }
-      }
-    )
-  );
+  afterChange(initialize());
   const configObserver = {
     observeModify: (path) => lockedObserve(path, () => observer.observeModify(path)),
     observeDelete: (path) => lockedObserve(path, () => observer.observeDelete(path))
@@ -22820,7 +23442,9 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
   }, CONFIG_POLL_INTERVAL_MS);
   plugin.registerInterval(configPollId);
   return {
+    initialize,
     dispose: () => {
+      disposed = true;
       window.clearInterval(configPollId);
       modifyDebouncer.dispose();
       disposeListeners();
@@ -22870,6 +23494,7 @@ var DEFAULT_MAX_BACKOFF_MS = 6e4;
 var DEFAULT_MAX_PUSH_BATCH_BYTES = 512 * 1024;
 var DEFAULT_MAX_PUSH_BATCH_ITEMS = 64;
 function decideRemoteApply(buffers, incomingContentHash) {
+  if (buffers.some((buffer) => buffer.unsaved)) return "defer";
   const divergent = buffers.filter(
     (buffer) => buffer.currentHash !== buffer.baseHash
   );
@@ -22966,8 +23591,11 @@ var SyncRunner = class {
     const cycleId = this.cycleCounter += 1;
     let result;
     try {
+      await this.options.beforeCycle?.();
       const push = await this.runPush();
+      await this.options.beforePull?.();
       const apply = await this.runPull();
+      await this.options.afterPull?.();
       this.failureCount = 0;
       result = {
         applied: apply.applied,
@@ -23185,9 +23813,14 @@ var SyncRunner = class {
           // its Activity entry is suppressed (baseline). Beyond it → a live edit.
           bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
         });
+        if (outcome === "deferred") {
+          deferred += 1;
+          break;
+        }
         if (outcome === "conflict") {
           conflicts += 1;
         } else {
+          await this.options.state.retireEquivalentMerges?.(remoteEvent);
           applied += 1;
         }
       }
@@ -23592,6 +24225,120 @@ function isRecord14(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// src/runtime/bootstrap-identities.ts
+async function bootstrapIdentities(options) {
+  const { history, state, producer, vault } = options;
+  await producer.recover();
+  await history.refresh();
+  const heads = await history.allHeads();
+  const counts = /* @__PURE__ */ new Map();
+  for (const head of heads) counts.set(head.revision.fileId, (counts.get(head.revision.fileId) ?? 0) + 1);
+  const mapped = new Set((await producer.listMappings()).map((m) => m.collisionKey));
+  const pending = await state.listOutbox();
+  const blocked = /* @__PURE__ */ new Set();
+  const candidates = [...heads].sort((a, b) => a.revision.fileId.localeCompare(b.revision.fileId));
+  for (const head of candidates) {
+    const remote = await history.payload(head);
+    if (remote.operation === "delete") continue;
+    const path = classifyVaultPath(remote.path);
+    if (!path.eligible || mapped.has(path.collisionKey) || !await vault.exists(remote.path)) continue;
+    blocked.add(path.collisionKey);
+    if (pending.length > 0 || counts.get(head.revision.fileId) !== 1) continue;
+    let content;
+    let contentHash;
+    if (remote.kind === "binary") {
+      if (vault.readBinary === void 0) continue;
+      const bytes = await vault.readBinary(remote.path);
+      contentHash = await hashBlob(bytes);
+      if (remote.binaryContent == null || contentHash !== await hashBlob(remote.binaryContent)) continue;
+      content = bytesToBase642(bytes);
+    } else {
+      content = canonicalizeMarkdown(await vault.readText(remote.path));
+      if (content !== remote.content) continue;
+      contentHash = await hashPlaintext(content);
+    }
+    await state.recordPathOwner(head.revision.fileId, path.canonicalPath);
+    await state.recordBaseHash(head.revision.fileId, contentHash);
+    if (remote.kind !== "binary") await state.recordBaseContent(head.revision.fileId, content);
+    await producer.adoptRemoteMapping({
+      fileId: head.revision.fileId,
+      path: path.canonicalPath,
+      collisionKey: path.collisionKey,
+      content,
+      contentHash,
+      ...remote.kind === "binary" ? { contentKind: "binary" } : {}
+    }, head.revision.revisionId);
+    mapped.add(path.collisionKey);
+    blocked.delete(path.collisionKey);
+  }
+  return blocked;
+}
+
+// src/runtime/head-reconciliation.ts
+async function reconcileHeads(options) {
+  const { history, state, producer, files, lock } = options;
+  await history.refresh();
+  for (const mapping of await producer.listMappings()) {
+    if (mapping.contentKind === "binary") continue;
+    await lock.runExclusive(mapping.collisionKey, async () => {
+      if ((await files.openBufferStates(mapping.fileId)).some((buffer) => buffer.unsaved)) return;
+      const local = await producer.versionFor(mapping.fileId);
+      if (local === null || local.contentHash !== mapping.contentHash) return;
+      const pending = (await state.listOutbox()).filter((entry) => entry.fileId === mapping.fileId);
+      const heads = await history.heads(mapping.fileId);
+      if (heads.length === 0 || heads.length === 1 && pending.length === 0) return;
+      if (pending.length > 0 && !pending.some((entry) => (entry.parentRevisionIds?.length ?? 0) > 1)) return;
+      const graph = await history.graph(mapping.fileId);
+      let tip = local.revisionId;
+      const lineage = ancestors(graph, tip);
+      if (pending.some((entry) => !lineage.has(entry.revisionId))) return;
+      let content = canonicalizeMarkdown(mapping.content);
+      for (const head of heads) {
+        const remoteId = head.revision.revisionId;
+        if (ancestors(graph, tip).has(remoteId)) continue;
+        const remote = await history.payload(head);
+        if (remote.kind === "binary" || remote.operation === "delete" || remote.path !== mapping.path || remote.content === null) return;
+        if (remote.content !== content) {
+          const remoteParents = head.revision.parentRevisionIds ?? [];
+          const equivalent = [...ancestors(graph, tip)].map((id) => graph.get(id)).find((event) => {
+            const parents = event?.revision.parentRevisionIds ?? [];
+            return event !== void 0 && remoteParents.length > 1 && event.revision.contentHash === head.revision.contentHash && parents.length === remoteParents.length && parents.every((id) => remoteParents.includes(id));
+          });
+          const base = equivalent ?? commonAncestor(graph, tip, remoteId);
+          if (base === null) return;
+          const ancestor = await history.payload(base);
+          if (ancestor.kind === "binary" || ancestor.operation === "delete" || ancestor.path !== mapping.path || ancestor.content === null) return;
+          const merge2 = mergeText(ancestor.content, content, remote.content);
+          if (merge2.status !== "merged") return;
+          content = merge2.text;
+        }
+        const previous = tip;
+        tip = `reconcile:${tip}:${remoteId}`;
+        graph.set(tip, { serverSequence: 0, revision: {
+          fileId: mapping.fileId,
+          revisionId: tip,
+          contentHash: "",
+          parentRevisionIds: [previous, remoteId]
+        } });
+      }
+      if (canonicalizeMarkdown(mapping.content) !== content) return;
+      const disk = await files.readByPath(mapping.path);
+      if (disk === null || canonicalizeMarkdown(disk) !== content) return;
+      if ((await files.openBufferStates(mapping.fileId)).some((buffer) => buffer.unsaved)) return;
+      const onlyHead = heads.length === 1 ? heads[0] : void 0;
+      const adopted = onlyHead === void 0 ? void 0 : await history.payload(onlyHead);
+      const existingRevisionId = adopted?.kind !== "binary" && adopted?.operation !== "delete" && adopted?.path === mapping.path && adopted?.content === content ? onlyHead?.revision.revisionId : void 0;
+      await producer.commitHeadResolution({
+        mapping,
+        expectedHead: local.revisionId,
+        pendingIds: pending.map((entry) => entry.revisionId),
+        parents: heads.map((head) => head.revision.revisionId),
+        ...existingRevisionId === void 0 ? {} : { existingRevisionId }
+      });
+    });
+  }
+}
+
 // src/runtime/wake-subscription.ts
 var DEFAULT_BASE_BACKOFF_MS2 = 5e3;
 var DEFAULT_MAX_BACKOFF_MS2 = 6e4;
@@ -23807,7 +24554,7 @@ function isRecord15(value) {
 // src/runtime/adapters/sync-controller.ts
 var DEFAULT_INTERVAL_MS = 15 * 1e3;
 var PUSH_CONNECTED_INTERVAL_MS = 6e4;
-function buildSyncController(plugin, connection, onStatus, hooks, producerSync, fileApplyLock) {
+function buildSyncController(plugin, connection, onStatus, hooks, producerSync, fileApplyLock, getProducer, prepareProducer) {
   const state = new DurableSyncState({
     persist: createPersistPort(plugin),
     // Arch P1: keep large outbox payload bytes out of `data.json`. Best-effort,
@@ -23837,16 +24584,22 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
       new import_obsidian6.Notice(message);
     }
   });
+  const history = new RevisionHistory({ transport, state, resolveRevision: connection.resolveRevision });
+  const lock = fileApplyLock ?? new KeyedMutex();
+  const files = createVaultFilePort({
+    vault: plugin.app.vault,
+    state,
+    workspace: plugin.app.workspace,
+    // A remotely-applied appearance file used to stay INVISIBLE until the
+    // receiving device restarted Obsidian, because Obsidian caches its config
+    // in memory and the plugin never signalled a reload. `css-change` is the
+    // documented workspace event that makes it re-read snippets and themes.
+    configApply
+  });
   const vault = new VaultApplyAdapter({
-    files: createVaultFilePort({
-      vault: plugin.app.vault,
-      state,
-      // A remotely-applied appearance file used to stay INVISIBLE until the
-      // receiving device restarted Obsidian, because Obsidian caches its config
-      // in memory and the plugin never signalled a reload. `css-change` is the
-      // documented workspace event that makes it re-read snippets and themes.
-      configApply
-    }),
+    history,
+    files,
+    lock,
     conflictFolder: CONFLICT_FOLDER,
     resolveRevision: connection.resolveRevision,
     // AUD-03: the apply-side base hash must be computed over the SAME canonical
@@ -23880,6 +24633,15 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
   });
   const controllerRef = {};
   const runner = new SyncRunner({
+    beforeCycle: async () => {
+      await prepareProducer?.();
+      await getProducer?.()?.recover();
+    },
+    beforePull: () => history.refresh(),
+    afterPull: async () => {
+      const producer = getProducer?.();
+      if (producer) await reconcileHeads({ history, state, producer, files, lock });
+    },
     transport,
     state,
     vault,
@@ -23918,7 +24680,7 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
     ...wake === void 0 ? {} : { wake, pushConnectedIntervalMs: PUSH_CONNECTED_INTERVAL_MS }
   });
   controllerRef.current = controller;
-  return { controller, state };
+  return { controller, state, initializeProducer: (producer, vault2) => bootstrapIdentities({ history, state, producer, vault: vault2 }) };
 }
 
 // src/runtime/adapters/tokens.ts
@@ -23986,7 +24748,8 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
   };
   const producerSync = createRemoteApplyProducerSync(() => producerRef.current);
   const fileApplyLock = new KeyedMutex();
-  const { controller, state } = buildSyncController(
+  let producer = null;
+  const { controller, state, initializeProducer } = buildSyncController(
     plugin,
     {
       apiBaseUrl: resolvers.apiBaseUrl,
@@ -24005,11 +24768,13 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     onStatus,
     extras.hooks,
     producerSync,
-    fileApplyLock
+    fileApplyLock,
+    () => producerRef.current,
+    async () => {
+      await producer?.initialize();
+    }
   );
   await runCanonicalizationRebase(plugin);
-  controller.start();
-  let producer = null;
   if (hasPushIdentity) {
     producer = startPushProducer(
       plugin,
@@ -24024,9 +24789,11 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
       },
       producerRef,
       extras.hooks,
-      fileApplyLock
+      fileApplyLock,
+      initializeProducer
     );
   }
+  controller.start();
   const selfMembership = connection.memberId === void 0 ? void 0 : { membershipId: connection.memberId, role: extras.role ?? "editor" };
   return {
     ...selfMembership === void 0 ? {} : { selfMembership },
