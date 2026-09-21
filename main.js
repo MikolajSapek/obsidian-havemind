@@ -16616,7 +16616,7 @@ function validRecovery(value) {
   return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
     if (typeof m !== "object" || m === null) return false;
     const item = m;
-    return ["fileId", "path", "collisionKey", "content", "contentHash"].every((key) => typeof item[key] === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
+    return ["fileId", "path", "collisionKey", "contentHash"].every((key) => typeof item[key] === "string") && (row.kind !== "resolution" || item.contentKind === "binary" || typeof item.content === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
   });
 }
 
@@ -16791,7 +16791,7 @@ var DurableSyncState = class {
           } else {
             pathOwners[mapping.path] = fileId;
             baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
-            if (mapping.contentKind !== "binary" && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
+            if (mapping.contentKind !== "binary" && mapping.content !== void 0 && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
           }
         }
         await this.mutate({ ...state, pathOwners, baseHashes, baseContents });
@@ -18977,7 +18977,6 @@ var VaultChangeObserver = class {
       fileId,
       kind: "create",
       path: classified.canonicalPath,
-      previousContent: null,
       previousContentHash: null,
       previousPath: null
     });
@@ -18986,7 +18985,6 @@ var VaultChangeObserver = class {
       removeFileId: null,
       upsertMapping: {
         collisionKey: classified.collisionKey,
-        content,
         contentHash,
         contentKind: classified.kind,
         fileId,
@@ -19020,7 +19018,6 @@ var VaultChangeObserver = class {
       fileId: mapping.fileId,
       kind: "update",
       path: classified.canonicalPath,
-      previousContent: mapping.content,
       previousContentHash: mapping.contentHash,
       previousPath: null
     });
@@ -19029,7 +19026,6 @@ var VaultChangeObserver = class {
       removeFileId: null,
       upsertMapping: {
         collisionKey: classified.collisionKey,
-        content,
         contentHash,
         contentKind: classified.kind,
         fileId: mapping.fileId,
@@ -19072,7 +19068,6 @@ var VaultChangeObserver = class {
       fileId: mapping.fileId,
       kind: "rename",
       path: to.canonicalPath,
-      previousContent: mapping.content,
       previousContentHash: mapping.contentHash,
       previousPath: from.canonicalPath
     });
@@ -19081,7 +19076,6 @@ var VaultChangeObserver = class {
       removeFileId: null,
       upsertMapping: {
         collisionKey: to.collisionKey,
-        content,
         contentHash,
         contentKind: to.kind,
         fileId: mapping.fileId,
@@ -19127,7 +19121,6 @@ var VaultChangeObserver = class {
       fileId: mapping.fileId,
       kind: "delete",
       path: mapping.path,
-      previousContent: mapping.content,
       previousContentHash: mapping.contentHash,
       previousPath: null
     });
@@ -19188,12 +19181,12 @@ function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function readMapping(entry) {
-  if (!isRecord7(entry) || typeof entry.collisionKey !== "string" || typeof entry.content !== "string" || typeof entry.contentHash !== "string" || typeof entry.fileId !== "string" || typeof entry.path !== "string") {
+  if (!isRecord7(entry) || typeof entry.collisionKey !== "string" || typeof entry.contentHash !== "string" || typeof entry.fileId !== "string" || typeof entry.path !== "string") {
     return null;
   }
   return {
     collisionKey: entry.collisionKey,
-    content: entry.content,
+    ...typeof entry.content === "string" ? { content: entry.content } : {},
     contentHash: entry.contentHash,
     ...typeof entry.contentKind === "string" ? { contentKind: entry.contentKind } : {},
     fileId: entry.fileId,
@@ -19236,7 +19229,7 @@ async function rebaseCanonicalizedHashes(deps) {
       }
       const canonical = deps.canonicalize(await deps.vault.read(mapping.path));
       const contentHash = await deps.hash(canonical);
-      nextMappings2.push({ ...mapping, content: canonical, contentHash });
+      nextMappings2.push({ ...mapping, ...mapping.content === void 0 ? {} : { content: canonical }, contentHash });
       mappingsRebased += 1;
     }
     nextProducer = { ...producer, mappings: nextMappings2 };
@@ -21099,12 +21092,11 @@ function registerVaultChangeListeners(vault, handlers) {
 // src/runtime/adapters/producer-state.ts
 var EMPTY_PRODUCER_STATE = { mappings: [], heads: {} };
 function isValidProducerMapping(entry) {
-  return isRecord9(entry) && typeof entry.collisionKey === "string" && typeof entry.content === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
+  return isRecord9(entry) && typeof entry.collisionKey === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
 }
 function buildProducerMapping(entry) {
   return {
     collisionKey: entry.collisionKey,
-    content: entry.content,
     contentHash: entry.contentHash,
     // Preserve the binary/markdown discriminator across every load→save
     // cycle. Dropping it here silently converts a persisted binary mapping
@@ -22377,14 +22369,13 @@ function createRemoteApplyProducerSync(getProducer) {
     async checkpointApply(fileId, paths) {
       return await getProducer()?.checkpointApply?.(fileId, paths) ?? (async () => void 0);
     },
-    async onRemoteWrite({ fileId, path, content, contentHash, revisionId, contentKind }) {
+    async onRemoteWrite({ fileId, path, contentHash, revisionId, contentKind }) {
       const producer = getProducer();
       if (producer === null) return;
       const classified = classifyVaultPath(path);
       if (!classified.eligible) return;
       const mapping = {
         collisionKey: classified.collisionKey,
-        content,
         contentHash,
         // Carry the binary discriminator into the durable producer mapping so a
         // RECEIVED binary is persisted (and rebased) as binary, never markdown.
@@ -22477,6 +22468,15 @@ var OutboxLocalChangeRepository = class {
     __publicField(this, "activeApplies", /* @__PURE__ */ new Set());
     this.options = options;
   }
+  async saveState(state) {
+    await this.options.store.save({ ...state, mappings: state.mappings.map((m) => ({
+      fileId: m.fileId,
+      path: m.path,
+      collisionKey: m.collisionKey,
+      contentHash: m.contentHash,
+      ...m.contentKind === void 0 ? {} : { contentKind: m.contentKind }
+    })) });
+  }
   async recover() {
     await this.mutations.runExclusive("state", () => this.recoverLocked());
   }
@@ -22487,7 +22487,7 @@ var OutboxLocalChangeRepository = class {
       const current = await this.options.store.load();
       const ids = new Set(record2.fileIds);
       const heads = Object.fromEntries(Object.entries(current.heads).filter(([id]) => !ids.has(id)));
-      await this.options.store.save({
+      await this.saveState({
         mappings: [...current.mappings.filter((m) => !ids.has(m.fileId)), ...record2.state.mappings],
         heads: { ...heads, ...record2.state.heads }
       });
@@ -22527,7 +22527,7 @@ var OutboxLocalChangeRepository = class {
         const current = await this.options.store.load();
         const currentHead = current.heads[fileId];
         if (currentHead !== void 0 && currentHead !== before.heads[fileId]) await this.options.cancelUnsentMerge?.(currentHead);
-        await this.options.store.save({
+        await this.saveState({
           mappings: [...current.mappings.filter((m) => !affected.has(m.fileId)), ...record2.state.mappings],
           heads: { ...Object.fromEntries(Object.entries(current.heads).filter(([id]) => !affected.has(id))), ...record2.state.heads }
         });
@@ -22613,7 +22613,7 @@ var OutboxLocalChangeRepository = class {
         fileId: mapping.fileId,
         contentHash: built.contentHash
       });
-      await this.options.store.save({
+      await this.saveState({
         mappings: upsertMapping(state.mappings, mapping),
         heads: { ...state.heads, [mapping.fileId]: revisionId }
       });
@@ -22639,7 +22639,7 @@ var OutboxLocalChangeRepository = class {
     const recovery = this.options.recovery;
     if (recovery === void 0) {
       await this.options.enqueue(envelope);
-      await this.options.store.save(next);
+      await this.saveState(next);
       await this.seedSharedState(operation);
       return;
     }
@@ -22648,7 +22648,10 @@ var OutboxLocalChangeRepository = class {
       kind: "resolution",
       fileIds: [operation.fileId],
       state: {
-        mappings: next.mappings.filter((m) => m.fileId === operation.fileId),
+        mappings: next.mappings.filter((m) => m.fileId === operation.fileId).map((m) => ({
+          ...m,
+          ...operation.contentKind === "binary" || operation.content === null ? {} : { content: operation.content }
+        })),
         heads: Object.fromEntries(
           Object.entries(next.heads).filter(([id]) => id === operation.fileId)
         )
@@ -22659,7 +22662,7 @@ var OutboxLocalChangeRepository = class {
     if (!started) {
       throw new Error("Local commit recovery transaction was refused.");
     }
-    await this.options.store.save(next);
+    await this.saveState(next);
     await this.seedSharedState(operation);
     await recovery.completeProducerRecovery(record2.id);
   }
@@ -22715,7 +22718,7 @@ var OutboxLocalChangeRepository = class {
         await this.commitWithRecovery(envelope, next, operation);
         return built.revisionId;
       }
-      await this.options.store.save(
+      await this.saveState(
         applyCommit(state, commit, {
           fileId: operation.fileId,
           revisionId: null,
@@ -22754,7 +22757,7 @@ var OutboxLocalChangeRepository = class {
   /**
    * Adopts, without enqueuing, the producer mapping+head for a file the apply
    * side just materialised from a remote revision. This keeps the producer's
-   * fileId↔path↔content map in lockstep with the vault write, so the vault event
+   * fileId↔path↔hash map in lockstep with the vault write, so the vault event
    * that write triggers dedupes to a no-op instead of (a) re-pushing the peer's
    * edit, (b) recording it as LOCAL activity, or (c) minting a fresh random
    * fileId for the same path (a duplicate fileId across devices).
@@ -22763,7 +22766,7 @@ var OutboxLocalChangeRepository = class {
     return this.mutations.runExclusive("state", async () => {
       const state = await this.options.store.load();
       const mappings = upsertMapping(state.mappings, mapping);
-      await this.options.store.save({
+      await this.saveState({
         mappings,
         heads: { ...state.heads, [mapping.fileId]: headRevisionId }
       });
@@ -22778,7 +22781,7 @@ var OutboxLocalChangeRepository = class {
       );
       const heads = { ...state.heads };
       delete heads[fileId];
-      await this.options.store.save({ mappings, heads });
+      await this.saveState({ mappings, heads });
     });
   }
 };
@@ -22847,12 +22850,12 @@ async function readEligibleContent(vault, readPath, kind) {
   if (kind === "binary") {
     const bytes = await vault.readBinary(readPath);
     if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return "too-large";
-    return { content: bytesToBase642(bytes) };
+    return { contentHash: await hashBlob(bytes) };
   }
   return {
-    content: normalizeContent2(
+    contentHash: await hashPlaintext(normalizeContent2(
       normalizeConfigContent(readPath, await vault.readText(readPath))
-    )
+    ))
   };
 }
 async function reconcileVaultState(options) {
@@ -22903,14 +22906,14 @@ async function reconcileVaultState(options) {
       mappingsByCollision.delete(collisionKey);
       continue;
     }
-    const { content } = read;
+    const { contentHash } = read;
     const mapping = mappingsByCollision.get(collisionKey);
     if (mapping === void 0) {
-      unmatchedVault.push({ collisionKey, content, readPath });
+      unmatchedVault.push({ collisionKey, contentHash, kind, readPath });
       continue;
     }
     mappingsByCollision.delete(collisionKey);
-    if (mapping.content === content) {
+    if (mapping.contentHash === contentHash) {
       unchanged += 1;
     } else if (await observeResilient(readPath, recordSkip, () => observer.observeModify(readPath))) {
       updated += 1;
@@ -22959,8 +22962,8 @@ function describeSkipReason(error51) {
   return "unknown error";
 }
 async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip) {
-  const vaultByContent = groupBy(unmatchedVault, (file2) => file2.content);
-  const mappingsByContent = groupBy(unmatchedMappings, (m) => m.content);
+  const vaultByContent = groupBy(unmatchedVault, (file2) => `${file2.kind}:${file2.contentHash}`);
+  const mappingsByContent = groupBy(unmatchedMappings, (m) => `${m.contentKind ?? "markdown"}:${m.contentHash}`);
   const consumedVault = /* @__PURE__ */ new Set();
   const consumedMappings = /* @__PURE__ */ new Set();
   let renamed = 0;
@@ -23195,6 +23198,12 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
         console.warn(
           "Havemind: failed to preserve corrupt producer state to a sidecar."
         );
+      }
+      if (result.status === "ok" && result.quarantinedMappings.length === 0 && isRecord9(raw) && Array.isArray(raw.mappings) && raw.mappings.some((m) => isRecord9(m) && "content" in m)) {
+        await getPluginDataMutex(plugin).update((base) => {
+          const current = parseProducerStateResult(base[PUSH_PRODUCER_KEY]);
+          return current.status === "ok" && current.quarantinedMappings.length === 0 ? { ...base, [PUSH_PRODUCER_KEY]: current.state } : base;
+        });
       }
       return result.state;
     },
@@ -24264,7 +24273,6 @@ async function bootstrapIdentities(options) {
       fileId: head.revision.fileId,
       path: path.canonicalPath,
       collisionKey: path.collisionKey,
-      content,
       contentHash,
       ...remote.kind === "binary" ? { contentKind: "binary" } : {}
     }, head.revision.revisionId);
@@ -24292,7 +24300,10 @@ async function reconcileHeads(options) {
       let tip = local.revisionId;
       const lineage = ancestors(graph, tip);
       if (pending.some((entry) => !lineage.has(entry.revisionId))) return;
-      let content = canonicalizeMarkdown(mapping.content);
+      const initialDisk = await files.readByPath(mapping.path);
+      if (initialDisk === null || await hashPlaintext(initialDisk) !== mapping.contentHash) return;
+      const initialContent = canonicalizeMarkdown(initialDisk);
+      let content = initialContent;
       for (const head of heads) {
         const remoteId = head.revision.revisionId;
         if (ancestors(graph, tip).has(remoteId)) continue;
@@ -24321,7 +24332,7 @@ async function reconcileHeads(options) {
           parentRevisionIds: [previous, remoteId]
         } });
       }
-      if (canonicalizeMarkdown(mapping.content) !== content) return;
+      if (initialContent !== content) return;
       const disk = await files.readByPath(mapping.path);
       if (disk === null || canonicalizeMarkdown(disk) !== content) return;
       if ((await files.openBufferStates(mapping.fileId)).some((buffer) => buffer.unsaved)) return;
@@ -24329,7 +24340,7 @@ async function reconcileHeads(options) {
       const adopted = onlyHead === void 0 ? void 0 : await history.payload(onlyHead);
       const existingRevisionId = adopted?.kind !== "binary" && adopted?.operation !== "delete" && adopted?.path === mapping.path && adopted?.content === content ? onlyHead?.revision.revisionId : void 0;
       await producer.commitHeadResolution({
-        mapping,
+        mapping: { ...mapping, content },
         expectedHead: local.revisionId,
         pendingIds: pending.map((entry) => entry.revisionId),
         parents: heads.map((head) => head.revision.revisionId),
