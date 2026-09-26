@@ -24242,11 +24242,19 @@ async function bootstrapIdentities(options) {
   const heads = await history.allHeads();
   const counts = /* @__PURE__ */ new Map();
   for (const head of heads) counts.set(head.revision.fileId, (counts.get(head.revision.fileId) ?? 0) + 1);
-  const mapped = new Set((await producer.listMappings()).map((m) => m.collisionKey));
-  const pending = await state.listOutbox();
+  const mappings = await producer.listMappings();
+  const mapped = new Set(mappings.map((m) => m.collisionKey));
+  const mappedFileIds = new Set(mappings.map((m) => m.fileId));
   const blocked = /* @__PURE__ */ new Set();
+  const untracked = (await vault.listSyncablePaths()).some((localPath) => {
+    const classified = classifyVaultPath(localPath);
+    return classified.eligible && !mapped.has(classified.collisionKey);
+  });
+  if (!untracked) return blocked;
+  const pending = await state.listOutbox();
   const candidates = [...heads].sort((a, b) => a.revision.fileId.localeCompare(b.revision.fileId));
   for (const head of candidates) {
+    if (mappedFileIds.has(head.revision.fileId)) continue;
     const remote = await history.payload(head);
     if (remote.operation === "delete") continue;
     const path = classifyVaultPath(remote.path);

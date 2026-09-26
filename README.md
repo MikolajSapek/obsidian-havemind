@@ -17,7 +17,7 @@ you own passes the changes around and remembers who wrote what.
 Built for people. If you also run Claude, MCP or another local agent in that
 vault, its edits land in the same history.
 
-**Version 1.5.3, desktop and mobile.** A two-week pilot on two devices lost no
+**Version 1.5.4, desktop and mobile.** A two-week pilot on two devices lost no
 data, including through three real incidents.
 
 There is no end-to-end encryption. Your server stores the vault in plaintext,
@@ -56,7 +56,7 @@ Two paths, depending on whether you are the one running the server.
    `cp deploy/.env.example deploy/.env` and set `HAVEMIND_API_BASE_URL` to the
    HTTPS tailnet URL you will use in step 3; it is baked into the server's
    discovery document, so it has to be right before the first start. Before
-   running Compose, complete the [server preparation](docs/self-hosting.md#the-database-key-secret):
+   running Compose, complete the [server preparation](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md#the-database-key-secret):
    create `/srv/secrets/havemind_db_key` and give uid 1000 ownership of the
    data volume and backup directory. Then run
    `docker compose -f deploy/compose.yaml up -d --build`. You need Docker
