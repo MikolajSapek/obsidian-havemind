@@ -20672,9 +20672,10 @@ function createVaultFilePort(options) {
     async openBufferStates(fileId) {
       const path = state.pathForFileId(fileId);
       if (path === null) return [];
+      const texts = editorTexts(workspace, path);
+      if (texts.length === 0) return [];
       const file2 = vault.getAbstractFileByPath(path);
       const disk = file2 === null ? null : canonicalizeMarkdown(await vault.read(file2));
-      const texts = editorTexts(workspace, path);
       return Promise.all(texts.map(async (content) => ({
         baseHash: disk === null ? null : await hashPlaintext(disk),
         currentHash: await hashPlaintext(content),
