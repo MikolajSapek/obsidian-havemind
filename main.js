@@ -26,644 +26,1301 @@ __export(main_exports, {
   default: () => HavemindPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian20 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 
-// ../../packages/sync-core/dist/diff3.js
-var DEFAULT_ADJACENCY_LINES = 1;
-var DEFAULT_MAX_LCS_CELLS = 4e6;
-function splitLines(text) {
-  return text.split("\n");
-}
-function lcsMatches(x, y) {
-  const n = x.length;
-  const m = y.length;
-  const width = m + 1;
-  const table = new Int32Array((n + 1) * width);
-  for (let i2 = n - 1; i2 >= 0; i2 -= 1) {
-    for (let j2 = m - 1; j2 >= 0; j2 -= 1) {
-      table[i2 * width + j2] = x[i2] === y[j2] ? table[(i2 + 1) * width + (j2 + 1)] + 1 : Math.max(table[(i2 + 1) * width + j2], table[i2 * width + (j2 + 1)]);
-    }
+// src/onboarding/invite.ts
+var INVITE_ENVELOPE_VERSION = 1;
+var ENVELOPE_PREFIX = "v1.";
+var ENVELOPE_PATTERN = /^v1\.([A-Za-z0-9_-]+)$/u;
+var BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
+var INVITATION_PREFIX = "hm_it_";
+var TOKEN_PAYLOAD_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+var TOKEN_BYTE_LENGTH = 32;
+var MAX_ENVELOPE_LENGTH = 1024;
+var InviteFormatError = class extends Error {
+  constructor() {
+    super("The secure invitation has an invalid or non-canonical format.");
+    __publicField(this, "code", "invalid-invitation-envelope");
+    __publicField(this, "name", "InviteFormatError");
   }
-  const matches = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (x[i] === y[j]) {
-      matches.push({ x: i, y: j });
-      i += 1;
-      j += 1;
-    } else if (table[(i + 1) * width + j] >= table[i * width + (j + 1)]) {
-      i += 1;
+};
+function buildInviteEnvelope(input) {
+  assertCanonicalHttpsOrigin(input.serverOrigin);
+  assertInvitationToken(input.invitationToken);
+  return encodeEnvelope({
+    version: INVITE_ENVELOPE_VERSION,
+    serverOrigin: input.serverOrigin,
+    invitationToken: input.invitationToken
+  });
+}
+function parseInviteEnvelope(value) {
+  if (value.length > MAX_ENVELOPE_LENGTH) throw new InviteFormatError();
+  const match = ENVELOPE_PATTERN.exec(value);
+  const payload = match?.[1];
+  if (!payload) throw new InviteFormatError();
+  let decoded;
+  try {
+    const bytes = decodeBase64Url(payload);
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new InviteFormatError();
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    throw new InviteFormatError();
+  }
+  const envelope = parseEnvelopeRecord(parsed);
+  if (encodeEnvelope(envelope) !== value) throw new InviteFormatError();
+  return envelope;
+}
+function isSafePassiveJoinProtocolData(data) {
+  const keys = Object.keys(data);
+  return keys.length === 1 && data.action === "havemind-join";
+}
+function parseEnvelopeRecord(value) {
+  if (!isRecord(value)) throw new InviteFormatError();
+  const keys = Object.keys(value);
+  if (keys.length !== 3 || !keys.includes("version") || !keys.includes("serverOrigin") || !keys.includes("invitationToken") || value.version !== INVITE_ENVELOPE_VERSION || typeof value.serverOrigin !== "string" || typeof value.invitationToken !== "string") {
+    throw new InviteFormatError();
+  }
+  assertCanonicalHttpsOrigin(value.serverOrigin);
+  assertInvitationToken(value.invitationToken);
+  return {
+    version: INVITE_ENVELOPE_VERSION,
+    serverOrigin: value.serverOrigin,
+    invitationToken: value.invitationToken
+  };
+}
+function encodeEnvelope(envelope) {
+  const canonicalJson = JSON.stringify({
+    version: envelope.version,
+    serverOrigin: envelope.serverOrigin,
+    invitationToken: envelope.invitationToken
+  });
+  return `${ENVELOPE_PREFIX}${encodeBase64Url(
+    new TextEncoder().encode(canonicalJson)
+  )}`;
+}
+function assertCanonicalHttpsOrigin(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    throw new InviteFormatError();
+  }
+  if (url2.protocol !== "https:" || url2.username !== "" || url2.password !== "" || url2.pathname !== "/" || url2.search !== "" || url2.hash !== "" || url2.origin !== value) {
+    throw new InviteFormatError();
+  }
+}
+function assertInvitationToken(value) {
+  if (!value.startsWith(INVITATION_PREFIX)) throw new InviteFormatError();
+  const payload = value.slice(INVITATION_PREFIX.length);
+  if (!TOKEN_PAYLOAD_PATTERN.test(payload)) throw new InviteFormatError();
+  let decoded;
+  try {
+    decoded = decodeBase64Url(payload);
+  } catch {
+    throw new InviteFormatError();
+  }
+  if (decoded.byteLength !== TOKEN_BYTE_LENGTH || encodeBase64Url(decoded) !== payload) {
+    throw new InviteFormatError();
+  }
+}
+function encodeBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+function decodeBase64Url(value) {
+  if (!BASE64URL_PATTERN.test(value) || value.length % 4 === 1) {
+    throw new InviteFormatError();
+  }
+  const base643 = value.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = base643.padEnd(base643.length + (4 - base643.length % 4) % 4, "=");
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  if (encodeBase64Url(bytes) !== value) throw new InviteFormatError();
+  return bytes;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/runtime/producer-recovery.ts
+function validRecovery(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value;
+  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string" && s.length > 0);
+  if (typeof row.id !== "string" || !row.id || !["apply", "resolution"].includes(String(row.kind)) || !strings(row.fileIds) || !strings(row.discardRevisionIds) || typeof row.state !== "object" || row.state === null) return false;
+  if (row.applyState !== void 0) {
+    if (typeof row.applyState !== "object" || row.applyState === null) return false;
+    const saved = row.applyState;
+    if (!["pathOwners", "baseHashes", "baseContents"].every((key) => typeof saved[key] === "object" && saved[key] !== null && !Array.isArray(saved[key]) && Object.values(saved[key]).every((value2) => typeof value2 === "string"))) return false;
+  }
+  const state = row.state;
+  if (!Array.isArray(state.mappings) || typeof state.heads !== "object" || state.heads === null || Array.isArray(state.heads)) return false;
+  return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
+    if (typeof m !== "object" || m === null) return false;
+    const item = m;
+    return ["fileId", "path", "collisionKey", "contentHash"].every((key) => typeof item[key] === "string") && (row.kind !== "resolution" || item.contentKind === "binary" || typeof item.content === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
+  });
+}
+
+// src/runtime/sync-state.ts
+var PAYLOAD_MISSING_REASON = "payload-missing";
+var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
+var QUARANTINED_ENVELOPE_BUDGET_BYTES = 5 * 1024 * 1024;
+var FAILED_TO_QUEUE_PREFIX = "failed-to-queue:";
+function failedToQueueRevisionId(path) {
+  return `${FAILED_TO_QUEUE_PREFIX}${path}`;
+}
+function parseFailedToQueuePath(revisionId) {
+  if (!revisionId.startsWith(FAILED_TO_QUEUE_PREFIX)) return null;
+  const path = revisionId.slice(FAILED_TO_QUEUE_PREFIX.length);
+  return path.length === 0 ? null : path;
+}
+function emptyState() {
+  return {
+    version: 1,
+    cursor: 0,
+    outbox: [],
+    locallyAuthored: [],
+    deferred: [],
+    quarantine: [],
+    pathOwners: {},
+    baseHashes: {},
+    baseContents: {},
+    conflictArtifacts: {},
+    quarantinedEnvelopes: {}
+  };
+}
+function parentIdsFromHeader(header) {
+  if (!isRecord2(header)) return [];
+  const ids = header.parentRevisionIds;
+  if (!Array.isArray(ids)) return [];
+  return ids.filter((id) => typeof id === "string");
+}
+function base64ByteLength(base643) {
+  const length = base643.length;
+  if (length === 0) return 0;
+  let padding = 0;
+  if (base643.endsWith("==")) padding = 2;
+  else if (base643.endsWith("=")) padding = 1;
+  return Math.floor(length * 3 / 4) - padding;
+}
+var DurableSyncState = class {
+  constructor(options) {
+    __publicField(this, "persist");
+    __publicField(this, "maxLocallyAuthored");
+    __publicField(this, "now");
+    __publicField(this, "envelopeBudgetBytes");
+    /**
+     * Optional out-of-band payload store (arch P1). Undefined → payloads always
+     * stay inline in `data.json` (legacy behaviour, unchanged). Present → payload
+     * bytes are mirrored here and stripped from the on-disk blob; every access is
+     * wrapped in a fallible guard so an unavailable store degrades to inline.
+     */
+    __publicField(this, "parkReasons", /* @__PURE__ */ new Map());
+    __publicField(this, "payloadStore");
+    __publicField(this, "keepBaseContents");
+    /**
+     * The set of outbox/stash `revisionId`s whose payload currently lives in the
+     * payload store (so the on-disk form strips their inline bytes). Populated on
+     * enqueue/requeue, on load rehydration, and on legacy-blob migration; pruned
+     * on receipt/discard/eviction. A revisionId absent here keeps its bytes inline
+     * (the fallback path), so the disk form only ever strips a payload the store
+     * actually holds, never one that would then be irrecoverable.
+     */
+    __publicField(this, "externalized", /* @__PURE__ */ new Set());
+    __publicField(this, "cache", null);
+    /**
+     * Set when the primary blob was present-but-corrupt with an UNRECOVERABLE
+     * outbox (the queue container itself could not be read), no usable `.bak`
+     * existed, and the raw bytes were preserved to a sidecar for manual recovery
+     * (GAP-1). It is a purely OBSERVABLE signal (see {@link isRecoveryRequired}),
+     * never a save lock, the instance resumes from a clean, writable empty state
+     * and the primary is rewritten so a restart never re-locks. Surfaced to the UI
+     * so the user sees "local queue needs recovery" rather than silently assuming
+     * the queue drained. A salvageable corruption (readable outbox, only a
+     * non-outbox core field damaged) never sets this: the queue is kept and the
+     * cleaned state is written back, so nothing is at risk.
+     */
+    __publicField(this, "recoveryRequired", false);
+    /**
+     * De-dupes concurrent cold-cache loads. Without it, two callers that both find
+     * a null cache each `await persist.load()`; the later resolution re-parses the
+     * on-disk blob and clobbers any cache mutation the first caller made during the
+     * await (an enqueued revision, an advanced cursor), a silent dropped push at
+     * connect (rule 3). All concurrent callers share this single in-flight load.
+     */
+    __publicField(this, "loadPromise", null);
+    /**
+     * Serializes every read-modify-write critical section against the shared
+     * in-memory cache. Each mutating method reads the cache (`ensureLoaded`) and
+     * writes it back (`mutate`) as a `{ ...state, field }` spread, with `await`
+     * points in between. On a WARM cache `ensureLoaded` reads synchronously, so
+     * two sections that overlap each capture the SAME snapshot and the later
+     * `mutate` silently drops the earlier one's write, a lost update. In the
+     * two-device sync loop this dropped a file's base CONTENT while keeping its
+     * base HASH, which then made the three-way merge (it needs the ancestor
+     * content) fail and spawn a SPURIOUS conflict copy (rule 3: zero silent
+     * overwrites / data loss). This is the in-memory analogue of the data.json
+     * `PluginDataMutex`, which only guards the on-disk save, not the cache RMW.
+     * Chaining each section on this single tail makes it run to completion before
+     * the next one reads, so no committed write is ever clobbered. Read-only
+     * accessors stay off the queue: `mutate` swaps the whole cache object in one
+     * synchronous assignment, so any read sees a complete, consistent snapshot.
+     */
+    __publicField(this, "mutationTail", Promise.resolve());
+    this.persist = options.persist;
+    this.maxLocallyAuthored = options.maxLocallyAuthored ?? DEFAULT_MAX_LOCALLY_AUTHORED;
+    this.now = options.now ?? (() => Date.now());
+    this.envelopeBudgetBytes = options.quarantinedEnvelopeBudgetBytes ?? QUARANTINED_ENVELOPE_BUDGET_BYTES;
+    this.payloadStore = options.payloadStore;
+    this.keepBaseContents = options.keepBaseContents ?? true;
+  }
+  /** `state` without base contents when they are not kept (A2). */
+  trimmed(state) {
+    return this.keepBaseContents || Object.keys(state.baseContents).length === 0 ? state : { ...state, baseContents: {} };
+  }
+  /**
+   * Whether the last load found a present-but-corrupt blob with an unparseable
+   * non-empty outbox and no usable backup (GAP-1). While true, no mutation is
+   * persisted (the corrupt blob and its sidecar copy are left intact), and the
+   * UI/status should tell the user the local queue needs recovery.
+   */
+  isRecoveryRequired() {
+    return this.recoveryRequired;
+  }
+  async pendingProducerRecoveries() {
+    return (await this.ensureLoaded()).producerRecovery ?? [];
+  }
+  async startProducerRecovery(record2, replacement) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if ((state.producerRecovery ?? []).some((r) => r.fileIds.some((id) => record2.fileIds.includes(id)))) {
+        throw new Error("Producer recovery must finish before another transaction.");
+      }
+      const ids = new Set(record2.discardRevisionIds);
+      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
+      if (originals.length !== ids.size || this.hasUncoveredChildren(state, ids)) return false;
+      if (replacement !== void 0 && (ids.has(replacement.revisionId) || parentIdsFromHeader(replacement.header).some((id) => ids.has(id)))) return false;
+      await this.mutate({
+        ...state,
+        outbox: [...state.outbox.filter((e) => !ids.has(e.revisionId)), ...replacement === void 0 ? [] : [{ ...replacement, enqueuedAt: this.now() }]],
+        producerRecovery: [...state.producerRecovery ?? [], record2.kind === "apply" ? {
+          ...record2,
+          applyState: {
+            pathOwners: Object.fromEntries(Object.entries(state.pathOwners).filter(([, id]) => record2.fileIds.includes(id))),
+            baseHashes: Object.fromEntries(Object.entries(state.baseHashes).filter(([id]) => record2.fileIds.includes(id))),
+            baseContents: Object.fromEntries(Object.entries(state.baseContents).filter(([id]) => record2.fileIds.includes(id)))
+          }
+        } : record2],
+        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: originals.map((e) => ({ ...e, payloadExternalized: false })) } }
+      });
+      return true;
+    });
+  }
+  hasUncoveredChildren(state, ids) {
+    return [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((e) => !ids.has(e.revisionId) && parentIdsFromHeader(e.header).some((id) => ids.has(id)));
+  }
+  async recoverProducerQueue(id) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const record2 = state.producerRecovery?.find((r) => r.id === id);
+      if (record2 === void 0) return;
+      if (record2.kind === "resolution") {
+        const pathOwners = { ...state.pathOwners };
+        const baseHashes = { ...state.baseHashes };
+        const baseContents = { ...state.baseContents };
+        for (const fileId of record2.fileIds) {
+          const mapping = record2.state.mappings.find((m) => m.fileId === fileId);
+          for (const [path, owner] of Object.entries(pathOwners)) {
+            if (owner === fileId && path !== mapping?.path) delete pathOwners[path];
+          }
+          if (mapping === void 0) {
+            delete baseHashes[fileId];
+            delete baseContents[fileId];
+          } else {
+            pathOwners[mapping.path] = fileId;
+            baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
+            if (mapping.contentKind !== "binary" && mapping.content !== void 0 && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
+          }
+        }
+        await this.mutate({ ...state, pathOwners, baseHashes, baseContents });
+        return;
+      }
+      const ids = new Set(record2.discardRevisionIds);
+      if (this.hasUncoveredChildren(state, ids)) throw new Error("Recovery would orphan pending work.");
+      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
+      const undo = record2.applyState;
+      await this.mutate({
+        ...state,
+        ...undo === void 0 ? {} : {
+          pathOwners: { ...Object.fromEntries(Object.entries(state.pathOwners).filter(([, fileId]) => !record2.fileIds.includes(fileId))), ...undo.pathOwners },
+          baseHashes: { ...Object.fromEntries(Object.entries(state.baseHashes).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseHashes },
+          baseContents: { ...Object.fromEntries(Object.entries(state.baseContents).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseContents }
+        },
+        outbox: state.outbox.filter((e) => !ids.has(e.revisionId)),
+        ...originals.length === 0 ? {} : { reconciliationBackups: {
+          ...state.reconciliationBackups,
+          [id]: [...state.reconciliationBackups?.[id] ?? [], ...originals.map((e) => ({ ...e, payloadExternalized: false }))]
+        } }
+      });
+    });
+  }
+  async completeProducerRecovery(id) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({ ...state, producerRecovery: (state.producerRecovery ?? []).filter((r) => r.id !== id) });
+    });
+  }
+  async enqueueAutomaticMerge(envelope) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const record2 = state.producerRecovery?.find((r) => r.kind === "apply" && r.fileIds.includes(envelope.fileId));
+      if (record2 === void 0) throw new Error("Automatic merge requires a durable apply transaction.");
+      await this.mutate({
+        ...state,
+        outbox: [...state.outbox, { ...envelope, enqueuedAt: this.now() }],
+        producerRecovery: state.producerRecovery?.map((r) => r.id === record2.id ? { ...r, discardRevisionIds: [...r.discardRevisionIds, envelope.revisionId] } : r) ?? []
+      });
+    });
+  }
+  async loadCursor() {
+    return (await this.ensureLoaded()).cursor;
+  }
+  async saveCursor(sequence) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({ ...state, cursor: sequence });
+    });
+  }
+  async listOutbox() {
+    const state = await this.ensureLoaded();
+    return state.outbox.map((envelope) => {
+      const parentRevisionIds = parentIdsFromHeader(envelope.header);
+      return {
+        revisionId: envelope.revisionId,
+        fileId: envelope.fileId,
+        contentHash: envelope.contentHash,
+        payloadBytes: base64ByteLength(envelope.payloadBase64),
+        // Omitted when empty so a root create carries no dependency (and existing
+        // exact-shape assertions on parentless rows are unchanged).
+        ...parentRevisionIds.length > 0 ? { parentRevisionIds } : {}
+      };
+    });
+  }
+  /**
+   * Two peers can independently publish byte-identical merges of the same heads.
+   * The server accepts one and rejects the other with HEAD_SET_CHANGED. After
+   * applying the accepted merge, discard only a redundant leaf in our queue.
+   * Never claim the rejected ID was accepted, and never orphan a queued child.
+   */
+  async retireEquivalentMerges(event) {
+    const remoteParents = event.revision.parentRevisionIds ?? [];
+    if (remoteParents.length < 2) return;
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const dependentParents = new Set([...state.outbox, ...Object.values(state.quarantinedEnvelopes)].flatMap((entry) => parentIdsFromHeader(entry.header)));
+      const retired = state.outbox.filter((entry) => {
+        const parents = parentIdsFromHeader(entry.header);
+        return entry.fileId === event.revision.fileId && entry.contentHash === event.revision.contentHash && parents.length >= 2 && parents.every((id) => remoteParents.includes(id)) && !dependentParents.has(entry.revisionId);
+      });
+      if (retired.length === 0) return;
+      const ids = new Set(retired.map((entry) => entry.revisionId));
+      await this.mutate({
+        ...state,
+        outbox: state.outbox.filter((entry) => !ids.has(entry.revisionId)),
+        reconciliationBackups: {
+          ...state.reconciliationBackups,
+          [event.revision.revisionId]: [
+            ...state.reconciliationBackups?.[event.revision.revisionId] ?? [],
+            ...retired.map((entry) => ({ ...entry, payloadExternalized: false }))
+          ]
+        }
+      });
+    });
+  }
+  async recordPushReceipt(receipt) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const outbox = state.outbox.filter(
+        (envelope) => envelope.revisionId !== receipt.revisionId
+      );
+      await this.mutate({
+        ...state,
+        outbox,
+        locallyAuthored: this.rememberAuthored(
+          state.locallyAuthored,
+          receipt.revisionId
+        )
+      });
+      await this.dropPayload(receipt.revisionId);
+    });
+  }
+  async quarantineOutboxItem(revisionId, reason) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const failed = state.outbox.find(
+        (envelope) => envelope.revisionId === revisionId
+      );
+      const outbox = state.outbox.filter(
+        (envelope) => envelope.revisionId !== revisionId
+      );
+      const entry = {
+        revisionId,
+        fileId: failed?.fileId ?? "",
+        reason,
+        ...failed === void 0 ? {} : { parentRevisionIds: parentIdsFromHeader(failed.header) }
+      };
+      const quarantine = [
+        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
+        entry
+      ];
+      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
+      if (failed !== void 0) {
+        quarantinedEnvelopes[revisionId] = failed;
+      }
+      const budgeted = this.evictStashesOverBudget(quarantinedEnvelopes);
+      for (const evictedId of Object.keys(quarantinedEnvelopes)) {
+        if (!(evictedId in budgeted)) {
+          await this.dropPayload(evictedId);
+        }
+      }
+      await this.mutate({
+        ...state,
+        outbox,
+        quarantine,
+        quarantinedEnvelopes: budgeted
+      });
+    });
+  }
+  /**
+   * Returns a copy of `envelopes` trimmed to the byte budget (MAJOR 4). Object
+   * key order is insertion order, so iterating from the front evicts the OLDEST
+   * stashes until the summed decoded payload bytes fit. A single stash larger
+   * than the whole budget is evicted too, its row survives and Retry re-commits
+   * from disk, which is the only recovery once the bytes are dropped.
+   */
+  evictStashesOverBudget(envelopes) {
+    const entries = Object.entries(envelopes);
+    let total = entries.reduce(
+      (sum, [, env]) => sum + base64ByteLength(env.payloadBase64),
+      0
+    );
+    if (total <= this.envelopeBudgetBytes) return envelopes;
+    const trimmed = { ...envelopes };
+    for (const [key, env] of entries) {
+      if (total <= this.envelopeBudgetBytes) break;
+      total -= base64ByteLength(env.payloadBase64);
+      delete trimmed[key];
+    }
+    return trimmed;
+  }
+  /**
+   * Record a durable "failed to queue" entry (SND-02): a local change whose
+   * commit-path enqueue permanently failed (e.g. a transient readText/saveData
+   * failure that survived a bounded re-arm), so it never reached the outbox and
+   * has no envelope to retry. It reuses the SND-01 quarantine machinery so the
+   * send-queue panel surfaces it alongside server-rejected sends under the
+   * distinguishable reason `failed-to-queue`, keyed by a synthetic revisionId
+   * derived from the path (see {@link failedToQueueRevisionId}) so repeated
+   * failures for the same file coalesce into one row rather than flooding the
+   * panel. Nothing is ever silently dropped.
+   *
+   * Discard behaves identically to a server-rejected send, but Retry does NOT:
+   * a failed-to-queue row has no stashed envelope (it never reached the outbox),
+   * so `requeueQuarantined` is inert for it. Retry instead re-triggers the
+   * commit chain for the path from disk (MAJOR 2, routed by the caller via
+   * {@link parseFailedToQueuePath}), the on-disk content is the source of truth.
+   */
+  async recordFailedToQueue(path) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const revisionId = failedToQueueRevisionId(path);
+      const entry = {
+        revisionId,
+        fileId: path,
+        reason: "failed-to-queue"
+      };
+      const quarantine = [
+        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
+        entry
+      ];
+      await this.mutate({ ...state, quarantine });
+    });
+  }
+  async listQuarantine() {
+    return (await this.ensureLoaded()).quarantine;
+  }
+  /**
+   * The parents of a quarantined revision, or undefined when `revisionId` is
+   * not quarantined or its parents were never recorded (a legacy row whose
+   * stash was evicted). The producer walks past a quarantined head with this.
+   */
+  async quarantinedParents(revisionId) {
+    const state = await this.ensureLoaded();
+    const row = state.quarantine.find((item) => item.revisionId === revisionId);
+    if (row === void 0) return void 0;
+    if (row.parentRevisionIds !== void 0) return row.parentRevisionIds;
+    const stashed = state.quarantinedEnvelopes[revisionId];
+    return stashed === void 0 ? void 0 : parentIdsFromHeader(stashed.header);
+  }
+  /** Includes unsent authored revisions; used to distinguish local work from history replay. */
+  async hasAuthoredRevision(revisionId) {
+    const state = await this.ensureLoaded();
+    return state.locallyAuthored.includes(revisionId) || state.outbox.some((entry) => entry.revisionId === revisionId);
+  }
+  async isLocallyAuthored(revisionId) {
+    const state = await this.ensureLoaded();
+    return state.locallyAuthored.includes(revisionId);
+  }
+  /**
+   * Synchronous owner lookup against the warmed cache. Returns the fileId that
+   * owns `path`, or null if Havemind has not materialized a file there. The
+   * vault adapter uses this to update already-synced files in place while
+   * routing genuine collisions (a foreign file at the path) to conflicts.
+   */
+  fileIdAtPath(path) {
+    return this.cache?.pathOwners[path] ?? null;
+  }
+  /**
+   * Records an applied revision: `fileId` owns `path`, with base `hash` and,
+   * for markdown, base `content`. One write instead of three (P1), and never a
+   * half-recorded base after a crash between them.
+   */
+  async recordApplied(fileId, path, hash2, content) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        pathOwners: { ...state.pathOwners, [path]: fileId },
+        baseHashes: { ...state.baseHashes, [fileId]: hash2 },
+        ...content === null ? {} : { baseContents: { ...state.baseContents, [fileId]: content } }
+      });
+    });
+  }
+  async recordPathOwner(fileId, path) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        pathOwners: { ...state.pathOwners, [path]: fileId }
+      });
+    });
+  }
+  async forgetPath(path) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(path in state.pathOwners)) return;
+      const pathOwners = { ...state.pathOwners };
+      delete pathOwners[path];
+      await this.mutate({ ...state, pathOwners });
+    });
+  }
+  /**
+   * Synchronous lookup of the last synced base content hash for a file against
+   * the warmed cache, or null when Havemind has no recorded base yet. The vault
+   * adapter uses this to detect whether the on-disk content has diverged from
+   * the shared base before applying an incoming remote revision.
+   */
+  baseHashFor(fileId) {
+    return this.cache?.baseHashes[fileId] ?? null;
+  }
+  async recordBaseHash(fileId, hash2) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        baseHashes: { ...state.baseHashes, [fileId]: hash2 }
+      });
+    });
+  }
+  async forgetBaseHash(fileId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(fileId in state.baseHashes)) return;
+      const baseHashes = { ...state.baseHashes };
+      delete baseHashes[fileId];
+      await this.mutate({ ...state, baseHashes });
+    });
+  }
+  /**
+   * The exact base CONTENT for a file (the merge ancestor, MRG-01), or null when
+   * none is recorded. Synchronous against the warmed cache, like `baseHashFor`.
+   */
+  baseContentFor(fileId) {
+    return this.cache?.baseContents[fileId] ?? null;
+  }
+  async recordBaseContent(fileId, content) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        baseContents: { ...state.baseContents, [fileId]: content }
+      });
+    });
+  }
+  async forgetBaseContent(fileId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(fileId in state.baseContents)) return;
+      const baseContents = { ...state.baseContents };
+      delete baseContents[fileId];
+      await this.mutate({ ...state, baseContents });
+    });
+  }
+  /**
+   * The conflict-artifact path already written for `revisionId` (MRG-02
+   * cascade guard), or null if this revision has not conflicted before.
+   * Synchronous against the warmed cache.
+   */
+  conflictArtifactPathFor(revisionId) {
+    return this.cache?.conflictArtifacts[revisionId] ?? null;
+  }
+  async recordConflictArtifactPath(revisionId, path, fileId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        conflictArtifacts: { ...state.conflictArtifacts, [revisionId]: path },
+        ...fileId === void 0 ? {} : {
+          conflictCopyFileIds: {
+            ...state.conflictCopyFileIds,
+            [path]: fileId
+          }
+        }
+      });
+    });
+  }
+  /** The remote revision a conflict copy holds, or null when not recorded. */
+  revisionForConflictCopy(path) {
+    for (const [revisionId, copyPath] of Object.entries(this.cache?.conflictArtifacts ?? {})) {
+      if (copyPath === path) return revisionId;
+    }
+    return null;
+  }
+  /** The fileId a conflict copy was written for, or null when not recorded. */
+  fileIdForConflictCopy(path) {
+    return this.cache?.conflictCopyFileIds?.[path] ?? null;
+  }
+  async enqueue(envelope) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const stamped = envelope.enqueuedAt === void 0 ? { ...envelope, enqueuedAt: this.now() } : envelope;
+      if (await this.safePutPayload(stamped.revisionId, stamped.payloadBase64)) {
+        this.externalized.add(stamped.revisionId);
+      } else {
+        this.externalized.delete(stamped.revisionId);
+      }
+      const outbox = [
+        ...state.outbox.filter(
+          (entry) => entry.revisionId !== envelope.revisionId
+        ),
+        stamped
+      ];
+      await this.mutate({ ...state, outbox });
+    });
+  }
+  /**
+   * Outbox items paired with their enqueue time (SND-01), read synchronously
+   * against the warm cache. A missing `enqueuedAt` (legacy blob) is reported as
+   * 0, "very old", so a pre-upgrade item still counts as waiting. The runner
+   * always warms the cache before it pushes, so the panel's synchronous read
+   * finds a populated cache once connected; a cold cache reports no ages.
+   */
+  outboxAges() {
+    return (this.cache?.outbox ?? []).map((envelope) => ({
+      revisionId: envelope.revisionId,
+      enqueuedAt: envelope.enqueuedAt ?? 0
+    }));
+  }
+  /** Synchronous quarantine snapshot against the warm cache (SND-01). */
+  quarantineSnapshot() {
+    return this.cache?.quarantine ?? [];
+  }
+  /** The vault path a fileId currently owns (reverse of `fileIdAtPath`), or null. */
+  pathForFileId(fileId) {
+    const owners = this.cache?.pathOwners ?? {};
+    for (const [path, owner] of Object.entries(owners)) {
+      if (owner === fileId) return path;
+    }
+    return null;
+  }
+  /**
+   * Retry a quarantined send (SND-01): re-enqueue its stashed envelope through
+   * the normal outbox machinery (fresh enqueue time), then drop it from the
+   * quarantine and the stash. Returns true when it re-enqueued, false when
+   * nothing is stashed for `revisionId`, already requeued/discarded, or the
+   * stash was evicted under the byte budget (MAJOR 4). A false return leaves the
+   * quarantine row intact so the caller can degrade Retry to a re-commit from
+   * disk; a double click cannot double-enqueue because the second call finds no
+   * stash and returns false.
+   */
+  async requeueQuarantined(revisionId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const stashed = state.quarantinedEnvelopes[revisionId];
+      if (stashed === void 0) return false;
+      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
+      delete quarantinedEnvelopes[revisionId];
+      const outbox = [
+        ...state.outbox.filter((entry) => entry.revisionId !== revisionId),
+        { ...stashed, enqueuedAt: this.now() }
+      ];
+      const quarantine = state.quarantine.filter(
+        (item) => item.revisionId !== revisionId
+      );
+      await this.mutate({ ...state, outbox, quarantine, quarantinedEnvelopes });
+      return true;
+    });
+  }
+  /**
+   * Permanently drop a quarantined send (SND-01): remove it from the quarantine
+   * and forget its stashed envelope. Idempotent, dropping an unknown id is a
+   * no-op.
+   */
+  async discardQuarantined(revisionId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!state.quarantine.some((item) => item.revisionId === revisionId) && state.quarantinedEnvelopes[revisionId] === void 0) {
+        return;
+      }
+      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
+      delete quarantinedEnvelopes[revisionId];
+      const quarantine = state.quarantine.filter(
+        (item) => item.revisionId !== revisionId
+      );
+      await this.mutate({ ...state, quarantine, quarantinedEnvelopes });
+      await this.dropPayload(revisionId);
+    });
+  }
+  async getEnvelope(revisionId) {
+    await this.ensureLoaded();
+    return this.peekEnvelope(revisionId);
+  }
+  /**
+   * Synchronous lookup against the warmed cache. The runner always awaits
+   * `listOutbox` (which loads the cache) before it pushes, so the transport's
+   * synchronous `resolveEnvelope` finds a warm cache by the time it runs.
+   */
+  peekEnvelope(revisionId) {
+    const found = this.cache?.outbox.find(
+      (envelope) => envelope.revisionId === revisionId
+    );
+    if (found === void 0) return void 0;
+    return {
+      header: found.header,
+      idempotencyKey: found.idempotencyKey,
+      payloadBase64: found.payloadBase64
+    };
+  }
+  /**
+   * Incoming changes this device could not apply, set aside so the rest of the
+   * vault keeps syncing (B2). Persisted in the `deferred` field; the failure
+   * reason is kept for this session only.
+   */
+  async listParkedRemote() {
+    return (await this.ensureLoaded()).deferred;
+  }
+  async parkRemote(event, reason) {
+    this.parkReasons.set(event.revision.revisionId, reason);
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const others = state.deferred.filter(
+        (item) => item.revision.revisionId !== event.revision.revisionId
+      );
+      await this.mutate({ ...state, deferred: [...others, event] });
+    });
+  }
+  async unparkRemote(revisionId) {
+    this.parkReasons.delete(revisionId);
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        deferred: state.deferred.filter((item) => item.revision.revisionId !== revisionId)
+      });
+    });
+  }
+  /** Parked incoming changes for the panel, from the in-memory cache. */
+  parkedSnapshot() {
+    return (this.cache?.deferred ?? []).map((event) => ({
+      revisionId: event.revision.revisionId,
+      fileId: event.revision.fileId,
+      reason: this.parkReasons.get(event.revision.revisionId) ?? "This device could not apply this change."
+    }));
+  }
+  rememberAuthored(existing, revisionId) {
+    if (existing.includes(revisionId)) return existing;
+    const next = [...existing, revisionId];
+    return next.length > this.maxLocallyAuthored ? next.slice(next.length - this.maxLocallyAuthored) : next;
+  }
+  async ensureLoaded() {
+    if (this.cache !== null) return this.cache;
+    if (this.loadPromise === null) {
+      this.loadPromise = this.persist.load().then((raw) => this.hydrate(raw)).then(() => this.reconcilePayloads()).finally(() => {
+        this.loadPromise = null;
+      });
+    }
+    await this.loadPromise;
+    if (this.cache === null) this.cache = emptyState();
+    return this.cache;
+  }
+  /**
+   * Parse the loaded primary blob into the cache (GAP-1 fail-closed policy). A
+   * mutation may have populated the cache while the load was in flight (e.g. an
+   * enqueue that awaited this same shared promise and then wrote); never clobber
+   * it, re-check `this.cache === null` before each assignment.
+   *
+   *  - ABSENT (null/undefined): a clean first run → empty, writable state.
+   *  - OK: the parsed state (with bad outbox envelopes quarantined, not nuked).
+   *  - CORRUPT (present but a core field failed): try the `.bak` first; if it is
+   *    a valid present state, recover from it. Otherwise, with no usable backup:
+   *      · SALVAGE when the outbox is still readable (only a non-outbox core
+   *        field is damaged): keep the queue + locally-authored ids, reset the
+   *        unrecoverable fields to safe defaults, preserve the raw blob to a
+   *        sidecar, and write the CLEANED state back as the new primary. Nothing
+   *        is at risk, so recovery is NOT flagged and the next load reads 'ok'.
+   *      · UNRECOVERABLE when the queue container itself cannot be read: preserve
+   *        the raw blob to a sidecar for manual recovery, resume from a clean,
+   *        writable empty state, rewrite the primary to it (so a restart never
+   *        re-locks), and set the observable recovery signal.
+   */
+  async hydrate(raw) {
+    if (this.cache !== null) return;
+    if (isRecord2(raw) && !validRecoveryFields(raw)) {
+      await this.persist.preserveCorrupt(raw, this.now());
+      throw new Error("Invalid producer recovery journal; sync is paused with original state preserved.");
+    }
+    const outcome = parsePersistedState(raw);
+    if (outcome.status !== "corrupt") {
+      if (this.cache === null) this.cache = this.trimmed(outcome.state);
+      return;
+    }
+    if (isRecord2(raw) && (raw.producerRecovery !== void 0 || raw.reconciliationBackups !== void 0)) {
+      await this.persist.preserveCorrupt(raw, this.now());
+      throw new Error("Corrupt sync state includes recovery data; original state preserved.");
+    }
+    const backup = await this.persist.loadBackup();
+    if (this.cache !== null) return;
+    const backupOutcome = parsePersistedState(backup);
+    if (backupOutcome.status === "ok") {
+      await this.persist.preserveCorrupt(raw, this.now());
+      if (this.cache === null) {
+        this.cache = this.trimmed(backupOutcome.state);
+        if (salvageHasOutboxEntriesMissingFrom(outcome.salvage, backupOutcome.state.outbox)) {
+          this.recoveryRequired = true;
+        }
+      }
+      return;
+    }
+    await this.persist.preserveCorrupt(raw, this.now());
+    if (this.cache !== null) return;
+    if (outcome.salvage !== null) {
+      this.cache = this.trimmed(outcome.salvage);
     } else {
-      j += 1;
+      this.cache = emptyState();
+      if (outcome.outboxAtRisk) this.recoveryRequired = true;
+    }
+    await this.persist.save(this.toDiskForm(this.cache));
+  }
+  async mutate(next) {
+    const kept = this.trimmed(next);
+    await this.persist.save(this.toDiskForm(kept));
+    this.cache = kept;
+  }
+  /**
+   * Arch P1: the on-disk projection of `state`. For every outbox/stash envelope
+   * whose payload is externalized (its `revisionId` is in {@link externalized},
+   * i.e. the store durably holds the bytes), the inline `payloadBase64` is
+   * replaced by `''` and marked `payloadExternalized: true`. A payload NOT in the
+   * set (legacy, or an inline-fallback under an unavailable store) is written
+   * inline unchanged, so the disk form only ever strips bytes the store actually
+   * holds, never bytes that would then be irrecoverable. Returns `state` itself
+   * when nothing is externalized (the legacy path), so behaviour is identical to
+   * before when no payload store is configured.
+   */
+  toDiskForm(state) {
+    if (this.externalized.size === 0) return state;
+    const strip = (env) => this.externalized.has(env.revisionId) ? { ...env, payloadBase64: "", payloadExternalized: true } : env;
+    const quarantinedEnvelopes = {};
+    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
+      quarantinedEnvelopes[key] = strip(env);
+    }
+    return {
+      ...state,
+      outbox: state.outbox.map(strip),
+      quarantinedEnvelopes
+    };
+  }
+  /** Fallible payload-store read: undefined on absence OR any store failure. */
+  async safeGetPayload(revisionId) {
+    if (this.payloadStore === void 0) return void 0;
+    try {
+      return await this.payloadStore.getPayload(revisionId);
+    } catch {
+      return void 0;
     }
   }
-  return matches;
-}
-function diffHunks(ancestor, variant) {
-  const matches = lcsMatches(ancestor, variant);
-  const hunks = [];
-  let oCursor = 0;
-  let vCursor = 0;
-  const boundaries = [...matches, { x: ancestor.length, y: variant.length }];
-  for (const match of boundaries) {
-    const oLength = match.x - oCursor;
-    const abLength = match.y - vCursor;
-    if (oLength > 0 || abLength > 0) {
-      hunks.push({ oStart: oCursor, oLength, abStart: vCursor, abLength });
-    }
-    oCursor = match.x + 1;
-    vCursor = match.y + 1;
-  }
-  return hunks;
-}
-function variantStart(hunks, p) {
-  let delta = 0;
-  for (const hunk of hunks) {
-    if (hunk.oStart + hunk.oLength <= p && hunk.oStart < p) {
-      delta += hunk.abLength - hunk.oLength;
-    }
-  }
-  return p + delta;
-}
-function variantEnd(hunks, p) {
-  let delta = 0;
-  for (const hunk of hunks) {
-    if (hunk.oStart + hunk.oLength <= p) {
-      delta += hunk.abLength - hunk.oLength;
-    }
-  }
-  return p + delta;
-}
-function segmentFor(hunks, variant, oStart, oEnd) {
-  return variant.slice(variantStart(hunks, oStart), variantEnd(hunks, oEnd));
-}
-function linesEqual(a, b) {
-  if (a.length !== b.length)
-    return false;
-  for (let index = 0; index < a.length; index += 1) {
-    if (a[index] !== b[index])
+  /**
+   * Fallible payload-store write. Returns true when the bytes are durably in the
+   * store (so the caller marks the id externalized and the disk form strips it),
+   * false when there is no store or the write threw (keep the payload inline,
+   * the graceful mobile/unavailable fallback).
+   */
+  async safePutPayload(revisionId, payloadBase64) {
+    if (this.payloadStore === void 0) return false;
+    try {
+      await this.payloadStore.putPayload(revisionId, payloadBase64);
+      return true;
+    } catch {
+      console.warn(
+        `Havemind: outbox payload for ${revisionId} could not be externalized; keeping it inline in data.json.`
+      );
       return false;
+    }
+  }
+  /**
+   * Drop a revision's externalized payload from the store when it leaves BOTH the
+   * outbox and the stash for good (receipt, discard, budget eviction). A no-op
+   * when the id was never externalized (inline path). Best-effort: a failed
+   * delete only leaks bytes, never corrupts state, so it is swallowed.
+   */
+  async dropPayload(revisionId) {
+    if (!this.externalized.has(revisionId)) return;
+    if (this.payloadStore !== void 0) {
+      try {
+        await this.payloadStore.deletePayload(revisionId);
+      } catch {
+      }
+    }
+    this.externalized.delete(revisionId);
+  }
+  /**
+   * Reconcile outbox/stash payloads with the out-of-band store after load (arch
+   * P1). For each envelope:
+   *  - EXTERNALIZED (a reference: empty inline bytes + marker): fetch the bytes.
+   *    Present → rehydrate them into the in-memory cache so `peekEnvelope` drains
+   *    the real payload; missing/unresolvable → fail-closed. A missing OUTBOX
+   *    payload is quarantined (never drained empty); a missing STASH payload is
+   *    dropped (its quarantine row already records the failure), mirroring the
+   *    byte-budget eviction contract.
+   *  - INLINE (legacy or fallback): opportunistically MIGRATE the bytes into the
+   *    store, marking the id externalized so the next save shrinks `data.json`.
+   * When anything changed, the cleaned/migrated state is persisted immediately
+   * (disk form) so a legacy blob is shrunk on first load, not only on next edit.
+   */
+  async reconcilePayloads() {
+    const state = this.cache;
+    if (state === null) return;
+    let cacheChanged = false;
+    let persistNeeded = false;
+    const nextOutbox = [];
+    const addedQuarantine = [];
+    for (const env of state.outbox) {
+      if (env.payloadExternalized === true) {
+        const payload = await this.safeGetPayload(env.revisionId);
+        if (typeof payload === "string") {
+          this.externalized.add(env.revisionId);
+          nextOutbox.push({ ...env, payloadBase64: payload });
+          cacheChanged = true;
+        } else {
+          console.warn(
+            `Havemind: outbox payload for ${env.revisionId} is missing from the store; quarantining it (fail-closed).`
+          );
+          addedQuarantine.push({
+            revisionId: env.revisionId,
+            fileId: env.fileId,
+            reason: PAYLOAD_MISSING_REASON
+          });
+          cacheChanged = true;
+          persistNeeded = true;
+        }
+      } else {
+        nextOutbox.push(env);
+        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+          this.externalized.add(env.revisionId);
+          persistNeeded = true;
+        }
+      }
+    }
+    const nextStash = {};
+    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
+      if (env.payloadExternalized === true) {
+        const payload = await this.safeGetPayload(env.revisionId);
+        if (typeof payload === "string") {
+          this.externalized.add(env.revisionId);
+          nextStash[key] = { ...env, payloadBase64: payload };
+          cacheChanged = true;
+        } else {
+          persistNeeded = true;
+        }
+      } else {
+        nextStash[key] = env;
+        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+          this.externalized.add(env.revisionId);
+          persistNeeded = true;
+        }
+      }
+    }
+    if (!cacheChanged && !persistNeeded) return;
+    const next = {
+      ...state,
+      outbox: nextOutbox,
+      quarantine: [...state.quarantine, ...addedQuarantine],
+      quarantinedEnvelopes: nextStash
+    };
+    this.cache = next;
+    if (persistNeeded) {
+      await this.persist.save(this.toDiskForm(next));
+    }
+  }
+  /**
+   * Runs a read-modify-write `section` (an `ensureLoaded` + `mutate` pair)
+   * atomically with respect to every other section, by chaining them on a
+   * single tail. See {@link mutationTail} for why this is required. `section`s
+   * never nest (no mutating method calls another), so this cannot deadlock; the
+   * tail swallows outcomes so one section's rejection never wedges the next.
+   */
+  runExclusive(section) {
+    const run = this.mutationTail.then(section, section);
+    this.mutationTail = run.then(
+      () => void 0,
+      () => void 0
+    );
+    return run;
+  }
+};
+var CORRUPT_ENVELOPE_PREFIX = "corrupt-envelope:";
+function parseOutboxEntries(outbox) {
+  const parsedOutbox = [];
+  const quarantinedBadEnvelopes = [];
+  outbox.forEach((entry, index) => {
+    const parsed = parseEnvelope(entry);
+    if (parsed === null) {
+      quarantinedBadEnvelopes.push(quarantineForCorruptEnvelope(entry, index));
+    } else {
+      parsedOutbox.push(parsed);
+    }
+  });
+  if (quarantinedBadEnvelopes.length > 0) {
+    console.warn(
+      `Havemind: ${quarantinedBadEnvelopes.length} unparseable outbox envelope(s) were quarantined; the rest of the outbox was preserved.`
+    );
+  }
+  return { parsedOutbox, quarantinedBadEnvelopes };
+}
+function parsePersistedState(raw) {
+  if (raw === null || raw === void 0) {
+    return { status: "absent", state: emptyState(), salvage: null, outboxAtRisk: false };
+  }
+  const strict = strictParse(raw);
+  if (strict !== null) {
+    return { status: "ok", state: strict, salvage: null, outboxAtRisk: false };
+  }
+  return {
+    status: "corrupt",
+    state: emptyState(),
+    salvage: salvageState(raw),
+    outboxAtRisk: outboxAtRisk(raw)
+  };
+}
+function validRecoveryFields(raw) {
+  if (raw.producerRecovery !== void 0 && (!Array.isArray(raw.producerRecovery) || !raw.producerRecovery.every(validRecovery))) return false;
+  if (raw.reconciliationBackups !== void 0) {
+    if (!isRecord2(raw.reconciliationBackups)) return false;
+    if (!Object.values(raw.reconciliationBackups).every((entries) => Array.isArray(entries) && entries.every((entry) => parseEnvelope(entry) !== null && isRecord2(entry) && entry.payloadExternalized !== true))) return false;
   }
   return true;
 }
-function mergeText(ancestor, local, remote, options = {}) {
-  const adjacency = options.adjacencyLines ?? DEFAULT_ADJACENCY_LINES;
-  const maxCells = options.maxLcsCells ?? DEFAULT_MAX_LCS_CELLS;
-  const o = splitLines(ancestor);
-  const a = splitLines(local);
-  const b = splitLines(remote);
-  if ((o.length + 1) * (a.length + 1) > maxCells || (o.length + 1) * (b.length + 1) > maxCells) {
-    return { status: "conflict" };
-  }
-  const localHunks = diffHunks(o, a);
-  const remoteHunks = diffHunks(o, b);
-  const events = [
-    ...localHunks.map((hunk) => ({ ...hunk, side: "local" })),
-    ...remoteHunks.map((hunk) => ({ ...hunk, side: "remote" }))
-  ].sort((left, right) => left.oStart - right.oStart || (left.side === right.side ? 0 : left.side === "local" ? -1 : 1));
-  const merged = [];
-  let oCursor = 0;
-  let index = 0;
-  while (index < events.length) {
-    const first = events[index];
-    if (first === void 0)
-      break;
-    for (let line = oCursor; line < first.oStart; line += 1) {
-      merged.push(o[line]);
-    }
-    const regionStart = first.oStart;
-    let regionEnd = first.oStart + first.oLength;
-    const sides = /* @__PURE__ */ new Set([first.side]);
-    index += 1;
-    while (index < events.length) {
-      const next = events[index];
-      if (next === void 0)
-        break;
-      if (next.oStart - regionEnd >= adjacency)
-        break;
-      regionEnd = Math.max(regionEnd, next.oStart + next.oLength);
-      sides.add(next.side);
-      index += 1;
-    }
-    const localSegment = segmentFor(localHunks, a, regionStart, regionEnd);
-    const remoteSegment = segmentFor(remoteHunks, b, regionStart, regionEnd);
-    const ancestorSegment = o.slice(regionStart, regionEnd);
-    if (!sides.has("remote") || linesEqual(remoteSegment, ancestorSegment)) {
-      merged.push(...localSegment);
-    } else if (!sides.has("local") || linesEqual(localSegment, ancestorSegment)) {
-      merged.push(...remoteSegment);
-    } else if (linesEqual(localSegment, remoteSegment)) {
-      merged.push(...localSegment);
-    } else {
-      const disjoint = mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regionEnd);
-      if (disjoint === null) {
-        return { status: "conflict" };
-      }
-      merged.push(...disjoint);
-    }
-    oCursor = regionEnd;
-  }
-  for (let line = oCursor; line < o.length; line += 1) {
-    merged.push(o[line]);
-  }
-  return { status: "merged", text: merged.join("\n") };
-}
-function mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regionEnd) {
-  const inRegion = (hunk) => hunk.oStart < regionEnd && hunk.oStart + hunk.oLength > regionStart;
-  const balanced = (hunks) => hunks.filter(inRegion).every((hunk) => (
-    // One ancestor line in, one replacement line out, so the walk below can
-    // attribute each line to exactly one side.
-    hunk.oLength > 0 && hunk.oLength === hunk.abLength && // Wholly inside the region. A hunk that straddles the boundary has part
-    // of its replacement outside the span this function rebuilds, and that
-    // part would simply vanish (CI counterexample: ancestor "b\n", local
-    // "# h\n- a", remote "b\nfoo" lost "foo").
-    hunk.oStart >= regionStart && hunk.oStart + hunk.oLength <= regionEnd
-  ));
-  if (!balanced(localHunks) || !balanced(remoteHunks)) {
+function strictParse(raw) {
+  if (isRecord2(raw) && !validRecoveryFields(raw)) return null;
+  if (!isRecord2(raw) || raw.version !== 1) return null;
+  const cursor = raw.cursor;
+  const outbox = raw.outbox;
+  const locallyAuthored = raw.locallyAuthored;
+  const deferred = raw.deferred;
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || !Array.isArray(outbox) || !Array.isArray(locallyAuthored) || !Array.isArray(deferred)) {
     return null;
   }
-  if (insertionsIn(localHunks, regionStart, regionEnd).length > 0 || insertionsIn(remoteHunks, regionStart, regionEnd).length > 0) {
+  if (!locallyAuthored.every((value) => typeof value === "string")) {
     return null;
   }
-  const out = [];
-  let line = regionStart;
-  while (line < regionEnd) {
-    const local = hunkCovering(localHunks, line);
-    const remote = hunkCovering(remoteHunks, line);
-    if (local !== void 0 && remote !== void 0) {
+  const parsedDeferred = [];
+  for (const entry of deferred) {
+    const parsed = parseRemoteEvent(entry);
+    if (parsed === null) return null;
+    parsedDeferred.push(parsed);
+  }
+  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(outbox);
+  const pathOwners = parseStringMap(raw.pathOwners) ?? warnDegrade("pathOwners", {});
+  const baseHashes = parseStringMap(raw.baseHashes) ?? warnDegrade("baseHashes", {});
+  const baseContents = parseStringMap(raw.baseContents) ?? warnDegrade("baseContents", {});
+  const conflictArtifacts = parseStringMap(raw.conflictArtifacts) ?? warnDegrade("conflictArtifacts", {});
+  const quarantine = parseQuarantine(raw.quarantine) ?? warnDegrade("quarantine", []);
+  const quarantinedEnvelopes = parseEnvelopeMap(raw.quarantinedEnvelopes) ?? warnDegrade("quarantinedEnvelopes", {});
+  return {
+    version: 1,
+    cursor,
+    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
+    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
+    outbox: parsedOutbox,
+    locallyAuthored,
+    deferred: parsedDeferred,
+    // Merge the corrupt-envelope rows in so nothing is silently dropped.
+    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
+    pathOwners,
+    baseHashes,
+    baseContents,
+    conflictArtifacts,
+    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
+    quarantinedEnvelopes
+  };
+}
+function optionalConflictCopyFileIds(value) {
+  if (value === void 0) return {};
+  const parsed = parseStringMap(value);
+  return parsed === null ? {} : { conflictCopyFileIds: parsed };
+}
+function salvageState(raw) {
+  if (!isRecord2(raw) || !Array.isArray(raw.outbox)) return null;
+  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(raw.outbox);
+  const cursor = Number.isSafeInteger(raw.cursor) && raw.cursor >= 0 ? raw.cursor : 0;
+  const locallyAuthored = Array.isArray(raw.locallyAuthored) && raw.locallyAuthored.every((value) => typeof value === "string") ? raw.locallyAuthored : [];
+  const quarantine = parseQuarantine(raw.quarantine) ?? [];
+  return {
+    version: 1,
+    cursor,
+    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
+    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
+    outbox: parsedOutbox,
+    locallyAuthored,
+    deferred: salvageDeferred(raw.deferred),
+    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
+    pathOwners: parseStringMap(raw.pathOwners) ?? {},
+    baseHashes: parseStringMap(raw.baseHashes) ?? {},
+    baseContents: parseStringMap(raw.baseContents) ?? {},
+    conflictArtifacts: parseStringMap(raw.conflictArtifacts) ?? {},
+    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
+    quarantinedEnvelopes: parseEnvelopeMap(raw.quarantinedEnvelopes) ?? {}
+  };
+}
+function salvageDeferred(value) {
+  if (!Array.isArray(value)) return [];
+  const result = [];
+  for (const entry of value) {
+    const parsed = parseRemoteEvent(entry);
+    if (parsed === null) return [];
+    result.push(parsed);
+  }
+  return result;
+}
+function outboxAtRisk(raw) {
+  if (!isRecord2(raw)) return false;
+  const outbox = raw.outbox;
+  if (outbox === void 0 || Array.isArray(outbox)) return false;
+  return true;
+}
+function salvageHasOutboxEntriesMissingFrom(salvage, backupOutbox) {
+  if (salvage === null || salvage.outbox.length === 0) return false;
+  const backupIds = new Set(backupOutbox.map((entry) => entry.revisionId));
+  return salvage.outbox.some((entry) => !backupIds.has(entry.revisionId));
+}
+function quarantineForCorruptEnvelope(entry, index) {
+  const revisionId = isRecord2(entry) && typeof entry.revisionId === "string" ? entry.revisionId : `${CORRUPT_ENVELOPE_PREFIX}${index}`;
+  const fileId = isRecord2(entry) && typeof entry.fileId === "string" ? entry.fileId : "";
+  return { revisionId, fileId, reason: "corrupt-envelope" };
+}
+function warnDegrade(field, fallback) {
+  console.warn(
+    `Havemind: persisted "${field}" was malformed and was reset to its default; other sync state was preserved.`
+  );
+  return fallback;
+}
+function parseEnvelopeMap(value) {
+  if (value === void 0) return {};
+  if (!isRecord2(value)) return null;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const parsed = parseEnvelope(entry);
+    if (parsed === null) return null;
+    result[key] = parsed;
+  }
+  return result;
+}
+function parseQuarantine(value) {
+  if (value === void 0) return [];
+  if (!Array.isArray(value)) return null;
+  const result = [];
+  for (const entry of value) {
+    if (!isRecord2(entry) || typeof entry.revisionId !== "string" || typeof entry.fileId !== "string" || typeof entry.reason !== "string") {
       return null;
     }
-    const own = local ?? remote;
-    if (regionHasOppositeChange(local !== void 0 ? remoteHunks : localHunks, own.oStart, own.oStart + own.oLength)) {
-      return null;
-    }
-    if (own.abLength === 0) {
-      return null;
-    }
-    if (local === void 0 && remote === void 0) {
-      out.push(o[line]);
-      line += 1;
-      continue;
-    }
-    const hunk = local ?? remote;
-    const source = local !== void 0 ? a : b;
-    if (hunk.oStart >= line) {
-      for (let k = 0; k < hunk.abLength; k += 1) {
-        out.push(source[hunk.abStart + k]);
-      }
-    }
-    line = hunk.oStart + hunk.oLength;
+    const parents = entry.parentRevisionIds;
+    result.push({
+      revisionId: entry.revisionId,
+      fileId: entry.fileId,
+      reason: entry.reason,
+      ...Array.isArray(parents) && parents.every((id) => typeof id === "string") ? { parentRevisionIds: parents } : {}
+    });
   }
-  return out;
+  return result;
 }
-function insertionsIn(hunks, regionStart, regionEnd) {
-  return hunks.filter((hunk) => hunk.oLength === 0 && hunk.oStart >= regionStart && hunk.oStart <= regionEnd);
+function parseStringMap(value) {
+  if (value === void 0) return {};
+  if (!isRecord2(value)) return null;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string") return null;
+    result[key] = entry;
+  }
+  return result;
 }
-function hunkCovering(hunks, line) {
-  return hunks.find((hunk) => line >= hunk.oStart && line < hunk.oStart + hunk.oLength);
+function parseEnvelope(value) {
+  if (!isRecord2(value)) return null;
+  if (typeof value.operationId !== "string" || typeof value.revisionId !== "string" || typeof value.fileId !== "string" || typeof value.contentHash !== "string" || typeof value.idempotencyKey !== "string" || typeof value.payloadBase64 !== "string") {
+    return null;
+  }
+  return {
+    operationId: value.operationId,
+    revisionId: value.revisionId,
+    fileId: value.fileId,
+    contentHash: value.contentHash,
+    idempotencyKey: value.idempotencyKey,
+    payloadBase64: value.payloadBase64,
+    header: value.header,
+    // Preserve the enqueue time across a restart (SND-01); a non-number degrades
+    // to "unstamped" so `outboxAges` treats it as old rather than throwing.
+    ...typeof value.enqueuedAt === "number" ? { enqueuedAt: value.enqueuedAt } : {},
+    // Arch P1: carry the externalized marker so load-time reconciliation knows
+    // to rehydrate the payload from the store (an empty inline `payloadBase64` is
+    // otherwise indistinguishable from a genuinely 0-byte payload).
+    ...value.payloadExternalized === true ? { payloadExternalized: true } : {}
+  };
 }
-function regionHasOppositeChange(hunks, regionStart, regionEnd) {
-  return hunks.some((hunk) => hunk.oStart < regionEnd && hunk.oStart + hunk.oLength > regionStart);
+function parseRemoteEvent(value) {
+  if (!isRecord2(value) || !Number.isSafeInteger(value.serverSequence)) {
+    return null;
+  }
+  const revision = value.revision;
+  if (!isRecord2(revision) || typeof revision.revisionId !== "string" || typeof revision.fileId !== "string" || typeof revision.contentHash !== "string") {
+    return null;
+  }
+  return {
+    serverSequence: value.serverSequence,
+    revision: {
+      revisionId: revision.revisionId,
+      fileId: revision.fileId,
+      contentHash: revision.contentHash
+    }
+  };
 }
-
-// ../../node_modules/diff/libesm/diff/base.js
-var Diff = class {
-  diff(oldStr, newStr, options = {}) {
-    let callback;
-    if (typeof options === "function") {
-      callback = options;
-      options = {};
-    } else if ("callback" in options) {
-      callback = options.callback;
-    }
-    const oldString = this.castInput(oldStr, options);
-    const newString = this.castInput(newStr, options);
-    const oldTokens = this.removeEmpty(this.tokenize(oldString, options));
-    const newTokens = this.removeEmpty(this.tokenize(newString, options));
-    return this.diffWithOptionsObj(oldTokens, newTokens, options, callback);
-  }
-  diffWithOptionsObj(oldTokens, newTokens, options, callback) {
-    var _a3;
-    const done = (value) => {
-      value = this.postProcess(value, options);
-      if (callback) {
-        setTimeout(function() {
-          callback(value);
-        }, 0);
-        return void 0;
-      } else {
-        return value;
-      }
-    };
-    const newLen = newTokens.length, oldLen = oldTokens.length;
-    let editLength = 1;
-    let maxEditLength = newLen + oldLen;
-    if (options.maxEditLength != null) {
-      maxEditLength = Math.min(maxEditLength, options.maxEditLength);
-    }
-    const maxExecutionTime = (_a3 = options.timeout) !== null && _a3 !== void 0 ? _a3 : Infinity;
-    const abortAfterTimestamp = Date.now() + maxExecutionTime;
-    const bestPath = [{ oldPos: -1, lastComponent: void 0 }];
-    let newPos = this.extractCommon(bestPath[0], newTokens, oldTokens, 0, options);
-    if (bestPath[0].oldPos + 1 >= oldLen && newPos + 1 >= newLen) {
-      return done(this.buildValues(bestPath[0].lastComponent, newTokens, oldTokens));
-    }
-    let minDiagonalToConsider = -Infinity, maxDiagonalToConsider = Infinity;
-    const execEditLength = () => {
-      for (let diagonalPath = Math.max(minDiagonalToConsider, -editLength); diagonalPath <= Math.min(maxDiagonalToConsider, editLength); diagonalPath += 2) {
-        let basePath;
-        const removePath = bestPath[diagonalPath - 1], addPath = bestPath[diagonalPath + 1];
-        if (removePath) {
-          bestPath[diagonalPath - 1] = void 0;
-        }
-        let canAdd = false;
-        if (addPath) {
-          const addPathNewPos = addPath.oldPos - diagonalPath;
-          canAdd = addPath && 0 <= addPathNewPos && addPathNewPos < newLen;
-        }
-        const canRemove = removePath && removePath.oldPos + 1 < oldLen;
-        if (!canAdd && !canRemove) {
-          bestPath[diagonalPath] = void 0;
-          continue;
-        }
-        if (!canRemove || canAdd && removePath.oldPos < addPath.oldPos) {
-          basePath = this.addToPath(addPath, true, false, 0, options);
-        } else {
-          basePath = this.addToPath(removePath, false, true, 1, options);
-        }
-        newPos = this.extractCommon(basePath, newTokens, oldTokens, diagonalPath, options);
-        if (basePath.oldPos + 1 >= oldLen && newPos + 1 >= newLen) {
-          return done(this.buildValues(basePath.lastComponent, newTokens, oldTokens)) || true;
-        } else {
-          bestPath[diagonalPath] = basePath;
-          if (basePath.oldPos + 1 >= oldLen) {
-            maxDiagonalToConsider = Math.min(maxDiagonalToConsider, diagonalPath - 1);
-          }
-          if (newPos + 1 >= newLen) {
-            minDiagonalToConsider = Math.max(minDiagonalToConsider, diagonalPath + 1);
-          }
-        }
-      }
-      editLength++;
-    };
-    if (callback) {
-      (function exec() {
-        setTimeout(function() {
-          if (editLength > maxEditLength || Date.now() > abortAfterTimestamp) {
-            return callback(void 0);
-          }
-          if (!execEditLength()) {
-            exec();
-          }
-        }, 0);
-      })();
-    } else {
-      while (editLength <= maxEditLength && Date.now() <= abortAfterTimestamp) {
-        const ret = execEditLength();
-        if (ret) {
-          return ret;
-        }
-      }
-    }
-  }
-  addToPath(path, added, removed, oldPosInc, options) {
-    const last = path.lastComponent;
-    if (last && !options.oneChangePerToken && last.added === added && last.removed === removed) {
-      return {
-        oldPos: path.oldPos + oldPosInc,
-        lastComponent: { count: last.count + 1, added, removed, previousComponent: last.previousComponent }
-      };
-    } else {
-      return {
-        oldPos: path.oldPos + oldPosInc,
-        lastComponent: { count: 1, added, removed, previousComponent: last }
-      };
-    }
-  }
-  extractCommon(basePath, newTokens, oldTokens, diagonalPath, options) {
-    const newLen = newTokens.length, oldLen = oldTokens.length;
-    let oldPos = basePath.oldPos, newPos = oldPos - diagonalPath, commonCount = 0;
-    while (newPos + 1 < newLen && oldPos + 1 < oldLen && this.equals(oldTokens[oldPos + 1], newTokens[newPos + 1], options)) {
-      newPos++;
-      oldPos++;
-      commonCount++;
-      if (options.oneChangePerToken) {
-        basePath.lastComponent = { count: 1, previousComponent: basePath.lastComponent, added: false, removed: false };
-      }
-    }
-    if (commonCount && !options.oneChangePerToken) {
-      basePath.lastComponent = { count: commonCount, previousComponent: basePath.lastComponent, added: false, removed: false };
-    }
-    basePath.oldPos = oldPos;
-    return newPos;
-  }
-  equals(left, right, options) {
-    if (options.comparator) {
-      return options.comparator(left, right);
-    } else {
-      return left === right || !!options.ignoreCase && left.toLowerCase() === right.toLowerCase();
-    }
-  }
-  removeEmpty(array2) {
-    const ret = [];
-    for (let i = 0; i < array2.length; i++) {
-      if (array2[i]) {
-        ret.push(array2[i]);
-      }
-    }
-    return ret;
-  }
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  castInput(value, options) {
-    return value;
-  }
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  tokenize(value, options) {
-    return Array.from(value);
-  }
-  join(chars) {
-    return chars.join("");
-  }
-  postProcess(changeObjects, options) {
-    return changeObjects;
-  }
-  get useLongestToken() {
-    return false;
-  }
-  buildValues(lastComponent, newTokens, oldTokens) {
-    const components = [];
-    let nextComponent;
-    while (lastComponent) {
-      components.push(lastComponent);
-      nextComponent = lastComponent.previousComponent;
-      delete lastComponent.previousComponent;
-      lastComponent = nextComponent;
-    }
-    components.reverse();
-    const componentLen = components.length;
-    let componentPos = 0, newPos = 0, oldPos = 0;
-    for (; componentPos < componentLen; componentPos++) {
-      const component = components[componentPos];
-      if (!component.removed) {
-        if (!component.added && this.useLongestToken) {
-          let value = newTokens.slice(newPos, newPos + component.count);
-          value = value.map(function(value2, i) {
-            const oldValue = oldTokens[oldPos + i];
-            return oldValue.length > value2.length ? oldValue : value2;
-          });
-          component.value = this.join(value);
-        } else {
-          component.value = this.join(newTokens.slice(newPos, newPos + component.count));
-        }
-        newPos += component.count;
-        if (!component.added) {
-          oldPos += component.count;
-        }
-      } else {
-        component.value = this.join(oldTokens.slice(oldPos, oldPos + component.count));
-        oldPos += component.count;
-      }
-    }
-    return components;
-  }
-};
-
-// ../../node_modules/diff/libesm/diff/character.js
-var CharacterDiff = class extends Diff {
-};
-var characterDiff = new CharacterDiff();
-function diffChars(oldStr, newStr, options) {
-  return characterDiff.diff(oldStr, newStr, options);
-}
-
-// ../../packages/sync-core/dist/provenance.js
-var ProvenanceValidationError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ProvenanceValidationError";
-  }
-};
-function assertRun(run) {
-  if (!Number.isSafeInteger(run.length) || run.length <= 0) {
-    throw new ProvenanceValidationError("Provenance run length must be a positive safe integer.");
-  }
-  if (run.sourceRevisionId.trim().length === 0) {
-    throw new ProvenanceValidationError("Provenance source revision ID must not be empty.");
-  }
-}
-function provenanceLength(runs) {
-  return runs.reduce((length, run) => {
-    assertRun(run);
-    return length + run.length;
-  }, 0);
-}
-function assertValidProvenance(content, runs) {
-  const coveredLength = provenanceLength(runs);
-  if (coveredLength !== content.length) {
-    throw new ProvenanceValidationError(`Provenance covers ${coveredLength} UTF-16 units, expected ${content.length}.`);
-  }
-}
-function normalizeProvenanceRuns(runs) {
-  const normalized = [];
-  for (const run of runs) {
-    assertRun(run);
-    const previous = normalized.at(-1);
-    if (previous?.sourceRevisionId === run.sourceRevisionId) {
-      normalized[normalized.length - 1] = {
-        length: previous.length + run.length,
-        sourceRevisionId: previous.sourceRevisionId
-      };
-      continue;
-    }
-    normalized.push({ ...run });
-  }
-  return normalized;
-}
-function sliceProvenance(runs, start, end) {
-  const totalLength = provenanceLength(runs);
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > totalLength) {
-    throw new ProvenanceValidationError(`Invalid provenance slice [${start}, ${end}) for length ${totalLength}.`);
-  }
-  if (start === end) {
-    return [];
-  }
-  const selected = [];
-  let offset = 0;
-  for (const run of runs) {
-    const runEnd = offset + run.length;
-    const selectedStart = Math.max(start, offset);
-    const selectedEnd = Math.min(end, runEnd);
-    if (selectedStart < selectedEnd) {
-      selected.push({
-        length: selectedEnd - selectedStart,
-        sourceRevisionId: run.sourceRevisionId
-      });
-    }
-    offset = runEnd;
-    if (offset >= end) {
-      break;
-    }
-  }
-  return normalizeProvenanceRuns(selected);
-}
-
-// ../../packages/sync-core/dist/recipe.js
-var ReconstructionError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ReconstructionError";
-  }
-};
-function isUtf16Boundary(content, offset) {
-  if (offset <= 0 || offset >= content.length) {
-    return true;
-  }
-  const previous = content.charCodeAt(offset - 1);
-  const current = content.charCodeAt(offset);
-  const previousIsHighSurrogate = previous >= 55296 && previous <= 56319;
-  const currentIsLowSurrogate = current >= 56320 && current <= 57343;
-  return !(previousIsHighSurrogate && currentIsLowSurrogate);
-}
-function indexParents(parents) {
-  const byId = /* @__PURE__ */ new Map();
-  for (const parent of parents) {
-    if (parent.revisionId.trim().length === 0) {
-      throw new ReconstructionError("Parent revision ID must not be empty.");
-    }
-    if (byId.has(parent.revisionId)) {
-      throw new ReconstructionError(`Duplicate parent revision: ${parent.revisionId}.`);
-    }
-    if (parent.content.includes("\r")) {
-      throw new ReconstructionError("Parent content must use canonical LF.");
-    }
-    assertValidProvenance(parent.content, parent.provenance);
-    byId.set(parent.revisionId, parent);
-  }
-  return byId;
-}
-function reconstructFromRecipe(recipe, parents, currentRevisionId) {
-  if (recipe.version !== 1) {
-    throw new ReconstructionError("Unsupported reconstruction recipe version.");
-  }
-  if (currentRevisionId.trim().length === 0) {
-    throw new ReconstructionError("Current revision ID must not be empty.");
-  }
-  const parentsById = indexParents(parents);
-  const contentParts = [];
-  const provenanceParts = [];
-  for (const part of recipe.parts) {
-    if (part.type === "literal") {
-      if (part.text.length === 0) {
-        throw new ReconstructionError("Literal recipe parts must not be empty.");
-      }
-      if (part.text.includes("\r")) {
-        throw new ReconstructionError("Literal recipe text must use canonical LF.");
-      }
-      contentParts.push(part.text);
-      provenanceParts.push({
-        length: part.text.length,
-        sourceRevisionId: currentRevisionId
-      });
-      continue;
-    }
-    const parent = parentsById.get(part.parentRevisionId);
-    if (parent === void 0) {
-      throw new ReconstructionError(`Unknown parent revision: ${part.parentRevisionId}.`);
-    }
-    if (!Number.isSafeInteger(part.start) || !Number.isSafeInteger(part.end) || part.start < 0 || part.end <= part.start || part.end > parent.content.length) {
-      throw new ReconstructionError("Invalid source range in reconstruction recipe.");
-    }
-    if (!isUtf16Boundary(parent.content, part.start) || !isUtf16Boundary(parent.content, part.end)) {
-      throw new ReconstructionError("Source range must end on valid UTF-16 boundaries.");
-    }
-    contentParts.push(parent.content.slice(part.start, part.end));
-    provenanceParts.push(...sliceProvenance(parent.provenance, part.start, part.end));
-  }
-  const content = contentParts.join("");
-  const provenance = normalizeProvenanceRuns(provenanceParts);
-  assertValidProvenance(content, provenance);
-  return { content, provenance };
-}
-function validateReconstruction(recipe, parents, expectedContent, currentRevisionId) {
-  if (expectedContent.includes("\r")) {
-    throw new ReconstructionError("Expected snapshot must use canonical LF.");
-  }
-  const reconstructed = reconstructFromRecipe(recipe, parents, currentRevisionId);
-  if (reconstructed.content !== expectedContent) {
-    throw new ReconstructionError("Reconstruction recipe does not match the full snapshot.");
-  }
-  return reconstructed;
-}
-
-// ../../packages/sync-core/dist/diff-recipe.js
-var DEFAULT_MAX_TEXT_LENGTH = 2 * 1024 * 1024;
-function appendPart(parts, part) {
-  const previous = parts.at(-1);
-  if (previous?.type === "literal" && part.type === "literal") {
-    parts[parts.length - 1] = {
-      type: "literal",
-      text: previous.text + part.text
-    };
-    return;
-  }
-  if (previous?.type === "source" && part.type === "source" && previous.parentRevisionId === part.parentRevisionId && previous.end === part.start) {
-    parts[parts.length - 1] = {
-      type: "source",
-      parentRevisionId: previous.parentRevisionId,
-      start: previous.start,
-      end: part.end
-    };
-    return;
-  }
-  parts.push(part);
-}
-function assertCanonicalText(content, name) {
-  if (content.includes("\r")) {
-    throw new Error(`${name} must use canonical LF line endings.`);
-  }
-}
-function generateEditRecipe(parent, nextContent, options = {}) {
-  const maxTextLength = options.maxTextLength ?? DEFAULT_MAX_TEXT_LENGTH;
-  if (!Number.isSafeInteger(maxTextLength) || maxTextLength < 0) {
-    throw new Error("Diff text limit must be a non-negative safe integer.");
-  }
-  assertCanonicalText(parent.content, "Parent content");
-  assertCanonicalText(nextContent, "Next content");
-  assertValidProvenance(parent.content, parent.provenance);
-  if (parent.content.length > maxTextLength || nextContent.length > maxTextLength) {
-    throw new Error(`Text exceeds the ${maxTextLength} UTF-16 unit diff limit.`);
-  }
-  const parts = [];
-  let parentOffset = 0;
-  for (const change of diffChars(parent.content, nextContent)) {
-    const length = change.value.length;
-    if (change.added === true) {
-      if (length > 0) {
-        appendPart(parts, { type: "literal", text: change.value });
-      }
-      continue;
-    }
-    if (change.removed === true) {
-      parentOffset += length;
-      continue;
-    }
-    if (length > 0) {
-      appendPart(parts, {
-        type: "source",
-        parentRevisionId: parent.revisionId,
-        start: parentOffset,
-        end: parentOffset + length
-      });
-    }
-    parentOffset += length;
-  }
-  if (parentOffset !== parent.content.length) {
-    throw new Error("Diff did not consume the complete parent snapshot.");
-  }
-  const recipe = { version: 1, parts };
-  validateReconstruction(recipe, [parent], nextContent, "__havemind_recipe_validation__");
-  return recipe;
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ../../packages/protocol/dist/appearance-scope.js
@@ -15604,2165 +16261,6 @@ function validateRevisionPayloadAgainstHeader(headerInput, payloadInput) {
   return { header, payload };
 }
 
-// ../../packages/sync-core/dist/payload-codec.js
-var OPERATIONS = /* @__PURE__ */ new Set([
-  "initial-import",
-  "create",
-  "update",
-  "rename",
-  "restore",
-  "reconcile",
-  "delete"
-]);
-var PayloadDecodeError = class extends Error {
-  constructor(message, cause) {
-    super(message, cause === void 0 ? void 0 : { cause });
-    __publicField(this, "name", "PayloadDecodeError");
-  }
-};
-function decodeRevisionPayload(bytes) {
-  const text = typeof bytes === "string" ? bytes : new TextDecoder().decode(bytes);
-  let json2;
-  try {
-    json2 = JSON.parse(text);
-  } catch (error51) {
-    throw new PayloadDecodeError("Revision payload is not valid JSON.", error51);
-  }
-  if (!isRecord(json2)) {
-    throw new PayloadDecodeError("Revision payload must be a JSON object.");
-  }
-  if (json2.schemaVersion !== 1) {
-    throw new PayloadDecodeError("Unsupported revision payload schema version.");
-  }
-  if (typeof json2.operation !== "string" || !OPERATIONS.has(json2.operation)) {
-    throw new PayloadDecodeError("Revision payload has an unknown operation.");
-  }
-  const operation = json2.operation;
-  const path = assertCanonicalPath(json2.path, "path");
-  const previousPath = json2.previousPath === void 0 || json2.previousPath === null ? null : assertCanonicalPath(json2.previousPath, "previousPath");
-  if (json2.kind === "binary") {
-    if (operation === "delete") {
-      throw new PayloadDecodeError("A binary payload cannot be a delete tombstone.");
-    }
-    if (typeof json2.contentBase64 !== "string") {
-      throw new PayloadDecodeError("A binary revision must carry string contentBase64.");
-    }
-    const binaryContent = decodeBase64(json2.contentBase64);
-    return { operation, path, previousPath, kind: "binary", content: null, binaryContent };
-  }
-  let content;
-  if (operation === "delete") {
-    if (json2.content !== null && json2.content !== void 0) {
-      throw new PayloadDecodeError("A delete tombstone must not carry content.");
-    }
-    content = null;
-  } else {
-    if (typeof json2.content !== "string") {
-      throw new PayloadDecodeError("A content revision must carry string content.");
-    }
-    content = json2.content;
-  }
-  return { operation, path, previousPath, kind: "markdown", content, binaryContent: null };
-}
-function decodeBase64(base643) {
-  if (!isCanonicalBase64(base643)) {
-    throw new PayloadDecodeError("Binary revision content is not valid base64.");
-  }
-  let binary;
-  try {
-    binary = atob(base643);
-  } catch (error51) {
-    throw new PayloadDecodeError("Binary revision content is not valid base64.", error51);
-  }
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-function assertCanonicalPath(value, field) {
-  if (typeof value !== "string") {
-    throw new PayloadDecodeError(`Revision payload ${field} must be a string.`);
-  }
-  try {
-    if (canonicalizeVaultPath(value) !== value) {
-      throw new PayloadDecodeError(`Revision payload ${field} is not a canonical vault path.`);
-    }
-  } catch (error51) {
-    if (error51 instanceof PayloadDecodeError)
-      throw error51;
-    throw new PayloadDecodeError(`Revision payload ${field} is a reserved or invalid vault path.`, error51);
-  }
-  return value;
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// ../../packages/sync-core/dist/revision-envelope.js
-var DEFAULT_MAX_REVISION_PAYLOAD_BYTES = 512 * 1024;
-var RevisionPayloadTooLargeError = class extends Error {
-  constructor(path, byteLength, maxByteLength) {
-    super(`Note "${path}" is too large to sync: ${byteLength} bytes exceeds the ${maxByteLength}-byte limit.`);
-    __publicField(this, "path");
-    __publicField(this, "byteLength");
-    __publicField(this, "maxByteLength");
-    __publicField(this, "name", "RevisionPayloadTooLargeError");
-    this.path = path;
-    this.byteLength = byteLength;
-    this.maxByteLength = maxByteLength;
-  }
-};
-var REQUIRED_SEMANTICS = {
-  payloadFormat: "revision-payload-v1",
-  syncSemantics: "dag-cas-v1",
-  provenanceRecipe: "source-range-v1",
-  pathNormalization: "nfc-lowercase-v1"
-};
-async function buildRevisionEnvelope(input) {
-  const path = canonicalizeVaultPath(input.path);
-  const parentRevisionIds = [...new Set(input.parentRevisionIds)].sort();
-  const header = {
-    protocol: { major: PROTOCOL_VERSION.major, minor: PROTOCOL_VERSION.minor },
-    vaultId: input.identity.vaultId,
-    fileId: input.identity.fileId,
-    revisionId: input.revisionId,
-    parentRevisionIds,
-    expectedMemberId: input.identity.memberId,
-    expectedDeviceId: input.identity.deviceId,
-    payloadEncoding: "plaintext-json-v1",
-    semantics: REQUIRED_SEMANTICS
-  };
-  const payload = await buildInnerPayload(input, path);
-  validateRevisionPayloadAgainstHeader(header, payload);
-  const json2 = JSON.stringify(payload);
-  const bytes = new TextEncoder().encode(json2);
-  const maxPayloadBytes = input.maxPayloadBytes ?? DEFAULT_MAX_REVISION_PAYLOAD_BYTES;
-  if (bytes.byteLength > maxPayloadBytes) {
-    throw new RevisionPayloadTooLargeError(path, bytes.byteLength, maxPayloadBytes);
-  }
-  return {
-    header,
-    payloadBase64: bytesToBase64(bytes),
-    contentHash: await sha256Hex(bytes),
-    revisionId: input.revisionId,
-    fileId: input.identity.fileId,
-    idempotencyKey: input.idempotencyKey
-  };
-}
-async function buildInnerPayload(input, path) {
-  if (input.operation === "delete") {
-    return {
-      schemaVersion: 1,
-      operation: "delete",
-      path,
-      content: null,
-      plaintextHash: null,
-      recipe: null
-    };
-  }
-  if (input.kind === "binary") {
-    const bytes = input.binaryContent ?? new Uint8Array(0);
-    const base2 = {
-      schemaVersion: 1,
-      operation: input.operation,
-      kind: "binary",
-      path
-    };
-    if (input.operation === "rename") {
-      if (input.previousPath === void 0 || input.previousPath === null) {
-        throw new Error("A rename revision requires a previousPath.");
-      }
-      base2.previousPath = canonicalizeVaultPath(input.previousPath);
-    }
-    base2.contentBase64 = bytesToBase64(bytes);
-    base2.blobByteHash = await hashBlob(bytes);
-    base2.recipe = null;
-    return base2;
-  }
-  const content = canonicalizeMarkdown(input.content ?? "");
-  const base = {
-    schemaVersion: 1,
-    operation: input.operation,
-    path
-  };
-  if (input.operation === "rename") {
-    if (input.previousPath === void 0 || input.previousPath === null) {
-      throw new Error("A rename revision requires a previousPath.");
-    }
-    base.previousPath = canonicalizeVaultPath(input.previousPath);
-  }
-  base.content = content;
-  base.plaintextHash = await hashPlaintext(content);
-  base.recipe = buildLiteralRecipe(content);
-  return base;
-}
-function buildLiteralRecipe(content) {
-  const parts = content.length === 0 ? [] : [{ type: "literal", text: content }];
-  return { version: 1, parts };
-}
-function bytesToBase64(bytes) {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-// ../../packages/sync-core/dist/revision-dag.js
-var RevisionDagError = class extends Error {
-  constructor(code, message) {
-    super(message);
-    __publicField(this, "code");
-    this.code = code;
-    this.name = "RevisionDagError";
-  }
-};
-function fileKey(vaultId, fileId) {
-  return `${vaultId}\0${fileId}`;
-}
-function compareIds(left, right) {
-  if (left < right) {
-    return -1;
-  }
-  if (left > right) {
-    return 1;
-  }
-  return 0;
-}
-function sameStringArray(left, right) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-function sameRevision(left, right) {
-  return left.revisionId === right.revisionId && left.vaultId === right.vaultId && left.fileId === right.fileId && left.blobHash === right.blobHash && sameStringArray(left.parentRevisionIds, right.parentRevisionIds);
-}
-function assertNonEmpty(value, field) {
-  if (value.trim().length === 0) {
-    throw new RevisionDagError("INVALID_REVISION", `${field} must not be empty.`);
-  }
-}
-function assertParentList(node) {
-  const seen = /* @__PURE__ */ new Set();
-  for (const parentId of node.parentRevisionIds) {
-    assertNonEmpty(parentId, "Parent revision ID");
-    if (parentId === node.revisionId) {
-      throw new RevisionDagError("SELF_PARENT", "A revision cannot reference itself as a parent.");
-    }
-    if (seen.has(parentId)) {
-      throw new RevisionDagError("DUPLICATE_PARENT", `Duplicate parent revision: ${parentId}.`);
-    }
-    seen.add(parentId);
-  }
-  for (let index = 1; index < node.parentRevisionIds.length; index += 1) {
-    const previous = node.parentRevisionIds[index - 1];
-    const current = node.parentRevisionIds[index];
-    if (previous !== void 0 && current !== void 0 && previous > current) {
-      throw new RevisionDagError("UNSORTED_PARENTS", "Parent revision IDs must use canonical ascending order.");
-    }
-  }
-}
-function sameSet(values, expected) {
-  return values.size === expected.length && expected.every((value) => values.has(value));
-}
-var RevisionDag = class _RevisionDag {
-  constructor() {
-    __publicField(this, "revisions", /* @__PURE__ */ new Map());
-    __publicField(this, "headsByFile", /* @__PURE__ */ new Map());
-  }
-  get size() {
-    return this.revisions.size;
-  }
-  add(node) {
-    const existing = this.revisions.get(node.revisionId);
-    if (existing !== void 0) {
-      if (sameRevision(existing, node)) {
-        return "replayed";
-      }
-      throw new RevisionDagError("REVISION_ID_REUSE", `Revision ID ${node.revisionId} was reused with different bytes.`);
-    }
-    assertNonEmpty(node.revisionId, "Revision ID");
-    assertNonEmpty(node.vaultId, "Vault ID");
-    assertNonEmpty(node.fileId, "File ID");
-    assertNonEmpty(node.blobHash, "Blob hash");
-    assertParentList(node);
-    const key = fileKey(node.vaultId, node.fileId);
-    const currentHeads = this.headsByFile.get(key) ?? /* @__PURE__ */ new Set();
-    if (node.parentRevisionIds.length === 0) {
-      if (currentHeads.size > 0) {
-        throw new RevisionDagError("FILE_ALREADY_EXISTS", "Only the first revision of a file may have no parents.");
-      }
-    } else {
-      for (const parentId of node.parentRevisionIds) {
-        const parent = this.revisions.get(parentId);
-        if (parent === void 0) {
-          throw new RevisionDagError("PARENT_NOT_FOUND", `Parent revision ${parentId} does not exist.`);
-        }
-        if (parent.vaultId !== node.vaultId || parent.fileId !== node.fileId) {
-          throw new RevisionDagError("PARENT_FILE_MISMATCH", `Parent revision ${parentId} belongs to another vault or file.`);
-        }
-      }
-      if (node.parentRevisionIds.length >= 2 && !sameSet(currentHeads, node.parentRevisionIds)) {
-        throw new RevisionDagError("HEAD_SET_CHANGED", "Reconciliation parents no longer match the current head set.");
-      }
-    }
-    const nextHeads = new Set(currentHeads);
-    for (const parentId of node.parentRevisionIds) {
-      nextHeads.delete(parentId);
-    }
-    nextHeads.add(node.revisionId);
-    this.revisions.set(node.revisionId, {
-      ...node,
-      parentRevisionIds: [...node.parentRevisionIds]
-    });
-    this.headsByFile.set(key, nextHeads);
-    return "accepted";
-  }
-  addBatch(nodes) {
-    const positionById = /* @__PURE__ */ new Map();
-    nodes.forEach((node, index) => {
-      if (!positionById.has(node.revisionId)) {
-        positionById.set(node.revisionId, index);
-      }
-    });
-    nodes.forEach((node, index) => {
-      for (const parentId of node.parentRevisionIds) {
-        const parentPosition = positionById.get(parentId);
-        if (!this.revisions.has(parentId) && parentPosition !== void 0 && parentPosition >= index) {
-          throw new RevisionDagError("BATCH_NOT_TOPOLOGICAL", `Parent ${parentId} must appear before ${node.revisionId}.`);
-        }
-      }
-    });
-    const working = this.clone();
-    const results = nodes.map((node) => working.add(node));
-    this.revisions = working.revisions;
-    this.headsByFile = working.headsByFile;
-    return results;
-  }
-  getHeads(vaultId, fileId) {
-    return [...this.headsByFile.get(fileKey(vaultId, fileId)) ?? []].sort(compareIds);
-  }
-  clone() {
-    const copy = new _RevisionDag();
-    copy.revisions = new Map([...this.revisions].map(([revisionId, node]) => [
-      revisionId,
-      { ...node, parentRevisionIds: [...node.parentRevisionIds] }
-    ]));
-    copy.headsByFile = new Map([...this.headsByFile].map(([key, heads]) => [key, new Set(heads)]));
-    return copy;
-  }
-};
-
-// src/runtime/author-colors.ts
-var AUTHOR_COLORS = [
-  { token: "--havemind-author-1", light: "#1a73c2", dark: "#7cb6f0" },
-  { token: "--havemind-author-2", light: "#8a3fc0", dark: "#c99bf0" },
-  { token: "--havemind-author-3", light: "#0f8a6a", dark: "#5fd3ac" },
-  { token: "--havemind-author-4", light: "#c25a00", dark: "#f0a35f" },
-  { token: "--havemind-author-5", light: "#b03060", dark: "#ef92b6" },
-  { token: "--havemind-author-6", light: "#5a6ac0", dark: "#a3aef0" }
-];
-var AUTHOR_COLOR_TOKENS = AUTHOR_COLORS.map(
-  (color) => color.token
-);
-var INITIAL_IMPORT_COLOR_TOKEN = "--havemind-author-initial";
-var INITIAL_IMPORT_LABEL = "Initial import";
-function fnv1a(value) {
-  let hash2 = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash2 ^= value.charCodeAt(index);
-    hash2 = Math.imul(hash2, 16777619) >>> 0;
-  }
-  return hash2 >>> 0;
-}
-var FALLBACK_COLOR = {
-  token: "--havemind-author-1",
-  light: "#1a73c2",
-  dark: "#7cb6f0"
-};
-function authorColor(memberId) {
-  const index = fnv1a(memberId) % AUTHOR_COLORS.length;
-  return AUTHOR_COLORS[index] ?? FALLBACK_COLOR;
-}
-function authorColorToken(memberId) {
-  return authorColor(memberId).token;
-}
-
-// src/attribution/attribution.ts
-function defaultFormatTimestamp(timestamp) {
-  return new Date(timestamp).toISOString();
-}
-function assignColorTokens(authors, presentSources) {
-  const tokenByActorId = /* @__PURE__ */ new Map();
-  for (const sourceId of presentSources) {
-    const info = authors.get(sourceId);
-    if (info?.actor.kind === "author") {
-      tokenByActorId.set(
-        info.actor.actorId,
-        authorColorToken(info.actor.actorId)
-      );
-    }
-  }
-  return tokenByActorId;
-}
-function tooltipFor(author, format) {
-  return author.kind === "initial-import" ? INITIAL_IMPORT_LABEL : `${author.displayName} \xB7 ${format(author.timestamp)}`;
-}
-function prepareOverlay(input) {
-  if (!input.enabled) {
-    return "overlay-disabled";
-  }
-  if (input.contentHash !== input.headBlobHash) {
-    return "hash-mismatch";
-  }
-  if (provenanceLength(input.provenance) !== input.content.length) {
-    return "provenance-content-mismatch";
-  }
-  const presentSources = new Set(
-    input.provenance.map((run) => run.sourceRevisionId)
-  );
-  for (const sourceId of presentSources) {
-    if (!input.authors.has(sourceId)) {
-      return "unresolved-source";
-    }
-  }
-  const tokenByActorId = assignColorTokens(input.authors, presentSources);
-  const runs = [];
-  let offset = 0;
-  for (const run of input.provenance) {
-    const info = input.authors.get(run.sourceRevisionId);
-    if (info === void 0) {
-      return "unresolved-source";
-    }
-    const author = resolveAuthor(info, tokenByActorId);
-    runs.push({ from: offset, to: offset + run.length, author });
-    offset += run.length;
-  }
-  return { runs, legend: buildLegend(runs) };
-}
-function resolveAuthor(info, tokenByActorId) {
-  if (info.actor.kind === "initial-import") {
-    return {
-      kind: "initial-import",
-      actorId: null,
-      displayName: INITIAL_IMPORT_LABEL,
-      timestamp: info.timestamp,
-      colorToken: INITIAL_IMPORT_COLOR_TOKEN
-    };
-  }
-  return {
-    kind: "author",
-    actorId: info.actor.actorId,
-    displayName: info.actor.displayName,
-    timestamp: info.timestamp,
-    colorToken: tokenByActorId.get(info.actor.actorId) ?? authorColorToken(info.actor.actorId)
-  };
-}
-function buildLegend(runs) {
-  const legend = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const run of runs) {
-    const key = run.author.colorToken + "|" + run.author.displayName;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    legend.push({
-      colorToken: run.author.colorToken,
-      label: run.author.displayName
-    });
-  }
-  return legend;
-}
-function buildLivePreviewOverlay(input) {
-  const prepared = prepareOverlay(input);
-  if (typeof prepared === "string") {
-    return { visible: false, hiddenReason: prepared, segments: [], legend: [] };
-  }
-  const format = input.formatTimestamp ?? defaultFormatTimestamp;
-  const segments = prepared.runs.map((run) => {
-    const tooltip = tooltipFor(run.author, format);
-    return {
-      from: run.from,
-      to: run.to,
-      colorToken: run.author.colorToken,
-      underline: true,
-      tooltip,
-      ariaLabel: tooltip,
-      animate: !input.reducedMotion,
-      author: run.author
-    };
-  });
-  return {
-    visible: true,
-    hiddenReason: null,
-    segments,
-    legend: prepared.legend
-  };
-}
-function computeLineRanges(content) {
-  const parts = content.split("\n");
-  const ranges = [];
-  let offset = 0;
-  parts.forEach((part, index) => {
-    const hasNewline = index < parts.length - 1;
-    const start = offset;
-    const end = start + part.length + (hasNewline ? 1 : 0);
-    ranges.push({ start, end });
-    offset = end;
-  });
-  return ranges;
-}
-function blockCharRange(section, lineRanges) {
-  const first = lineRanges[section.lineStart];
-  const last = lineRanges[section.lineEnd];
-  if (first === void 0 || last === void 0 || section.lineEnd < section.lineStart) {
-    return null;
-  }
-  return { start: first.start, end: last.end };
-}
-function buildReadingViewOverlay(input, blocks) {
-  const prepared = prepareOverlay(input);
-  if (typeof prepared === "string") {
-    return { visible: false, hiddenReason: prepared, markers: [], legend: [] };
-  }
-  const format = input.formatTimestamp ?? defaultFormatTimestamp;
-  const lineRanges = computeLineRanges(input.content);
-  const markers = [];
-  for (const block of blocks) {
-    if (block.section === null) {
-      continue;
-    }
-    const range = blockCharRange(block.section, lineRanges);
-    if (range === null) {
-      continue;
-    }
-    const marker = buildBlockMarker(block.blockId, range, prepared.runs, {
-      format,
-      animate: !input.reducedMotion
-    });
-    if (marker !== null) {
-      markers.push(marker);
-    }
-  }
-  return {
-    visible: true,
-    hiddenReason: null,
-    markers,
-    legend: prepared.legend
-  };
-}
-function buildBlockMarker(blockId, range, runs, options) {
-  const authors = [];
-  const coveredByToken = /* @__PURE__ */ new Map();
-  for (const run of runs) {
-    const overlap = Math.min(run.to, range.end) - Math.max(run.from, range.start);
-    if (overlap <= 0) {
-      continue;
-    }
-    if (!authors.some((existing) => sameAuthor(existing, run.author))) {
-      authors.push(run.author);
-    }
-    coveredByToken.set(
-      run.author.colorToken,
-      (coveredByToken.get(run.author.colorToken) ?? 0) + overlap
-    );
-  }
-  if (authors.length === 0) {
-    return null;
-  }
-  const dominant = pickDominant(authors, coveredByToken);
-  const tooltip = authors.map((author) => tooltipFor(author, options.format)).join("; ");
-  return {
-    blockId,
-    colorToken: dominant.colorToken,
-    underline: true,
-    tooltip,
-    ariaLabel: tooltip,
-    animate: options.animate,
-    authors
-  };
-}
-function sameAuthor(left, right) {
-  return left.colorToken === right.colorToken && left.displayName === right.displayName;
-}
-function pickDominant(authors, coveredByToken) {
-  return [...authors].sort((left, right) => {
-    const leftCovered = coveredByToken.get(left.colorToken) ?? 0;
-    const rightCovered = coveredByToken.get(right.colorToken) ?? 0;
-    if (leftCovered !== rightCovered) {
-      return rightCovered - leftCovered;
-    }
-    return left.colorToken < right.colorToken ? -1 : 1;
-  })[0];
-}
-
-// src/runtime/activity-log.ts
-var DEFAULT_MAX_ENTRIES = 200;
-var REMOTE_COLOR_ID = "havemind-remote";
-var FEED_VAULT_ID = "havemind-feed";
-var ActivityLog = class {
-  constructor(options = {}) {
-    __publicField(this, "entries", []);
-    __publicField(this, "listeners", /* @__PURE__ */ new Set());
-    __publicField(this, "maxEntries");
-    this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
-  }
-  /** Records (or replaces by revisionId) an entry and notifies subscribers. */
-  record(entry) {
-    const next = this.entries.filter(
-      (existing) => existing.revisionId !== entry.revisionId
-    );
-    next.push(entry);
-    this.entries = next.length > this.maxEntries ? next.slice(next.length - this.maxEntries) : next;
-    for (const listener of this.listeners) {
-      listener();
-    }
-  }
-  /** All recorded entries in insertion order (oldest first). */
-  snapshot() {
-    return [...this.entries];
-  }
-  /** Subscribe to changes; returns an unsubscribe disposer. */
-  subscribe(listener) {
-    this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
-  }
-};
-function remoteAppliedToActivityEntry(info, timestamp) {
-  return {
-    revisionId: info.revisionId,
-    fileId: info.fileId,
-    path: info.path,
-    kind: toRemoteActivityKind(info.operation),
-    // Attribute precisely when the payload names the author; only fall back to
-    // the neutral 'remote' marker when it genuinely does not.
-    author: info.authorMembershipId === void 0 ? { kind: "remote" } : { kind: "member", membershipId: info.authorMembershipId },
-    timestamp,
-    hasContent: info.operation !== "delete"
-  };
-}
-function remoteAppliedToActivityEntryOrNull(info, timestamp) {
-  if (info.origin === "bootstrap") {
-    return null;
-  }
-  return remoteAppliedToActivityEntry(info, timestamp);
-}
-function toRemoteActivityKind(operation) {
-  switch (operation) {
-    case "create":
-      return "create";
-    case "update":
-      return "edit";
-    case "rename":
-      return "rename";
-    case "delete":
-      return "delete";
-    default:
-      return "edit";
-  }
-}
-function activityEntriesToRecords(entries, roster) {
-  const byMembership = new Map(
-    roster.map((member) => [member.membershipId, member])
-  );
-  return entries.map((entry) => {
-    const author = resolveAuthor2(entry.author, byMembership);
-    return {
-      revisionId: entry.revisionId,
-      // A non-empty placeholder: the feed never tracks a real vaultId today,
-      // but sync-core's RevisionDag (used by the append-only restore path)
-      // rejects an empty vaultId outright.
-      vaultId: FEED_VAULT_ID,
-      fileId: entry.fileId,
-      path: entry.path,
-      previousPath: null,
-      kind: entry.kind,
-      actor: author,
-      timestamp: entry.timestamp,
-      content: entry.hasContent ? "" : null,
-      // Non-empty placeholder for the same reason as vaultId above, the feed
-      // never tracks a real content hash, but RevisionDag rejects an empty
-      // blobHash. Keyed by revisionId so distinct entries stay distinct.
-      blobHash: `feed:${entry.revisionId}`,
-      parentRevisionIds: [],
-      provenance: [],
-      restoredFromRevisionId: null
-    };
-  });
-}
-function resolveAuthor2(author, byMembership) {
-  if (author.kind === "initial-import") {
-    return { kind: "initial-import" };
-  }
-  if (author.kind === "member") {
-    const member = byMembership.get(author.membershipId);
-    return {
-      kind: "author",
-      actorId: author.membershipId,
-      displayName: member?.displayName ?? "Unknown member"
-    };
-  }
-  return { kind: "author", actorId: REMOTE_COLOR_ID, displayName: "Remote" };
-}
-
-// src/attribution/overlay-source.ts
-var WHOLE_FILE_ATTRIBUTION = "havemind:whole-file-attribution";
-function newestByTimestamp(records) {
-  let newest = null;
-  for (const record2 of records) {
-    if (newest === null || record2.timestamp >= newest.timestamp) {
-      newest = record2;
-    }
-  }
-  return newest;
-}
-function toOverlayActor(actor) {
-  if (actor.kind === "initial-import") {
-    return { kind: "initial-import" };
-  }
-  return {
-    kind: "author",
-    actorId: actor.actorId,
-    displayName: actor.displayName
-  };
-}
-function buildFileOverlayInput(request) {
-  const { path } = request;
-  if (!request.enabled || path === null) {
-    return null;
-  }
-  if (request.content.length === 0) {
-    return null;
-  }
-  const forPath = request.entries.filter((entry) => entry.path === path);
-  if (forPath.length === 0) {
-    return null;
-  }
-  const newest = newestByTimestamp(
-    activityEntriesToRecords(forPath, request.roster)
-  );
-  if (newest === null) {
-    return null;
-  }
-  return {
-    enabled: true,
-    content: request.content,
-    contentHash: WHOLE_FILE_ATTRIBUTION,
-    headBlobHash: WHOLE_FILE_ATTRIBUTION,
-    provenance: [
-      { length: request.content.length, sourceRevisionId: newest.revisionId }
-    ],
-    authors: /* @__PURE__ */ new Map([
-      [
-        newest.revisionId,
-        {
-          actor: toOverlayActor(newest.actor),
-          timestamp: newest.timestamp
-        }
-      ]
-    ]),
-    reducedMotion: request.reducedMotion,
-    ...request.formatTimestamp === void 0 ? {} : { formatTimestamp: request.formatTimestamp }
-  };
-}
-
-// src/attribution/editor-extension.ts
-var import_state = require("@codemirror/state");
-var import_view = require("@codemirror/view");
-var import_obsidian = require("obsidian");
-var AUTHOR_MARK_CLASS = "havemind-author-mark";
-var AUTHOR_MARK_ANIMATE_CLASS = "havemind-author-mark-animate";
-function pathForEditorView(view) {
-  const info = view.state.field(import_obsidian.editorInfoField, false);
-  return info?.file?.path ?? null;
-}
-function buildAuthorDecorations(overlay, docLength) {
-  if (overlay === null || !overlay.visible) {
-    return import_view.Decoration.none;
-  }
-  const builder = new import_state.RangeSetBuilder();
-  for (const segment of overlay.segments) {
-    const from = Math.min(Math.max(segment.from, 0), docLength);
-    const to = Math.min(Math.max(segment.to, 0), docLength);
-    if (to <= from) {
-      continue;
-    }
-    builder.add(
-      from,
-      to,
-      import_view.Decoration.mark({
-        class: segment.animate ? `${AUTHOR_MARK_CLASS} ${AUTHOR_MARK_ANIMATE_CLASS}` : AUTHOR_MARK_CLASS,
-        attributes: {
-          title: segment.tooltip,
-          "aria-label": segment.ariaLabel,
-          "data-havemind-author": segment.author.displayName,
-          // The token name only, the concrete light/dark value lives in
-          // `styles.css`, never in the note or the decoration.
-          style: `--havemind-overlay-color: var(${segment.colorToken});`
-        }
-      })
-    );
-  }
-  return builder.finish();
-}
-var OverlayDecorationState = class {
-  constructor(source) {
-    __publicField(this, "source", source);
-    __publicField(this, "decorations", import_view.Decoration.none);
-    __publicField(this, "built", false);
-    __publicField(this, "path", null);
-    __publicField(this, "inputs", []);
-  }
-  next(update) {
-    if (this.source.enabled?.() === false) {
-      this.built = false;
-      this.decorations = import_view.Decoration.none;
-      return this.decorations;
-    }
-    const inputs = this.source.revision?.();
-    const unchanged = inputs !== void 0 && this.built && !update.docChanged && update.path === this.path && inputs.length === this.inputs.length && inputs.every((value, index) => Object.is(value, this.inputs[index]));
-    if (unchanged) return this.decorations;
-    this.built = true;
-    this.path = update.path;
-    this.inputs = inputs ?? [];
-    this.decorations = buildAuthorDecorations(
-      this.source.overlayFor(update.path, update.doc.toString()),
-      update.doc.length
-    );
-    return this.decorations;
-  }
-};
-function createAuthorOverlayExtension(source) {
-  return import_view.ViewPlugin.fromClass(
-    class {
-      constructor(view) {
-        __publicField(this, "decorations");
-        __publicField(this, "state", new OverlayDecorationState(source));
-        this.decorations = this.state.next({
-          docChanged: true,
-          path: pathForEditorView(view),
-          doc: view.state.doc
-        });
-      }
-      update(update) {
-        this.decorations = this.state.next({
-          docChanged: update.docChanged,
-          path: pathForEditorView(update.view),
-          doc: update.view.state.doc
-        });
-      }
-    },
-    { decorations: (value) => value.decorations }
-  );
-}
-
-// src/attribution/reading-view.ts
-var AUTHOR_BLOCK_CLASS = "havemind-author-block";
-var AUTHOR_BLOCK_ANIMATE_CLASS = "havemind-author-block-animate";
-var AUTHOR_BLOCK_ATTRIBUTE = "data-havemind-authors";
-function applyReadingMarker(element, marker) {
-  element.addClass(AUTHOR_BLOCK_CLASS);
-  if (marker.animate) {
-    element.addClass(AUTHOR_BLOCK_ANIMATE_CLASS);
-  }
-  element.setAttribute(
-    AUTHOR_BLOCK_ATTRIBUTE,
-    marker.authors.map((author) => author.displayName).join(", ")
-  );
-  element.setAttribute("title", marker.tooltip);
-  element.setAttribute("aria-label", marker.ariaLabel);
-  element.style.setProperty(
-    "--havemind-overlay-color",
-    `var(${marker.colorToken})`
-  );
-}
-function createAuthorReadingViewProcessor(source) {
-  return (element, context) => {
-    const section = context.getSectionInfo(element);
-    if (section === null) {
-      return;
-    }
-    const overlay = source.overlayFor(context.sourcePath, section.text, section);
-    if (overlay === null || !overlay.visible) {
-      return;
-    }
-    const marker = overlay.markers[0];
-    if (marker === void 0) {
-      return;
-    }
-    applyReadingMarker(element, marker);
-  };
-}
-
-// src/onboarding/invite.ts
-var INVITE_ENVELOPE_VERSION = 1;
-var ENVELOPE_PREFIX = "v1.";
-var ENVELOPE_PATTERN = /^v1\.([A-Za-z0-9_-]+)$/u;
-var BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
-var INVITATION_PREFIX = "hm_it_";
-var TOKEN_PAYLOAD_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
-var TOKEN_BYTE_LENGTH = 32;
-var MAX_ENVELOPE_LENGTH = 1024;
-var InviteFormatError = class extends Error {
-  constructor() {
-    super("The secure invitation has an invalid or non-canonical format.");
-    __publicField(this, "code", "invalid-invitation-envelope");
-    __publicField(this, "name", "InviteFormatError");
-  }
-};
-function buildInviteEnvelope(input) {
-  assertCanonicalHttpsOrigin(input.serverOrigin);
-  assertInvitationToken(input.invitationToken);
-  return encodeEnvelope({
-    version: INVITE_ENVELOPE_VERSION,
-    serverOrigin: input.serverOrigin,
-    invitationToken: input.invitationToken
-  });
-}
-function parseInviteEnvelope(value) {
-  if (value.length > MAX_ENVELOPE_LENGTH) throw new InviteFormatError();
-  const match = ENVELOPE_PATTERN.exec(value);
-  const payload = match?.[1];
-  if (!payload) throw new InviteFormatError();
-  let decoded;
-  try {
-    const bytes = decodeBase64Url(payload);
-    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new InviteFormatError();
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(decoded);
-  } catch {
-    throw new InviteFormatError();
-  }
-  const envelope = parseEnvelopeRecord(parsed);
-  if (encodeEnvelope(envelope) !== value) throw new InviteFormatError();
-  return envelope;
-}
-function isSafePassiveJoinProtocolData(data) {
-  const keys = Object.keys(data);
-  return keys.length === 1 && data.action === "havemind-join";
-}
-function parseEnvelopeRecord(value) {
-  if (!isRecord2(value)) throw new InviteFormatError();
-  const keys = Object.keys(value);
-  if (keys.length !== 3 || !keys.includes("version") || !keys.includes("serverOrigin") || !keys.includes("invitationToken") || value.version !== INVITE_ENVELOPE_VERSION || typeof value.serverOrigin !== "string" || typeof value.invitationToken !== "string") {
-    throw new InviteFormatError();
-  }
-  assertCanonicalHttpsOrigin(value.serverOrigin);
-  assertInvitationToken(value.invitationToken);
-  return {
-    version: INVITE_ENVELOPE_VERSION,
-    serverOrigin: value.serverOrigin,
-    invitationToken: value.invitationToken
-  };
-}
-function encodeEnvelope(envelope) {
-  const canonicalJson = JSON.stringify({
-    version: envelope.version,
-    serverOrigin: envelope.serverOrigin,
-    invitationToken: envelope.invitationToken
-  });
-  return `${ENVELOPE_PREFIX}${encodeBase64Url(
-    new TextEncoder().encode(canonicalJson)
-  )}`;
-}
-function assertCanonicalHttpsOrigin(value) {
-  let url2;
-  try {
-    url2 = new URL(value);
-  } catch {
-    throw new InviteFormatError();
-  }
-  if (url2.protocol !== "https:" || url2.username !== "" || url2.password !== "" || url2.pathname !== "/" || url2.search !== "" || url2.hash !== "" || url2.origin !== value) {
-    throw new InviteFormatError();
-  }
-}
-function assertInvitationToken(value) {
-  if (!value.startsWith(INVITATION_PREFIX)) throw new InviteFormatError();
-  const payload = value.slice(INVITATION_PREFIX.length);
-  if (!TOKEN_PAYLOAD_PATTERN.test(payload)) throw new InviteFormatError();
-  let decoded;
-  try {
-    decoded = decodeBase64Url(payload);
-  } catch {
-    throw new InviteFormatError();
-  }
-  if (decoded.byteLength !== TOKEN_BYTE_LENGTH || encodeBase64Url(decoded) !== payload) {
-    throw new InviteFormatError();
-  }
-}
-function encodeBase64Url(bytes) {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
-}
-function decodeBase64Url(value) {
-  if (!BASE64URL_PATTERN.test(value) || value.length % 4 === 1) {
-    throw new InviteFormatError();
-  }
-  const base643 = value.replaceAll("-", "+").replaceAll("_", "/");
-  const padded = base643.padEnd(base643.length + (4 - base643.length % 4) % 4, "=");
-  const binary = atob(padded);
-  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  if (encodeBase64Url(bytes) !== value) throw new InviteFormatError();
-  return bytes;
-}
-function isRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// src/runtime/producer-recovery.ts
-function validRecovery(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const row = value;
-  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string" && s.length > 0);
-  if (typeof row.id !== "string" || !row.id || !["apply", "resolution"].includes(String(row.kind)) || !strings(row.fileIds) || !strings(row.discardRevisionIds) || typeof row.state !== "object" || row.state === null) return false;
-  if (row.applyState !== void 0) {
-    if (typeof row.applyState !== "object" || row.applyState === null) return false;
-    const saved = row.applyState;
-    if (!["pathOwners", "baseHashes", "baseContents"].every((key) => typeof saved[key] === "object" && saved[key] !== null && !Array.isArray(saved[key]) && Object.values(saved[key]).every((value2) => typeof value2 === "string"))) return false;
-  }
-  const state = row.state;
-  if (!Array.isArray(state.mappings) || typeof state.heads !== "object" || state.heads === null || Array.isArray(state.heads)) return false;
-  return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
-    if (typeof m !== "object" || m === null) return false;
-    const item = m;
-    return ["fileId", "path", "collisionKey", "contentHash"].every((key) => typeof item[key] === "string") && (row.kind !== "resolution" || item.contentKind === "binary" || typeof item.content === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
-  });
-}
-
-// src/runtime/sync-state.ts
-var PAYLOAD_MISSING_REASON = "payload-missing";
-var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
-var QUARANTINED_ENVELOPE_BUDGET_BYTES = 5 * 1024 * 1024;
-var FAILED_TO_QUEUE_PREFIX = "failed-to-queue:";
-function failedToQueueRevisionId(path) {
-  return `${FAILED_TO_QUEUE_PREFIX}${path}`;
-}
-function parseFailedToQueuePath(revisionId) {
-  if (!revisionId.startsWith(FAILED_TO_QUEUE_PREFIX)) return null;
-  const path = revisionId.slice(FAILED_TO_QUEUE_PREFIX.length);
-  return path.length === 0 ? null : path;
-}
-function emptyState() {
-  return {
-    version: 1,
-    cursor: 0,
-    outbox: [],
-    locallyAuthored: [],
-    deferred: [],
-    quarantine: [],
-    pathOwners: {},
-    baseHashes: {},
-    baseContents: {},
-    conflictArtifacts: {},
-    quarantinedEnvelopes: {}
-  };
-}
-function parentIdsFromHeader(header) {
-  if (!isRecord3(header)) return [];
-  const ids = header.parentRevisionIds;
-  if (!Array.isArray(ids)) return [];
-  return ids.filter((id) => typeof id === "string");
-}
-function base64ByteLength(base643) {
-  const length = base643.length;
-  if (length === 0) return 0;
-  let padding = 0;
-  if (base643.endsWith("==")) padding = 2;
-  else if (base643.endsWith("=")) padding = 1;
-  return Math.floor(length * 3 / 4) - padding;
-}
-var DurableSyncState = class {
-  constructor(options) {
-    __publicField(this, "persist");
-    __publicField(this, "maxLocallyAuthored");
-    __publicField(this, "now");
-    __publicField(this, "envelopeBudgetBytes");
-    /**
-     * Optional out-of-band payload store (arch P1). Undefined → payloads always
-     * stay inline in `data.json` (legacy behaviour, unchanged). Present → payload
-     * bytes are mirrored here and stripped from the on-disk blob; every access is
-     * wrapped in a fallible guard so an unavailable store degrades to inline.
-     */
-    __publicField(this, "payloadStore");
-    __publicField(this, "keepBaseContents");
-    /**
-     * The set of outbox/stash `revisionId`s whose payload currently lives in the
-     * payload store (so the on-disk form strips their inline bytes). Populated on
-     * enqueue/requeue, on load rehydration, and on legacy-blob migration; pruned
-     * on receipt/discard/eviction. A revisionId absent here keeps its bytes inline
-     * (the fallback path), so the disk form only ever strips a payload the store
-     * actually holds, never one that would then be irrecoverable.
-     */
-    __publicField(this, "externalized", /* @__PURE__ */ new Set());
-    __publicField(this, "cache", null);
-    /**
-     * Set when the primary blob was present-but-corrupt with an UNRECOVERABLE
-     * outbox (the queue container itself could not be read), no usable `.bak`
-     * existed, and the raw bytes were preserved to a sidecar for manual recovery
-     * (GAP-1). It is a purely OBSERVABLE signal (see {@link isRecoveryRequired}),
-     * never a save lock, the instance resumes from a clean, writable empty state
-     * and the primary is rewritten so a restart never re-locks. Surfaced to the UI
-     * so the user sees "local queue needs recovery" rather than silently assuming
-     * the queue drained. A salvageable corruption (readable outbox, only a
-     * non-outbox core field damaged) never sets this: the queue is kept and the
-     * cleaned state is written back, so nothing is at risk.
-     */
-    __publicField(this, "recoveryRequired", false);
-    /**
-     * De-dupes concurrent cold-cache loads. Without it, two callers that both find
-     * a null cache each `await persist.load()`; the later resolution re-parses the
-     * on-disk blob and clobbers any cache mutation the first caller made during the
-     * await (an enqueued revision, an advanced cursor), a silent dropped push at
-     * connect (rule 3). All concurrent callers share this single in-flight load.
-     */
-    __publicField(this, "loadPromise", null);
-    /**
-     * Serializes every read-modify-write critical section against the shared
-     * in-memory cache. Each mutating method reads the cache (`ensureLoaded`) and
-     * writes it back (`mutate`) as a `{ ...state, field }` spread, with `await`
-     * points in between. On a WARM cache `ensureLoaded` reads synchronously, so
-     * two sections that overlap each capture the SAME snapshot and the later
-     * `mutate` silently drops the earlier one's write, a lost update. In the
-     * two-device sync loop this dropped a file's base CONTENT while keeping its
-     * base HASH, which then made the three-way merge (it needs the ancestor
-     * content) fail and spawn a SPURIOUS conflict copy (rule 3: zero silent
-     * overwrites / data loss). This is the in-memory analogue of the data.json
-     * `PluginDataMutex`, which only guards the on-disk save, not the cache RMW.
-     * Chaining each section on this single tail makes it run to completion before
-     * the next one reads, so no committed write is ever clobbered. Read-only
-     * accessors stay off the queue: `mutate` swaps the whole cache object in one
-     * synchronous assignment, so any read sees a complete, consistent snapshot.
-     */
-    __publicField(this, "mutationTail", Promise.resolve());
-    this.persist = options.persist;
-    this.maxLocallyAuthored = options.maxLocallyAuthored ?? DEFAULT_MAX_LOCALLY_AUTHORED;
-    this.now = options.now ?? (() => Date.now());
-    this.envelopeBudgetBytes = options.quarantinedEnvelopeBudgetBytes ?? QUARANTINED_ENVELOPE_BUDGET_BYTES;
-    this.payloadStore = options.payloadStore;
-    this.keepBaseContents = options.keepBaseContents ?? true;
-  }
-  /** `state` without base contents when they are not kept (A2). */
-  trimmed(state) {
-    return this.keepBaseContents || Object.keys(state.baseContents).length === 0 ? state : { ...state, baseContents: {} };
-  }
-  /**
-   * Whether the last load found a present-but-corrupt blob with an unparseable
-   * non-empty outbox and no usable backup (GAP-1). While true, no mutation is
-   * persisted (the corrupt blob and its sidecar copy are left intact), and the
-   * UI/status should tell the user the local queue needs recovery.
-   */
-  isRecoveryRequired() {
-    return this.recoveryRequired;
-  }
-  async pendingProducerRecoveries() {
-    return (await this.ensureLoaded()).producerRecovery ?? [];
-  }
-  async startProducerRecovery(record2, replacement) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if ((state.producerRecovery ?? []).some((r) => r.fileIds.some((id) => record2.fileIds.includes(id)))) {
-        throw new Error("Producer recovery must finish before another transaction.");
-      }
-      const ids = new Set(record2.discardRevisionIds);
-      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
-      if (originals.length !== ids.size || this.hasUncoveredChildren(state, ids)) return false;
-      if (replacement !== void 0 && (ids.has(replacement.revisionId) || parentIdsFromHeader(replacement.header).some((id) => ids.has(id)))) return false;
-      await this.mutate({
-        ...state,
-        outbox: [...state.outbox.filter((e) => !ids.has(e.revisionId)), ...replacement === void 0 ? [] : [{ ...replacement, enqueuedAt: this.now() }]],
-        producerRecovery: [...state.producerRecovery ?? [], record2.kind === "apply" ? {
-          ...record2,
-          applyState: {
-            pathOwners: Object.fromEntries(Object.entries(state.pathOwners).filter(([, id]) => record2.fileIds.includes(id))),
-            baseHashes: Object.fromEntries(Object.entries(state.baseHashes).filter(([id]) => record2.fileIds.includes(id))),
-            baseContents: Object.fromEntries(Object.entries(state.baseContents).filter(([id]) => record2.fileIds.includes(id)))
-          }
-        } : record2],
-        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: originals.map((e) => ({ ...e, payloadExternalized: false })) } }
-      });
-      return true;
-    });
-  }
-  hasUncoveredChildren(state, ids) {
-    return [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((e) => !ids.has(e.revisionId) && parentIdsFromHeader(e.header).some((id) => ids.has(id)));
-  }
-  async recoverProducerQueue(id) {
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const record2 = state.producerRecovery?.find((r) => r.id === id);
-      if (record2 === void 0) return;
-      if (record2.kind === "resolution") {
-        const pathOwners = { ...state.pathOwners };
-        const baseHashes = { ...state.baseHashes };
-        const baseContents = { ...state.baseContents };
-        for (const fileId of record2.fileIds) {
-          const mapping = record2.state.mappings.find((m) => m.fileId === fileId);
-          for (const [path, owner] of Object.entries(pathOwners)) {
-            if (owner === fileId && path !== mapping?.path) delete pathOwners[path];
-          }
-          if (mapping === void 0) {
-            delete baseHashes[fileId];
-            delete baseContents[fileId];
-          } else {
-            pathOwners[mapping.path] = fileId;
-            baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
-            if (mapping.contentKind !== "binary" && mapping.content !== void 0 && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
-          }
-        }
-        await this.mutate({ ...state, pathOwners, baseHashes, baseContents });
-        return;
-      }
-      const ids = new Set(record2.discardRevisionIds);
-      if (this.hasUncoveredChildren(state, ids)) throw new Error("Recovery would orphan pending work.");
-      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
-      const undo = record2.applyState;
-      await this.mutate({
-        ...state,
-        ...undo === void 0 ? {} : {
-          pathOwners: { ...Object.fromEntries(Object.entries(state.pathOwners).filter(([, fileId]) => !record2.fileIds.includes(fileId))), ...undo.pathOwners },
-          baseHashes: { ...Object.fromEntries(Object.entries(state.baseHashes).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseHashes },
-          baseContents: { ...Object.fromEntries(Object.entries(state.baseContents).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseContents }
-        },
-        outbox: state.outbox.filter((e) => !ids.has(e.revisionId)),
-        ...originals.length === 0 ? {} : { reconciliationBackups: {
-          ...state.reconciliationBackups,
-          [id]: [...state.reconciliationBackups?.[id] ?? [], ...originals.map((e) => ({ ...e, payloadExternalized: false }))]
-        } }
-      });
-    });
-  }
-  async completeProducerRecovery(id) {
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({ ...state, producerRecovery: (state.producerRecovery ?? []).filter((r) => r.id !== id) });
-    });
-  }
-  async enqueueAutomaticMerge(envelope) {
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const record2 = state.producerRecovery?.find((r) => r.kind === "apply" && r.fileIds.includes(envelope.fileId));
-      if (record2 === void 0) throw new Error("Automatic merge requires a durable apply transaction.");
-      await this.mutate({
-        ...state,
-        outbox: [...state.outbox, { ...envelope, enqueuedAt: this.now() }],
-        producerRecovery: state.producerRecovery?.map((r) => r.id === record2.id ? { ...r, discardRevisionIds: [...r.discardRevisionIds, envelope.revisionId] } : r) ?? []
-      });
-    });
-  }
-  async loadCursor() {
-    return (await this.ensureLoaded()).cursor;
-  }
-  async saveCursor(sequence) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({ ...state, cursor: sequence });
-    });
-  }
-  async listOutbox() {
-    const state = await this.ensureLoaded();
-    return state.outbox.map((envelope) => {
-      const parentRevisionIds = parentIdsFromHeader(envelope.header);
-      return {
-        revisionId: envelope.revisionId,
-        fileId: envelope.fileId,
-        contentHash: envelope.contentHash,
-        payloadBytes: base64ByteLength(envelope.payloadBase64),
-        // Omitted when empty so a root create carries no dependency (and existing
-        // exact-shape assertions on parentless rows are unchanged).
-        ...parentRevisionIds.length > 0 ? { parentRevisionIds } : {}
-      };
-    });
-  }
-  /**
-   * Two peers can independently publish byte-identical merges of the same heads.
-   * The server accepts one and rejects the other with HEAD_SET_CHANGED. After
-   * applying the accepted merge, discard only a redundant leaf in our queue.
-   * Never claim the rejected ID was accepted, and never orphan a queued child.
-   */
-  async retireEquivalentMerges(event) {
-    const remoteParents = event.revision.parentRevisionIds ?? [];
-    if (remoteParents.length < 2) return;
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const dependentParents = new Set([...state.outbox, ...Object.values(state.quarantinedEnvelopes)].flatMap((entry) => parentIdsFromHeader(entry.header)));
-      const retired = state.outbox.filter((entry) => {
-        const parents = parentIdsFromHeader(entry.header);
-        return entry.fileId === event.revision.fileId && entry.contentHash === event.revision.contentHash && parents.length >= 2 && parents.every((id) => remoteParents.includes(id)) && !dependentParents.has(entry.revisionId);
-      });
-      if (retired.length === 0) return;
-      const ids = new Set(retired.map((entry) => entry.revisionId));
-      await this.mutate({
-        ...state,
-        outbox: state.outbox.filter((entry) => !ids.has(entry.revisionId)),
-        reconciliationBackups: {
-          ...state.reconciliationBackups,
-          [event.revision.revisionId]: [
-            ...state.reconciliationBackups?.[event.revision.revisionId] ?? [],
-            ...retired.map((entry) => ({ ...entry, payloadExternalized: false }))
-          ]
-        }
-      });
-    });
-  }
-  async recordPushReceipt(receipt) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const outbox = state.outbox.filter(
-        (envelope) => envelope.revisionId !== receipt.revisionId
-      );
-      await this.mutate({
-        ...state,
-        outbox,
-        locallyAuthored: this.rememberAuthored(
-          state.locallyAuthored,
-          receipt.revisionId
-        )
-      });
-      await this.dropPayload(receipt.revisionId);
-    });
-  }
-  async quarantineOutboxItem(revisionId, reason) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const failed = state.outbox.find(
-        (envelope) => envelope.revisionId === revisionId
-      );
-      const outbox = state.outbox.filter(
-        (envelope) => envelope.revisionId !== revisionId
-      );
-      const entry = {
-        revisionId,
-        fileId: failed?.fileId ?? "",
-        reason,
-        ...failed === void 0 ? {} : { parentRevisionIds: parentIdsFromHeader(failed.header) }
-      };
-      const quarantine = [
-        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
-        entry
-      ];
-      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
-      if (failed !== void 0) {
-        quarantinedEnvelopes[revisionId] = failed;
-      }
-      const budgeted = this.evictStashesOverBudget(quarantinedEnvelopes);
-      for (const evictedId of Object.keys(quarantinedEnvelopes)) {
-        if (!(evictedId in budgeted)) {
-          await this.dropPayload(evictedId);
-        }
-      }
-      await this.mutate({
-        ...state,
-        outbox,
-        quarantine,
-        quarantinedEnvelopes: budgeted
-      });
-    });
-  }
-  /**
-   * Returns a copy of `envelopes` trimmed to the byte budget (MAJOR 4). Object
-   * key order is insertion order, so iterating from the front evicts the OLDEST
-   * stashes until the summed decoded payload bytes fit. A single stash larger
-   * than the whole budget is evicted too, its row survives and Retry re-commits
-   * from disk, which is the only recovery once the bytes are dropped.
-   */
-  evictStashesOverBudget(envelopes) {
-    const entries = Object.entries(envelopes);
-    let total = entries.reduce(
-      (sum, [, env]) => sum + base64ByteLength(env.payloadBase64),
-      0
-    );
-    if (total <= this.envelopeBudgetBytes) return envelopes;
-    const trimmed = { ...envelopes };
-    for (const [key, env] of entries) {
-      if (total <= this.envelopeBudgetBytes) break;
-      total -= base64ByteLength(env.payloadBase64);
-      delete trimmed[key];
-    }
-    return trimmed;
-  }
-  /**
-   * Record a durable "failed to queue" entry (SND-02): a local change whose
-   * commit-path enqueue permanently failed (e.g. a transient readText/saveData
-   * failure that survived a bounded re-arm), so it never reached the outbox and
-   * has no envelope to retry. It reuses the SND-01 quarantine machinery so the
-   * send-queue panel surfaces it alongside server-rejected sends under the
-   * distinguishable reason `failed-to-queue`, keyed by a synthetic revisionId
-   * derived from the path (see {@link failedToQueueRevisionId}) so repeated
-   * failures for the same file coalesce into one row rather than flooding the
-   * panel. Nothing is ever silently dropped.
-   *
-   * Discard behaves identically to a server-rejected send, but Retry does NOT:
-   * a failed-to-queue row has no stashed envelope (it never reached the outbox),
-   * so `requeueQuarantined` is inert for it. Retry instead re-triggers the
-   * commit chain for the path from disk (MAJOR 2, routed by the caller via
-   * {@link parseFailedToQueuePath}), the on-disk content is the source of truth.
-   */
-  async recordFailedToQueue(path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const revisionId = failedToQueueRevisionId(path);
-      const entry = {
-        revisionId,
-        fileId: path,
-        reason: "failed-to-queue"
-      };
-      const quarantine = [
-        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
-        entry
-      ];
-      await this.mutate({ ...state, quarantine });
-    });
-  }
-  async listQuarantine() {
-    return (await this.ensureLoaded()).quarantine;
-  }
-  /**
-   * The parents of a quarantined revision, or undefined when `revisionId` is
-   * not quarantined or its parents were never recorded (a legacy row whose
-   * stash was evicted). The producer walks past a quarantined head with this.
-   */
-  async quarantinedParents(revisionId) {
-    const state = await this.ensureLoaded();
-    const row = state.quarantine.find((item) => item.revisionId === revisionId);
-    if (row === void 0) return void 0;
-    if (row.parentRevisionIds !== void 0) return row.parentRevisionIds;
-    const stashed = state.quarantinedEnvelopes[revisionId];
-    return stashed === void 0 ? void 0 : parentIdsFromHeader(stashed.header);
-  }
-  /** Includes unsent authored revisions; used to distinguish local work from history replay. */
-  async hasAuthoredRevision(revisionId) {
-    const state = await this.ensureLoaded();
-    return state.locallyAuthored.includes(revisionId) || state.outbox.some((entry) => entry.revisionId === revisionId);
-  }
-  async isLocallyAuthored(revisionId) {
-    const state = await this.ensureLoaded();
-    return state.locallyAuthored.includes(revisionId);
-  }
-  /**
-   * Synchronous owner lookup against the warmed cache. Returns the fileId that
-   * owns `path`, or null if Havemind has not materialized a file there. The
-   * vault adapter uses this to update already-synced files in place while
-   * routing genuine collisions (a foreign file at the path) to conflicts.
-   */
-  fileIdAtPath(path) {
-    return this.cache?.pathOwners[path] ?? null;
-  }
-  /**
-   * Records an applied revision: `fileId` owns `path`, with base `hash` and,
-   * for markdown, base `content`. One write instead of three (P1), and never a
-   * half-recorded base after a crash between them.
-   */
-  async recordApplied(fileId, path, hash2, content) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        pathOwners: { ...state.pathOwners, [path]: fileId },
-        baseHashes: { ...state.baseHashes, [fileId]: hash2 },
-        ...content === null ? {} : { baseContents: { ...state.baseContents, [fileId]: content } }
-      });
-    });
-  }
-  async recordPathOwner(fileId, path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        pathOwners: { ...state.pathOwners, [path]: fileId }
-      });
-    });
-  }
-  async forgetPath(path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(path in state.pathOwners)) return;
-      const pathOwners = { ...state.pathOwners };
-      delete pathOwners[path];
-      await this.mutate({ ...state, pathOwners });
-    });
-  }
-  /**
-   * Synchronous lookup of the last synced base content hash for a file against
-   * the warmed cache, or null when Havemind has no recorded base yet. The vault
-   * adapter uses this to detect whether the on-disk content has diverged from
-   * the shared base before applying an incoming remote revision.
-   */
-  baseHashFor(fileId) {
-    return this.cache?.baseHashes[fileId] ?? null;
-  }
-  async recordBaseHash(fileId, hash2) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        baseHashes: { ...state.baseHashes, [fileId]: hash2 }
-      });
-    });
-  }
-  async forgetBaseHash(fileId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(fileId in state.baseHashes)) return;
-      const baseHashes = { ...state.baseHashes };
-      delete baseHashes[fileId];
-      await this.mutate({ ...state, baseHashes });
-    });
-  }
-  /**
-   * The exact base CONTENT for a file (the merge ancestor, MRG-01), or null when
-   * none is recorded. Synchronous against the warmed cache, like `baseHashFor`.
-   */
-  baseContentFor(fileId) {
-    return this.cache?.baseContents[fileId] ?? null;
-  }
-  async recordBaseContent(fileId, content) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        baseContents: { ...state.baseContents, [fileId]: content }
-      });
-    });
-  }
-  async forgetBaseContent(fileId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(fileId in state.baseContents)) return;
-      const baseContents = { ...state.baseContents };
-      delete baseContents[fileId];
-      await this.mutate({ ...state, baseContents });
-    });
-  }
-  /**
-   * The conflict-artifact path already written for `revisionId` (MRG-02
-   * cascade guard), or null if this revision has not conflicted before.
-   * Synchronous against the warmed cache.
-   */
-  conflictArtifactPathFor(revisionId) {
-    return this.cache?.conflictArtifacts[revisionId] ?? null;
-  }
-  async recordConflictArtifactPath(revisionId, path, fileId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        conflictArtifacts: { ...state.conflictArtifacts, [revisionId]: path },
-        ...fileId === void 0 ? {} : {
-          conflictCopyFileIds: {
-            ...state.conflictCopyFileIds,
-            [path]: fileId
-          }
-        }
-      });
-    });
-  }
-  /** The remote revision a conflict copy holds, or null when not recorded. */
-  revisionForConflictCopy(path) {
-    for (const [revisionId, copyPath] of Object.entries(this.cache?.conflictArtifacts ?? {})) {
-      if (copyPath === path) return revisionId;
-    }
-    return null;
-  }
-  /** The fileId a conflict copy was written for, or null when not recorded. */
-  fileIdForConflictCopy(path) {
-    return this.cache?.conflictCopyFileIds?.[path] ?? null;
-  }
-  async enqueue(envelope) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const stamped = envelope.enqueuedAt === void 0 ? { ...envelope, enqueuedAt: this.now() } : envelope;
-      if (await this.safePutPayload(stamped.revisionId, stamped.payloadBase64)) {
-        this.externalized.add(stamped.revisionId);
-      } else {
-        this.externalized.delete(stamped.revisionId);
-      }
-      const outbox = [
-        ...state.outbox.filter(
-          (entry) => entry.revisionId !== envelope.revisionId
-        ),
-        stamped
-      ];
-      await this.mutate({ ...state, outbox });
-    });
-  }
-  /**
-   * Outbox items paired with their enqueue time (SND-01), read synchronously
-   * against the warm cache. A missing `enqueuedAt` (legacy blob) is reported as
-   * 0, "very old", so a pre-upgrade item still counts as waiting. The runner
-   * always warms the cache before it pushes, so the panel's synchronous read
-   * finds a populated cache once connected; a cold cache reports no ages.
-   */
-  outboxAges() {
-    return (this.cache?.outbox ?? []).map((envelope) => ({
-      revisionId: envelope.revisionId,
-      enqueuedAt: envelope.enqueuedAt ?? 0
-    }));
-  }
-  /** Synchronous quarantine snapshot against the warm cache (SND-01). */
-  quarantineSnapshot() {
-    return this.cache?.quarantine ?? [];
-  }
-  /** The vault path a fileId currently owns (reverse of `fileIdAtPath`), or null. */
-  pathForFileId(fileId) {
-    const owners = this.cache?.pathOwners ?? {};
-    for (const [path, owner] of Object.entries(owners)) {
-      if (owner === fileId) return path;
-    }
-    return null;
-  }
-  /**
-   * Retry a quarantined send (SND-01): re-enqueue its stashed envelope through
-   * the normal outbox machinery (fresh enqueue time), then drop it from the
-   * quarantine and the stash. Returns true when it re-enqueued, false when
-   * nothing is stashed for `revisionId`, already requeued/discarded, or the
-   * stash was evicted under the byte budget (MAJOR 4). A false return leaves the
-   * quarantine row intact so the caller can degrade Retry to a re-commit from
-   * disk; a double click cannot double-enqueue because the second call finds no
-   * stash and returns false.
-   */
-  async requeueQuarantined(revisionId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const stashed = state.quarantinedEnvelopes[revisionId];
-      if (stashed === void 0) return false;
-      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
-      delete quarantinedEnvelopes[revisionId];
-      const outbox = [
-        ...state.outbox.filter((entry) => entry.revisionId !== revisionId),
-        { ...stashed, enqueuedAt: this.now() }
-      ];
-      const quarantine = state.quarantine.filter(
-        (item) => item.revisionId !== revisionId
-      );
-      await this.mutate({ ...state, outbox, quarantine, quarantinedEnvelopes });
-      return true;
-    });
-  }
-  /**
-   * Permanently drop a quarantined send (SND-01): remove it from the quarantine
-   * and forget its stashed envelope. Idempotent, dropping an unknown id is a
-   * no-op.
-   */
-  async discardQuarantined(revisionId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!state.quarantine.some((item) => item.revisionId === revisionId) && state.quarantinedEnvelopes[revisionId] === void 0) {
-        return;
-      }
-      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
-      delete quarantinedEnvelopes[revisionId];
-      const quarantine = state.quarantine.filter(
-        (item) => item.revisionId !== revisionId
-      );
-      await this.mutate({ ...state, quarantine, quarantinedEnvelopes });
-      await this.dropPayload(revisionId);
-    });
-  }
-  async getEnvelope(revisionId) {
-    await this.ensureLoaded();
-    return this.peekEnvelope(revisionId);
-  }
-  /**
-   * Synchronous lookup against the warmed cache. The runner always awaits
-   * `listOutbox` (which loads the cache) before it pushes, so the transport's
-   * synchronous `resolveEnvelope` finds a warm cache by the time it runs.
-   */
-  peekEnvelope(revisionId) {
-    const found = this.cache?.outbox.find(
-      (envelope) => envelope.revisionId === revisionId
-    );
-    if (found === void 0) return void 0;
-    return {
-      header: found.header,
-      idempotencyKey: found.idempotencyKey,
-      payloadBase64: found.payloadBase64
-    };
-  }
-  async listDeferred() {
-    return (await this.ensureLoaded()).deferred;
-  }
-  async saveDeferred(events) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({ ...state, deferred: [...events] });
-    });
-  }
-  rememberAuthored(existing, revisionId) {
-    if (existing.includes(revisionId)) return existing;
-    const next = [...existing, revisionId];
-    return next.length > this.maxLocallyAuthored ? next.slice(next.length - this.maxLocallyAuthored) : next;
-  }
-  async ensureLoaded() {
-    if (this.cache !== null) return this.cache;
-    if (this.loadPromise === null) {
-      this.loadPromise = this.persist.load().then((raw) => this.hydrate(raw)).then(() => this.reconcilePayloads()).finally(() => {
-        this.loadPromise = null;
-      });
-    }
-    await this.loadPromise;
-    if (this.cache === null) this.cache = emptyState();
-    return this.cache;
-  }
-  /**
-   * Parse the loaded primary blob into the cache (GAP-1 fail-closed policy). A
-   * mutation may have populated the cache while the load was in flight (e.g. an
-   * enqueue that awaited this same shared promise and then wrote); never clobber
-   * it, re-check `this.cache === null` before each assignment.
-   *
-   *  - ABSENT (null/undefined): a clean first run → empty, writable state.
-   *  - OK: the parsed state (with bad outbox envelopes quarantined, not nuked).
-   *  - CORRUPT (present but a core field failed): try the `.bak` first; if it is
-   *    a valid present state, recover from it. Otherwise, with no usable backup:
-   *      · SALVAGE when the outbox is still readable (only a non-outbox core
-   *        field is damaged): keep the queue + locally-authored ids, reset the
-   *        unrecoverable fields to safe defaults, preserve the raw blob to a
-   *        sidecar, and write the CLEANED state back as the new primary. Nothing
-   *        is at risk, so recovery is NOT flagged and the next load reads 'ok'.
-   *      · UNRECOVERABLE when the queue container itself cannot be read: preserve
-   *        the raw blob to a sidecar for manual recovery, resume from a clean,
-   *        writable empty state, rewrite the primary to it (so a restart never
-   *        re-locks), and set the observable recovery signal.
-   */
-  async hydrate(raw) {
-    if (this.cache !== null) return;
-    if (isRecord3(raw) && !validRecoveryFields(raw)) {
-      await this.persist.preserveCorrupt(raw, this.now());
-      throw new Error("Invalid producer recovery journal; sync is paused with original state preserved.");
-    }
-    const outcome = parsePersistedState(raw);
-    if (outcome.status !== "corrupt") {
-      if (this.cache === null) this.cache = this.trimmed(outcome.state);
-      return;
-    }
-    if (isRecord3(raw) && (raw.producerRecovery !== void 0 || raw.reconciliationBackups !== void 0)) {
-      await this.persist.preserveCorrupt(raw, this.now());
-      throw new Error("Corrupt sync state includes recovery data; original state preserved.");
-    }
-    const backup = await this.persist.loadBackup();
-    if (this.cache !== null) return;
-    const backupOutcome = parsePersistedState(backup);
-    if (backupOutcome.status === "ok") {
-      await this.persist.preserveCorrupt(raw, this.now());
-      if (this.cache === null) {
-        this.cache = this.trimmed(backupOutcome.state);
-        if (salvageHasOutboxEntriesMissingFrom(outcome.salvage, backupOutcome.state.outbox)) {
-          this.recoveryRequired = true;
-        }
-      }
-      return;
-    }
-    await this.persist.preserveCorrupt(raw, this.now());
-    if (this.cache !== null) return;
-    if (outcome.salvage !== null) {
-      this.cache = this.trimmed(outcome.salvage);
-    } else {
-      this.cache = emptyState();
-      if (outcome.outboxAtRisk) this.recoveryRequired = true;
-    }
-    await this.persist.save(this.toDiskForm(this.cache));
-  }
-  async mutate(next) {
-    const kept = this.trimmed(next);
-    await this.persist.save(this.toDiskForm(kept));
-    this.cache = kept;
-  }
-  /**
-   * Arch P1: the on-disk projection of `state`. For every outbox/stash envelope
-   * whose payload is externalized (its `revisionId` is in {@link externalized},
-   * i.e. the store durably holds the bytes), the inline `payloadBase64` is
-   * replaced by `''` and marked `payloadExternalized: true`. A payload NOT in the
-   * set (legacy, or an inline-fallback under an unavailable store) is written
-   * inline unchanged, so the disk form only ever strips bytes the store actually
-   * holds, never bytes that would then be irrecoverable. Returns `state` itself
-   * when nothing is externalized (the legacy path), so behaviour is identical to
-   * before when no payload store is configured.
-   */
-  toDiskForm(state) {
-    if (this.externalized.size === 0) return state;
-    const strip = (env) => this.externalized.has(env.revisionId) ? { ...env, payloadBase64: "", payloadExternalized: true } : env;
-    const quarantinedEnvelopes = {};
-    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
-      quarantinedEnvelopes[key] = strip(env);
-    }
-    return {
-      ...state,
-      outbox: state.outbox.map(strip),
-      quarantinedEnvelopes
-    };
-  }
-  /** Fallible payload-store read: undefined on absence OR any store failure. */
-  async safeGetPayload(revisionId) {
-    if (this.payloadStore === void 0) return void 0;
-    try {
-      return await this.payloadStore.getPayload(revisionId);
-    } catch {
-      return void 0;
-    }
-  }
-  /**
-   * Fallible payload-store write. Returns true when the bytes are durably in the
-   * store (so the caller marks the id externalized and the disk form strips it),
-   * false when there is no store or the write threw (keep the payload inline,
-   * the graceful mobile/unavailable fallback).
-   */
-  async safePutPayload(revisionId, payloadBase64) {
-    if (this.payloadStore === void 0) return false;
-    try {
-      await this.payloadStore.putPayload(revisionId, payloadBase64);
-      return true;
-    } catch {
-      console.warn(
-        `Havemind: outbox payload for ${revisionId} could not be externalized; keeping it inline in data.json.`
-      );
-      return false;
-    }
-  }
-  /**
-   * Drop a revision's externalized payload from the store when it leaves BOTH the
-   * outbox and the stash for good (receipt, discard, budget eviction). A no-op
-   * when the id was never externalized (inline path). Best-effort: a failed
-   * delete only leaks bytes, never corrupts state, so it is swallowed.
-   */
-  async dropPayload(revisionId) {
-    if (!this.externalized.has(revisionId)) return;
-    if (this.payloadStore !== void 0) {
-      try {
-        await this.payloadStore.deletePayload(revisionId);
-      } catch {
-      }
-    }
-    this.externalized.delete(revisionId);
-  }
-  /**
-   * Reconcile outbox/stash payloads with the out-of-band store after load (arch
-   * P1). For each envelope:
-   *  - EXTERNALIZED (a reference: empty inline bytes + marker): fetch the bytes.
-   *    Present → rehydrate them into the in-memory cache so `peekEnvelope` drains
-   *    the real payload; missing/unresolvable → fail-closed. A missing OUTBOX
-   *    payload is quarantined (never drained empty); a missing STASH payload is
-   *    dropped (its quarantine row already records the failure), mirroring the
-   *    byte-budget eviction contract.
-   *  - INLINE (legacy or fallback): opportunistically MIGRATE the bytes into the
-   *    store, marking the id externalized so the next save shrinks `data.json`.
-   * When anything changed, the cleaned/migrated state is persisted immediately
-   * (disk form) so a legacy blob is shrunk on first load, not only on next edit.
-   */
-  async reconcilePayloads() {
-    const state = this.cache;
-    if (state === null) return;
-    let cacheChanged = false;
-    let persistNeeded = false;
-    const nextOutbox = [];
-    const addedQuarantine = [];
-    for (const env of state.outbox) {
-      if (env.payloadExternalized === true) {
-        const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string") {
-          this.externalized.add(env.revisionId);
-          nextOutbox.push({ ...env, payloadBase64: payload });
-          cacheChanged = true;
-        } else {
-          console.warn(
-            `Havemind: outbox payload for ${env.revisionId} is missing from the store; quarantining it (fail-closed).`
-          );
-          addedQuarantine.push({
-            revisionId: env.revisionId,
-            fileId: env.fileId,
-            reason: PAYLOAD_MISSING_REASON
-          });
-          cacheChanged = true;
-          persistNeeded = true;
-        }
-      } else {
-        nextOutbox.push(env);
-        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
-          this.externalized.add(env.revisionId);
-          persistNeeded = true;
-        }
-      }
-    }
-    const nextStash = {};
-    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
-      if (env.payloadExternalized === true) {
-        const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string") {
-          this.externalized.add(env.revisionId);
-          nextStash[key] = { ...env, payloadBase64: payload };
-          cacheChanged = true;
-        } else {
-          persistNeeded = true;
-        }
-      } else {
-        nextStash[key] = env;
-        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
-          this.externalized.add(env.revisionId);
-          persistNeeded = true;
-        }
-      }
-    }
-    if (!cacheChanged && !persistNeeded) return;
-    const next = {
-      ...state,
-      outbox: nextOutbox,
-      quarantine: [...state.quarantine, ...addedQuarantine],
-      quarantinedEnvelopes: nextStash
-    };
-    this.cache = next;
-    if (persistNeeded) {
-      await this.persist.save(this.toDiskForm(next));
-    }
-  }
-  /**
-   * Runs a read-modify-write `section` (an `ensureLoaded` + `mutate` pair)
-   * atomically with respect to every other section, by chaining them on a
-   * single tail. See {@link mutationTail} for why this is required. `section`s
-   * never nest (no mutating method calls another), so this cannot deadlock; the
-   * tail swallows outcomes so one section's rejection never wedges the next.
-   */
-  runExclusive(section) {
-    const run = this.mutationTail.then(section, section);
-    this.mutationTail = run.then(
-      () => void 0,
-      () => void 0
-    );
-    return run;
-  }
-};
-var CORRUPT_ENVELOPE_PREFIX = "corrupt-envelope:";
-function parseOutboxEntries(outbox) {
-  const parsedOutbox = [];
-  const quarantinedBadEnvelopes = [];
-  outbox.forEach((entry, index) => {
-    const parsed = parseEnvelope(entry);
-    if (parsed === null) {
-      quarantinedBadEnvelopes.push(quarantineForCorruptEnvelope(entry, index));
-    } else {
-      parsedOutbox.push(parsed);
-    }
-  });
-  if (quarantinedBadEnvelopes.length > 0) {
-    console.warn(
-      `Havemind: ${quarantinedBadEnvelopes.length} unparseable outbox envelope(s) were quarantined; the rest of the outbox was preserved.`
-    );
-  }
-  return { parsedOutbox, quarantinedBadEnvelopes };
-}
-function parsePersistedState(raw) {
-  if (raw === null || raw === void 0) {
-    return { status: "absent", state: emptyState(), salvage: null, outboxAtRisk: false };
-  }
-  const strict = strictParse(raw);
-  if (strict !== null) {
-    return { status: "ok", state: strict, salvage: null, outboxAtRisk: false };
-  }
-  return {
-    status: "corrupt",
-    state: emptyState(),
-    salvage: salvageState(raw),
-    outboxAtRisk: outboxAtRisk(raw)
-  };
-}
-function validRecoveryFields(raw) {
-  if (raw.producerRecovery !== void 0 && (!Array.isArray(raw.producerRecovery) || !raw.producerRecovery.every(validRecovery))) return false;
-  if (raw.reconciliationBackups !== void 0) {
-    if (!isRecord3(raw.reconciliationBackups)) return false;
-    if (!Object.values(raw.reconciliationBackups).every((entries) => Array.isArray(entries) && entries.every((entry) => parseEnvelope(entry) !== null && isRecord3(entry) && entry.payloadExternalized !== true))) return false;
-  }
-  return true;
-}
-function strictParse(raw) {
-  if (isRecord3(raw) && !validRecoveryFields(raw)) return null;
-  if (!isRecord3(raw) || raw.version !== 1) return null;
-  const cursor = raw.cursor;
-  const outbox = raw.outbox;
-  const locallyAuthored = raw.locallyAuthored;
-  const deferred = raw.deferred;
-  if (!Number.isSafeInteger(cursor) || cursor < 0 || !Array.isArray(outbox) || !Array.isArray(locallyAuthored) || !Array.isArray(deferred)) {
-    return null;
-  }
-  if (!locallyAuthored.every((value) => typeof value === "string")) {
-    return null;
-  }
-  const parsedDeferred = [];
-  for (const entry of deferred) {
-    const parsed = parseRemoteEvent(entry);
-    if (parsed === null) return null;
-    parsedDeferred.push(parsed);
-  }
-  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(outbox);
-  const pathOwners = parseStringMap(raw.pathOwners) ?? warnDegrade("pathOwners", {});
-  const baseHashes = parseStringMap(raw.baseHashes) ?? warnDegrade("baseHashes", {});
-  const baseContents = parseStringMap(raw.baseContents) ?? warnDegrade("baseContents", {});
-  const conflictArtifacts = parseStringMap(raw.conflictArtifacts) ?? warnDegrade("conflictArtifacts", {});
-  const quarantine = parseQuarantine(raw.quarantine) ?? warnDegrade("quarantine", []);
-  const quarantinedEnvelopes = parseEnvelopeMap(raw.quarantinedEnvelopes) ?? warnDegrade("quarantinedEnvelopes", {});
-  return {
-    version: 1,
-    cursor,
-    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
-    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
-    outbox: parsedOutbox,
-    locallyAuthored,
-    deferred: parsedDeferred,
-    // Merge the corrupt-envelope rows in so nothing is silently dropped.
-    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
-    pathOwners,
-    baseHashes,
-    baseContents,
-    conflictArtifacts,
-    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
-    quarantinedEnvelopes
-  };
-}
-function optionalConflictCopyFileIds(value) {
-  if (value === void 0) return {};
-  const parsed = parseStringMap(value);
-  return parsed === null ? {} : { conflictCopyFileIds: parsed };
-}
-function salvageState(raw) {
-  if (!isRecord3(raw) || !Array.isArray(raw.outbox)) return null;
-  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(raw.outbox);
-  const cursor = Number.isSafeInteger(raw.cursor) && raw.cursor >= 0 ? raw.cursor : 0;
-  const locallyAuthored = Array.isArray(raw.locallyAuthored) && raw.locallyAuthored.every((value) => typeof value === "string") ? raw.locallyAuthored : [];
-  const quarantine = parseQuarantine(raw.quarantine) ?? [];
-  return {
-    version: 1,
-    cursor,
-    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
-    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
-    outbox: parsedOutbox,
-    locallyAuthored,
-    deferred: salvageDeferred(raw.deferred),
-    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
-    pathOwners: parseStringMap(raw.pathOwners) ?? {},
-    baseHashes: parseStringMap(raw.baseHashes) ?? {},
-    baseContents: parseStringMap(raw.baseContents) ?? {},
-    conflictArtifacts: parseStringMap(raw.conflictArtifacts) ?? {},
-    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
-    quarantinedEnvelopes: parseEnvelopeMap(raw.quarantinedEnvelopes) ?? {}
-  };
-}
-function salvageDeferred(value) {
-  if (!Array.isArray(value)) return [];
-  const result = [];
-  for (const entry of value) {
-    const parsed = parseRemoteEvent(entry);
-    if (parsed === null) return [];
-    result.push(parsed);
-  }
-  return result;
-}
-function outboxAtRisk(raw) {
-  if (!isRecord3(raw)) return false;
-  const outbox = raw.outbox;
-  if (outbox === void 0 || Array.isArray(outbox)) return false;
-  return true;
-}
-function salvageHasOutboxEntriesMissingFrom(salvage, backupOutbox) {
-  if (salvage === null || salvage.outbox.length === 0) return false;
-  const backupIds = new Set(backupOutbox.map((entry) => entry.revisionId));
-  return salvage.outbox.some((entry) => !backupIds.has(entry.revisionId));
-}
-function quarantineForCorruptEnvelope(entry, index) {
-  const revisionId = isRecord3(entry) && typeof entry.revisionId === "string" ? entry.revisionId : `${CORRUPT_ENVELOPE_PREFIX}${index}`;
-  const fileId = isRecord3(entry) && typeof entry.fileId === "string" ? entry.fileId : "";
-  return { revisionId, fileId, reason: "corrupt-envelope" };
-}
-function warnDegrade(field, fallback) {
-  console.warn(
-    `Havemind: persisted "${field}" was malformed and was reset to its default; other sync state was preserved.`
-  );
-  return fallback;
-}
-function parseEnvelopeMap(value) {
-  if (value === void 0) return {};
-  if (!isRecord3(value)) return null;
-  const result = {};
-  for (const [key, entry] of Object.entries(value)) {
-    const parsed = parseEnvelope(entry);
-    if (parsed === null) return null;
-    result[key] = parsed;
-  }
-  return result;
-}
-function parseQuarantine(value) {
-  if (value === void 0) return [];
-  if (!Array.isArray(value)) return null;
-  const result = [];
-  for (const entry of value) {
-    if (!isRecord3(entry) || typeof entry.revisionId !== "string" || typeof entry.fileId !== "string" || typeof entry.reason !== "string") {
-      return null;
-    }
-    const parents = entry.parentRevisionIds;
-    result.push({
-      revisionId: entry.revisionId,
-      fileId: entry.fileId,
-      reason: entry.reason,
-      ...Array.isArray(parents) && parents.every((id) => typeof id === "string") ? { parentRevisionIds: parents } : {}
-    });
-  }
-  return result;
-}
-function parseStringMap(value) {
-  if (value === void 0) return {};
-  if (!isRecord3(value)) return null;
-  const result = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry !== "string") return null;
-    result[key] = entry;
-  }
-  return result;
-}
-function parseEnvelope(value) {
-  if (!isRecord3(value)) return null;
-  if (typeof value.operationId !== "string" || typeof value.revisionId !== "string" || typeof value.fileId !== "string" || typeof value.contentHash !== "string" || typeof value.idempotencyKey !== "string" || typeof value.payloadBase64 !== "string") {
-    return null;
-  }
-  return {
-    operationId: value.operationId,
-    revisionId: value.revisionId,
-    fileId: value.fileId,
-    contentHash: value.contentHash,
-    idempotencyKey: value.idempotencyKey,
-    payloadBase64: value.payloadBase64,
-    header: value.header,
-    // Preserve the enqueue time across a restart (SND-01); a non-number degrades
-    // to "unstamped" so `outboxAges` treats it as old rather than throwing.
-    ...typeof value.enqueuedAt === "number" ? { enqueuedAt: value.enqueuedAt } : {},
-    // Arch P1: carry the externalized marker so load-time reconciliation knows
-    // to rehydrate the payload from the store (an empty inline `payloadBase64` is
-    // otherwise indistinguishable from a genuinely 0-byte payload).
-    ...value.payloadExternalized === true ? { payloadExternalized: true } : {}
-  };
-}
-function parseRemoteEvent(value) {
-  if (!isRecord3(value) || !Number.isSafeInteger(value.serverSequence)) {
-    return null;
-  }
-  const revision = value.revision;
-  if (!isRecord3(revision) || typeof revision.revisionId !== "string" || typeof revision.fileId !== "string" || typeof revision.contentHash !== "string") {
-    return null;
-  }
-  return {
-    serverSequence: value.serverSequence,
-    revision: {
-      revisionId: revision.revisionId,
-      fileId: revision.fileId,
-      contentHash: revision.contentHash
-    }
-  };
-}
-function isRecord3(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 // src/runtime/adapters/editor-buffers.ts
 function editorTexts(workspace, path) {
   const texts = [];
@@ -18028,6 +16526,410 @@ function selectNewlyQuarantined(known, quarantine) {
   return { fresh, next };
 }
 
+// ../../packages/sync-core/dist/diff3.js
+var DEFAULT_ADJACENCY_LINES = 1;
+var DEFAULT_MAX_LCS_CELLS = 4e6;
+function splitLines(text) {
+  return text.split("\n");
+}
+function lcsMatches(x, y) {
+  const n = x.length;
+  const m = y.length;
+  const width = m + 1;
+  const table = new Int32Array((n + 1) * width);
+  for (let i2 = n - 1; i2 >= 0; i2 -= 1) {
+    for (let j2 = m - 1; j2 >= 0; j2 -= 1) {
+      table[i2 * width + j2] = x[i2] === y[j2] ? table[(i2 + 1) * width + (j2 + 1)] + 1 : Math.max(table[(i2 + 1) * width + j2], table[i2 * width + (j2 + 1)]);
+    }
+  }
+  const matches = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (x[i] === y[j]) {
+      matches.push({ x: i, y: j });
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * width + j] >= table[i * width + (j + 1)]) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+  return matches;
+}
+function diffHunks(ancestor, variant) {
+  const matches = lcsMatches(ancestor, variant);
+  const hunks = [];
+  let oCursor = 0;
+  let vCursor = 0;
+  const boundaries = [...matches, { x: ancestor.length, y: variant.length }];
+  for (const match of boundaries) {
+    const oLength = match.x - oCursor;
+    const abLength = match.y - vCursor;
+    if (oLength > 0 || abLength > 0) {
+      hunks.push({ oStart: oCursor, oLength, abStart: vCursor, abLength });
+    }
+    oCursor = match.x + 1;
+    vCursor = match.y + 1;
+  }
+  return hunks;
+}
+function variantStart(hunks, p) {
+  let delta = 0;
+  for (const hunk of hunks) {
+    if (hunk.oStart + hunk.oLength <= p && hunk.oStart < p) {
+      delta += hunk.abLength - hunk.oLength;
+    }
+  }
+  return p + delta;
+}
+function variantEnd(hunks, p) {
+  let delta = 0;
+  for (const hunk of hunks) {
+    if (hunk.oStart + hunk.oLength <= p) {
+      delta += hunk.abLength - hunk.oLength;
+    }
+  }
+  return p + delta;
+}
+function segmentFor(hunks, variant, oStart, oEnd) {
+  return variant.slice(variantStart(hunks, oStart), variantEnd(hunks, oEnd));
+}
+function linesEqual(a, b) {
+  if (a.length !== b.length)
+    return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index])
+      return false;
+  }
+  return true;
+}
+function mergeText(ancestor, local, remote, options = {}) {
+  const adjacency = options.adjacencyLines ?? DEFAULT_ADJACENCY_LINES;
+  const maxCells = options.maxLcsCells ?? DEFAULT_MAX_LCS_CELLS;
+  const o = splitLines(ancestor);
+  const a = splitLines(local);
+  const b = splitLines(remote);
+  if ((o.length + 1) * (a.length + 1) > maxCells || (o.length + 1) * (b.length + 1) > maxCells) {
+    return { status: "conflict" };
+  }
+  const localHunks = diffHunks(o, a);
+  const remoteHunks = diffHunks(o, b);
+  const events = [
+    ...localHunks.map((hunk) => ({ ...hunk, side: "local" })),
+    ...remoteHunks.map((hunk) => ({ ...hunk, side: "remote" }))
+  ].sort((left, right) => left.oStart - right.oStart || (left.side === right.side ? 0 : left.side === "local" ? -1 : 1));
+  const merged = [];
+  let oCursor = 0;
+  let index = 0;
+  while (index < events.length) {
+    const first = events[index];
+    if (first === void 0)
+      break;
+    for (let line = oCursor; line < first.oStart; line += 1) {
+      merged.push(o[line]);
+    }
+    const regionStart = first.oStart;
+    let regionEnd = first.oStart + first.oLength;
+    const sides = /* @__PURE__ */ new Set([first.side]);
+    index += 1;
+    while (index < events.length) {
+      const next = events[index];
+      if (next === void 0)
+        break;
+      if (next.oStart - regionEnd >= adjacency)
+        break;
+      regionEnd = Math.max(regionEnd, next.oStart + next.oLength);
+      sides.add(next.side);
+      index += 1;
+    }
+    const localSegment = segmentFor(localHunks, a, regionStart, regionEnd);
+    const remoteSegment = segmentFor(remoteHunks, b, regionStart, regionEnd);
+    const ancestorSegment = o.slice(regionStart, regionEnd);
+    if (!sides.has("remote") || linesEqual(remoteSegment, ancestorSegment)) {
+      merged.push(...localSegment);
+    } else if (!sides.has("local") || linesEqual(localSegment, ancestorSegment)) {
+      merged.push(...remoteSegment);
+    } else if (linesEqual(localSegment, remoteSegment)) {
+      merged.push(...localSegment);
+    } else {
+      const disjoint = mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regionEnd);
+      if (disjoint === null) {
+        return { status: "conflict" };
+      }
+      merged.push(...disjoint);
+    }
+    oCursor = regionEnd;
+  }
+  for (let line = oCursor; line < o.length; line += 1) {
+    merged.push(o[line]);
+  }
+  return { status: "merged", text: merged.join("\n") };
+}
+function mergeDisjointRegion(o, localHunks, remoteHunks, a, b, regionStart, regionEnd) {
+  const inRegion = (hunk) => hunk.oStart < regionEnd && hunk.oStart + hunk.oLength > regionStart;
+  const balanced = (hunks) => hunks.filter(inRegion).every((hunk) => (
+    // One ancestor line in, one replacement line out, so the walk below can
+    // attribute each line to exactly one side.
+    hunk.oLength > 0 && hunk.oLength === hunk.abLength && // Wholly inside the region. A hunk that straddles the boundary has part
+    // of its replacement outside the span this function rebuilds, and that
+    // part would simply vanish (CI counterexample: ancestor "b\n", local
+    // "# h\n- a", remote "b\nfoo" lost "foo").
+    hunk.oStart >= regionStart && hunk.oStart + hunk.oLength <= regionEnd
+  ));
+  if (!balanced(localHunks) || !balanced(remoteHunks)) {
+    return null;
+  }
+  if (insertionsIn(localHunks, regionStart, regionEnd).length > 0 || insertionsIn(remoteHunks, regionStart, regionEnd).length > 0) {
+    return null;
+  }
+  const out = [];
+  let line = regionStart;
+  while (line < regionEnd) {
+    const local = hunkCovering(localHunks, line);
+    const remote = hunkCovering(remoteHunks, line);
+    if (local !== void 0 && remote !== void 0) {
+      return null;
+    }
+    const own = local ?? remote;
+    if (regionHasOppositeChange(local !== void 0 ? remoteHunks : localHunks, own.oStart, own.oStart + own.oLength)) {
+      return null;
+    }
+    if (own.abLength === 0) {
+      return null;
+    }
+    if (local === void 0 && remote === void 0) {
+      out.push(o[line]);
+      line += 1;
+      continue;
+    }
+    const hunk = local ?? remote;
+    const source = local !== void 0 ? a : b;
+    if (hunk.oStart >= line) {
+      for (let k = 0; k < hunk.abLength; k += 1) {
+        out.push(source[hunk.abStart + k]);
+      }
+    }
+    line = hunk.oStart + hunk.oLength;
+  }
+  return out;
+}
+function insertionsIn(hunks, regionStart, regionEnd) {
+  return hunks.filter((hunk) => hunk.oLength === 0 && hunk.oStart >= regionStart && hunk.oStart <= regionEnd);
+}
+function hunkCovering(hunks, line) {
+  return hunks.find((hunk) => line >= hunk.oStart && line < hunk.oStart + hunk.oLength);
+}
+function regionHasOppositeChange(hunks, regionStart, regionEnd) {
+  return hunks.some((hunk) => hunk.oStart < regionEnd && hunk.oStart + hunk.oLength > regionStart);
+}
+
+// ../../packages/sync-core/dist/payload-codec.js
+var OPERATIONS = /* @__PURE__ */ new Set([
+  "initial-import",
+  "create",
+  "update",
+  "rename",
+  "restore",
+  "reconcile",
+  "delete"
+]);
+var PayloadDecodeError = class extends Error {
+  constructor(message, cause) {
+    super(message, cause === void 0 ? void 0 : { cause });
+    __publicField(this, "name", "PayloadDecodeError");
+  }
+};
+function decodeRevisionPayload(bytes) {
+  const text = typeof bytes === "string" ? bytes : new TextDecoder().decode(bytes);
+  let json2;
+  try {
+    json2 = JSON.parse(text);
+  } catch (error51) {
+    throw new PayloadDecodeError("Revision payload is not valid JSON.", error51);
+  }
+  if (!isRecord3(json2)) {
+    throw new PayloadDecodeError("Revision payload must be a JSON object.");
+  }
+  if (json2.schemaVersion !== 1) {
+    throw new PayloadDecodeError("Unsupported revision payload schema version.");
+  }
+  if (typeof json2.operation !== "string" || !OPERATIONS.has(json2.operation)) {
+    throw new PayloadDecodeError("Revision payload has an unknown operation.");
+  }
+  const operation = json2.operation;
+  const path = assertCanonicalPath(json2.path, "path");
+  const previousPath = json2.previousPath === void 0 || json2.previousPath === null ? null : assertCanonicalPath(json2.previousPath, "previousPath");
+  if (json2.kind === "binary") {
+    if (operation === "delete") {
+      throw new PayloadDecodeError("A binary payload cannot be a delete tombstone.");
+    }
+    if (typeof json2.contentBase64 !== "string") {
+      throw new PayloadDecodeError("A binary revision must carry string contentBase64.");
+    }
+    const binaryContent = decodeBase64(json2.contentBase64);
+    return { operation, path, previousPath, kind: "binary", content: null, binaryContent };
+  }
+  let content;
+  if (operation === "delete") {
+    if (json2.content !== null && json2.content !== void 0) {
+      throw new PayloadDecodeError("A delete tombstone must not carry content.");
+    }
+    content = null;
+  } else {
+    if (typeof json2.content !== "string") {
+      throw new PayloadDecodeError("A content revision must carry string content.");
+    }
+    content = json2.content;
+  }
+  return { operation, path, previousPath, kind: "markdown", content, binaryContent: null };
+}
+function decodeBase64(base643) {
+  if (!isCanonicalBase64(base643)) {
+    throw new PayloadDecodeError("Binary revision content is not valid base64.");
+  }
+  let binary;
+  try {
+    binary = atob(base643);
+  } catch (error51) {
+    throw new PayloadDecodeError("Binary revision content is not valid base64.", error51);
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+function assertCanonicalPath(value, field) {
+  if (typeof value !== "string") {
+    throw new PayloadDecodeError(`Revision payload ${field} must be a string.`);
+  }
+  try {
+    if (canonicalizeVaultPath(value) !== value) {
+      throw new PayloadDecodeError(`Revision payload ${field} is not a canonical vault path.`);
+    }
+  } catch (error51) {
+    if (error51 instanceof PayloadDecodeError)
+      throw error51;
+    throw new PayloadDecodeError(`Revision payload ${field} is a reserved or invalid vault path.`, error51);
+  }
+  return value;
+}
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// ../../packages/sync-core/dist/revision-envelope.js
+var DEFAULT_MAX_REVISION_PAYLOAD_BYTES = 512 * 1024;
+var RevisionPayloadTooLargeError = class extends Error {
+  constructor(path, byteLength, maxByteLength) {
+    super(`Note "${path}" is too large to sync: ${byteLength} bytes exceeds the ${maxByteLength}-byte limit.`);
+    __publicField(this, "path");
+    __publicField(this, "byteLength");
+    __publicField(this, "maxByteLength");
+    __publicField(this, "name", "RevisionPayloadTooLargeError");
+    this.path = path;
+    this.byteLength = byteLength;
+    this.maxByteLength = maxByteLength;
+  }
+};
+var REQUIRED_SEMANTICS = {
+  payloadFormat: "revision-payload-v1",
+  syncSemantics: "dag-cas-v1",
+  provenanceRecipe: "source-range-v1",
+  pathNormalization: "nfc-lowercase-v1"
+};
+async function buildRevisionEnvelope(input) {
+  const path = canonicalizeVaultPath(input.path);
+  const parentRevisionIds = [...new Set(input.parentRevisionIds)].sort();
+  const header = {
+    protocol: { major: PROTOCOL_VERSION.major, minor: PROTOCOL_VERSION.minor },
+    vaultId: input.identity.vaultId,
+    fileId: input.identity.fileId,
+    revisionId: input.revisionId,
+    parentRevisionIds,
+    expectedMemberId: input.identity.memberId,
+    expectedDeviceId: input.identity.deviceId,
+    payloadEncoding: "plaintext-json-v1",
+    semantics: REQUIRED_SEMANTICS
+  };
+  const payload = await buildInnerPayload(input, path);
+  validateRevisionPayloadAgainstHeader(header, payload);
+  const json2 = JSON.stringify(payload);
+  const bytes = new TextEncoder().encode(json2);
+  const maxPayloadBytes = input.maxPayloadBytes ?? DEFAULT_MAX_REVISION_PAYLOAD_BYTES;
+  if (bytes.byteLength > maxPayloadBytes) {
+    throw new RevisionPayloadTooLargeError(path, bytes.byteLength, maxPayloadBytes);
+  }
+  return {
+    header,
+    payloadBase64: bytesToBase64(bytes),
+    contentHash: await sha256Hex(bytes),
+    revisionId: input.revisionId,
+    fileId: input.identity.fileId,
+    idempotencyKey: input.idempotencyKey
+  };
+}
+async function buildInnerPayload(input, path) {
+  if (input.operation === "delete") {
+    return {
+      schemaVersion: 1,
+      operation: "delete",
+      path,
+      content: null,
+      plaintextHash: null,
+      recipe: null
+    };
+  }
+  if (input.kind === "binary") {
+    const bytes = input.binaryContent ?? new Uint8Array(0);
+    const base2 = {
+      schemaVersion: 1,
+      operation: input.operation,
+      kind: "binary",
+      path
+    };
+    if (input.operation === "rename") {
+      if (input.previousPath === void 0 || input.previousPath === null) {
+        throw new Error("A rename revision requires a previousPath.");
+      }
+      base2.previousPath = canonicalizeVaultPath(input.previousPath);
+    }
+    base2.contentBase64 = bytesToBase64(bytes);
+    base2.blobByteHash = await hashBlob(bytes);
+    base2.recipe = null;
+    return base2;
+  }
+  const content = canonicalizeMarkdown(input.content ?? "");
+  const base = {
+    schemaVersion: 1,
+    operation: input.operation,
+    path
+  };
+  if (input.operation === "rename") {
+    if (input.previousPath === void 0 || input.previousPath === null) {
+      throw new Error("A rename revision requires a previousPath.");
+    }
+    base.previousPath = canonicalizeVaultPath(input.previousPath);
+  }
+  base.content = content;
+  base.plaintextHash = await hashPlaintext(content);
+  base.recipe = buildLiteralRecipe(content);
+  return base;
+}
+function buildLiteralRecipe(content) {
+  const parts = content.length === 0 ? [] : [{ type: "literal", text: content }];
+  return { version: 1, parts };
+}
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
 // src/runtime/conflict-sweep.ts
 async function sweepConflictCopies(deps) {
   const merge2 = deps.merge ?? mergeText;
@@ -18175,178 +17077,134 @@ var RerunGuard = class {
   }
 };
 
-// src/activity/activity.ts
-var ActivityError = class extends Error {
-  constructor(code, message, cause) {
-    super(message, cause === void 0 ? void 0 : { cause });
-    __publicField(this, "code", code);
-    __publicField(this, "name", "ActivityError");
+// src/runtime/activity-restore.ts
+async function restoreRevision(deps, revisionId) {
+  const revision = await deps.revisionContent(revisionId);
+  if (revision === null) return { outcome: "unavailable" };
+  const path = deps.currentPath(revision.fileId) ?? revision.path;
+  const file2 = deps.vault.getAbstractFileByPath(path);
+  if (file2 === null) {
+    await deps.vault.create(path, revision.content);
+    return { outcome: "restored", path };
   }
-};
-function actorLabel(actor) {
-  return actor.kind === "initial-import" ? "Initial import" : actor.displayName;
-}
-function buildActivityFeed(records) {
-  return records.map(
-    (record2) => ({
-      revisionId: record2.revisionId,
-      fileId: record2.fileId,
-      path: record2.path,
-      kind: record2.kind,
-      actorLabel: actorLabel(record2.actor),
-      actorId: record2.actor.kind === "author" ? record2.actor.actorId : null,
-      timestamp: record2.timestamp,
-      canRestore: record2.content !== null
-    })
-  ).sort((left, right) => {
-    if (left.timestamp !== right.timestamp) {
-      return right.timestamp - left.timestamp;
-    }
-    return left.revisionId < right.revisionId ? 1 : -1;
-  });
-}
-function buildHistoryDag(history) {
-  const dag = new RevisionDag();
-  for (const record2 of history) {
-    dag.add(toRevisionNode(record2));
+  if (await deps.vault.read(file2) === revision.content) {
+    return { outcome: "unchanged", path };
   }
-  return dag;
-}
-function toRevisionNode(record2) {
-  return {
-    revisionId: record2.revisionId,
-    vaultId: record2.vaultId,
-    fileId: record2.fileId,
-    parentRevisionIds: [...record2.parentRevisionIds],
-    blobHash: record2.blobHash
-  };
-}
-function headSnapshot(head) {
-  if (head.content === null) {
-    return { revisionId: head.revisionId, content: "", provenance: [] };
-  }
-  return {
-    revisionId: head.revisionId,
-    content: head.content,
-    provenance: head.provenance
-  };
-}
-function restoreRevision(options) {
-  const { history, targetRevisionId, restorer, now, newRevisionId, hashContent } = options;
-  const target = history.find(
-    (record3) => record3.revisionId === targetRevisionId
-  );
-  if (target === void 0) {
-    throw new ActivityError(
-      "UNKNOWN_TARGET",
-      `Cannot restore unknown target revision ${targetRevisionId}.`
-    );
-  }
-  if (target.content === null) {
-    throw new ActivityError(
-      "DELETED_TARGET",
-      `Cannot restore the content of a deleted revision ${targetRevisionId}.`
-    );
-  }
-  const dag = buildHistoryDag(history);
-  const heads = dag.getHeads(target.vaultId, target.fileId);
-  if (heads.length !== 1) {
-    throw new ActivityError(
-      "UNRECONCILED_HISTORY",
-      `Restore requires a single reconciled head, found ${heads.length}.`
-    );
-  }
-  const headId = heads[0];
-  const head = history.find((record3) => record3.revisionId === headId);
-  if (head === void 0) {
-    throw new ActivityError(
-      "UNRECONCILED_HISTORY",
-      `The current head ${headId} is missing from history.`
-    );
-  }
-  const parent = headSnapshot(head);
-  const recipe = generateEditRecipe(parent, target.content);
-  const reconstructed = reconstructFromRecipe(recipe, [parent], newRevisionId);
-  const revision = {
-    revisionId: newRevisionId,
-    vaultId: target.vaultId,
-    fileId: target.fileId,
-    parentRevisionIds: [headId],
-    blobHash: hashContent(target.content)
-  };
-  try {
-    dag.add(revision);
-  } catch (error51) {
-    if (error51 instanceof RevisionDagError) {
-      throw new ActivityError(
-        "APPEND_ONLY_VIOLATION",
-        `Restore would break the append-only history: ${error51.message}`,
-        error51
-      );
-    }
-    throw error51;
-  }
-  const record2 = {
-    revisionId: newRevisionId,
-    vaultId: target.vaultId,
-    fileId: target.fileId,
-    path: head.path,
-    previousPath: null,
-    kind: "edit",
-    actor: {
-      kind: "author",
-      actorId: restorer.actorId,
-      displayName: restorer.displayName
-    },
-    timestamp: now,
-    content: reconstructed.content,
-    blobHash: revision.blobHash,
-    parentRevisionIds: [headId],
-    provenance: reconstructed.provenance,
-    restoredFromRevisionId: target.revisionId
-  };
-  return {
-    revision,
-    record: record2,
-    recipe,
-    reconstructedContent: reconstructed.content
-  };
+  await deps.vault.modify(file2, revision.content);
+  return { outcome: "restored", path };
 }
 
-// src/runtime/activity-restore.ts
-function restoreActivityEntry(options) {
-  try {
-    const result = restoreRevision({
-      history: options.history,
-      targetRevisionId: options.targetRevisionId,
-      restorer: options.restorer,
-      now: options.now,
-      newRevisionId: options.newRevisionId,
-      // Non-cryptographic: this hash only feeds the in-memory Activity DAG's
-      // append validation for this restore call, never the server, never
-      // durable sync state, never a security boundary.
-      hashContent: nonCryptoHash
-    });
-    return {
-      revisionId: result.record.revisionId,
-      fileId: result.record.fileId,
-      path: result.record.path,
-      kind: result.record.kind,
-      author: { kind: "member", membershipId: options.restorer.actorId },
-      timestamp: result.record.timestamp,
-      hasContent: result.record.content !== null
+// src/runtime/last-edited.ts
+function newestAuthor(heads) {
+  let newest = null;
+  for (const head of heads) {
+    if (newest === null || head.serverSequence > newest.serverSequence) newest = head;
+  }
+  return newest?.revision.authorMembershipId ?? null;
+}
+function lastEditedLabel(membershipId, roster) {
+  if (membershipId === null) return "";
+  const member = roster.find((entry) => entry.membershipId === membershipId);
+  if (member === void 0) return "Last edited by another member";
+  return `Last edited by ${member.self ? "you" : member.displayName}`;
+}
+
+// src/runtime/activity-log.ts
+var DEFAULT_MAX_ENTRIES = 200;
+var REMOTE_COLOR_ID = "havemind-remote";
+var ActivityLog = class {
+  constructor(options = {}) {
+    __publicField(this, "entries", []);
+    __publicField(this, "listeners", /* @__PURE__ */ new Set());
+    __publicField(this, "maxEntries");
+    this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  }
+  /** Records (or replaces by revisionId) an entry and notifies subscribers. */
+  record(entry) {
+    const next = this.entries.filter(
+      (existing) => existing.revisionId !== entry.revisionId
+    );
+    next.push(entry);
+    this.entries = next.length > this.maxEntries ? next.slice(next.length - this.maxEntries) : next;
+    for (const listener of this.listeners) {
+      listener();
+    }
+  }
+  /** All recorded entries in insertion order (oldest first). */
+  snapshot() {
+    return [...this.entries];
+  }
+  /** Subscribe to changes; returns an unsubscribe disposer. */
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
     };
-  } catch (error51) {
-    if (error51 instanceof ActivityError) return null;
-    throw error51;
+  }
+};
+function remoteAppliedToActivityEntry(info, timestamp) {
+  return {
+    revisionId: info.revisionId,
+    fileId: info.fileId,
+    path: info.path,
+    kind: toRemoteActivityKind(info.operation),
+    // Attribute precisely when the payload names the author; only fall back to
+    // the neutral 'remote' marker when it genuinely does not.
+    author: info.authorMembershipId === void 0 ? { kind: "remote" } : { kind: "member", membershipId: info.authorMembershipId },
+    timestamp,
+    hasContent: info.operation !== "delete"
+  };
+}
+function remoteAppliedToActivityEntryOrNull(info, timestamp) {
+  if (info.origin === "bootstrap") {
+    return null;
+  }
+  return remoteAppliedToActivityEntry(info, timestamp);
+}
+function toRemoteActivityKind(operation) {
+  switch (operation) {
+    case "create":
+      return "create";
+    case "update":
+      return "edit";
+    case "rename":
+      return "rename";
+    case "delete":
+      return "delete";
+    default:
+      return "edit";
   }
 }
-function nonCryptoHash(content) {
-  let hash2 = 0;
-  for (let index = 0; index < content.length; index += 1) {
-    hash2 = hash2 * 31 + content.charCodeAt(index) | 0;
+function activityEntriesToRecords(entries, roster) {
+  const byMembership = new Map(
+    roster.map((member) => [member.membershipId, member])
+  );
+  return entries.map((entry) => {
+    const author = resolveAuthor(entry.author, byMembership);
+    return {
+      revisionId: entry.revisionId,
+      fileId: entry.fileId,
+      path: entry.path,
+      kind: entry.kind,
+      actor: author,
+      timestamp: entry.timestamp,
+      content: entry.hasContent ? "" : null
+    };
+  });
+}
+function resolveAuthor(author, byMembership) {
+  if (author.kind === "initial-import") {
+    return { kind: "initial-import" };
   }
-  return hash2.toString(16);
+  if (author.kind === "member") {
+    const member = byMembership.get(author.membershipId);
+    return {
+      kind: "author",
+      actorId: author.membershipId,
+      displayName: member?.displayName ?? "Unknown member"
+    };
+  }
+  return { kind: "author", actorId: REMOTE_COLOR_ID, displayName: "Remote" };
 }
 
 // src/runtime/access-token.ts
@@ -18509,7 +17367,7 @@ function isRecord5(value) {
 }
 
 // src/runtime/adapters/request-url.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian = require("obsidian");
 
 // src/runtime/adapters/request-timeout.ts
 var REQUEST_TIMEOUT_MS = 6e4;
@@ -18535,7 +17393,7 @@ async function withRequestTimeout(request, ms = REQUEST_TIMEOUT_MS) {
 function createRequestUrlFn() {
   return async (options) => {
     const response = await withRequestTimeout(
-      (0, import_obsidian2.requestUrl)({
+      (0, import_obsidian.requestUrl)({
         url: options.url,
         method: options.method,
         throw: false,
@@ -18770,30 +17628,58 @@ var RosterStore = class {
   }
 };
 
+// src/runtime/author-colors.ts
+var AUTHOR_COLORS = [
+  { token: "--havemind-author-1", light: "#1a73c2", dark: "#7cb6f0" },
+  { token: "--havemind-author-2", light: "#8a3fc0", dark: "#c99bf0" },
+  { token: "--havemind-author-3", light: "#0f8a6a", dark: "#5fd3ac" },
+  { token: "--havemind-author-4", light: "#c25a00", dark: "#f0a35f" },
+  { token: "--havemind-author-5", light: "#b03060", dark: "#ef92b6" },
+  { token: "--havemind-author-6", light: "#5a6ac0", dark: "#a3aef0" }
+];
+var AUTHOR_COLOR_TOKENS = AUTHOR_COLORS.map(
+  (color) => color.token
+);
+var INITIAL_IMPORT_COLOR_TOKEN = "--havemind-author-initial";
+function fnv1a(value) {
+  let hash2 = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash2 ^= value.charCodeAt(index);
+    hash2 = Math.imul(hash2, 16777619) >>> 0;
+  }
+  return hash2 >>> 0;
+}
+var FALLBACK_COLOR = {
+  token: "--havemind-author-1",
+  light: "#1a73c2",
+  dark: "#7cb6f0"
+};
+function authorColor(memberId) {
+  const index = fnv1a(memberId) % AUTHOR_COLORS.length;
+  return AUTHOR_COLORS[index] ?? FALLBACK_COLOR;
+}
+function authorColorToken(memberId) {
+  return authorColor(memberId).token;
+}
+
 // src/runtime/rejoin-roster.ts
-function buildRejoinRosterView(members, deadMembershipIds = []) {
-  const dead = new Set(deadMembershipIds);
+function buildRejoinRosterView(members) {
   const rows = [...members].sort((left, right) => {
     if (left.role !== right.role) {
       return left.role === "owner" ? -1 : 1;
     }
     return left.displayName.localeCompare(right.displayName);
-  }).map((member) => {
-    const isDead = !member.self && dead.has(member.membershipId);
-    return {
+  }).map(
+    (member) => ({
       colorToken: authorColorToken(member.membershipId),
-      connected: !isDead,
       displayName: member.displayName,
       membershipId: member.membershipId,
-      rejoinable: isDead,
-      // Removal is state-independent: every non-self member can be removed,
-      // connected or not. The owner's own row is never removable.
+      rejoinable: !member.self,
       removable: !member.self,
       role: member.role,
-      self: member.self,
-      statusLabel: isDead ? "disconnected" : "connected"
-    };
-  });
+      self: member.self
+    })
+  );
   return { empty: rows.length === 0, rows };
 }
 
@@ -18929,7 +17815,7 @@ function connectionStatusFromCycle(status) {
 }
 function formatStatusBar(input) {
   const text = `Havemind: ${LABELS[input.status]}`;
-  const format = input.formatTimestamp ?? defaultFormatTimestamp2;
+  const format = input.formatTimestamp ?? defaultFormatTimestamp;
   const lastSync = input.lastSyncedAt === void 0 ? "Last sync: not yet." : `Last sync: ${format(input.lastSyncedAt)}.`;
   return { text, tooltip: `${text}, ${lastSync} ${NO_E2EE_NOTE}` };
 }
@@ -18937,7 +17823,7 @@ var MONTH_ABBREVIATIONS = "JanFebMarAprMayJunJulAugSepOctNovDec";
 function twoDigits(value) {
   return value < 10 ? `0${value}` : String(value);
 }
-function defaultFormatTimestamp2(timestamp, now = Date.now()) {
+function defaultFormatTimestamp(timestamp, now = Date.now()) {
   const at = new Date(timestamp);
   const today = new Date(now);
   const clock = `${twoDigits(at.getHours())}:${twoDigits(at.getMinutes())}`;
@@ -19022,7 +17908,7 @@ var PANEL_STYLES = {
 };
 function buildConnectionPanel(input) {
   const style = PANEL_STYLES[input.status];
-  const format = input.formatTimestamp ?? defaultFormatTimestamp2;
+  const format = input.formatTimestamp ?? defaultFormatTimestamp;
   const parts = [];
   if (input.status === "synced" && input.lastSyncedAt !== void 0) {
     parts.push(`Last sync: ${format(input.lastSyncedAt)}`);
@@ -19143,6 +18029,620 @@ function createConfigApplyReloader(options) {
   };
 }
 
+// src/runtime/revision-history-store.ts
+var MAX_HISTORY_SEGMENTS = 64;
+var FORMAT = 1;
+var KEY_PREFIX = "revision-history";
+function createRevisionHistoryStore(openRecords, scope) {
+  const metaKey = `${KEY_PREFIX}|${scope.vaultId}`;
+  const segmentKey = (index) => `${metaKey}|${index}`;
+  const readMeta = async (records) => {
+    const value = await records.getHistoryRecord(metaKey);
+    if (!isRecord9(value) || value.format !== FORMAT) return null;
+    if (value.apiBaseUrl !== scope.apiBaseUrl || value.vaultId !== scope.vaultId) return null;
+    if (value.epoch !== null && typeof value.epoch !== "string") return null;
+    if (!Number.isSafeInteger(value.cursor) || !Number.isSafeInteger(value.segments)) return null;
+    return value;
+  };
+  const writeMeta = (records, epoch, cursor, segments) => records.putHistoryRecord(metaKey, {
+    format: FORMAT,
+    apiBaseUrl: scope.apiBaseUrl,
+    vaultId: scope.vaultId,
+    epoch,
+    cursor,
+    segments
+  });
+  return {
+    async load() {
+      const records = await openRecords();
+      if (records === null) return null;
+      const meta3 = await readMeta(records);
+      if (meta3 === null || meta3.segments < 0 || meta3.segments > MAX_HISTORY_SEGMENTS) return null;
+      const segments = await Promise.all(
+        Array.from({ length: meta3.segments }, (_, index) => records.getHistoryRecord(segmentKey(index)))
+      );
+      const events = [];
+      for (const segment of segments) {
+        if (!isRecord9(segment) || segment.format !== FORMAT || segment.from !== events.length) return null;
+        if (!Array.isArray(segment.events)) return null;
+        events.push(...segment.events);
+      }
+      return events.length === meta3.cursor ? { epoch: meta3.epoch, cursor: meta3.cursor, events } : null;
+    },
+    async save(history, persistedCursor) {
+      const records = await openRecords();
+      if (records === null) return;
+      const meta3 = await readMeta(records);
+      if (meta3 !== null && persistedCursor > 0 && meta3.cursor === persistedCursor && meta3.epoch === history.epoch && meta3.segments < MAX_HISTORY_SEGMENTS) {
+        await records.putHistoryRecord(segmentKey(meta3.segments), {
+          format: FORMAT,
+          from: persistedCursor,
+          events: history.events.slice(persistedCursor)
+        });
+        await writeMeta(records, history.epoch, history.cursor, meta3.segments + 1);
+        return;
+      }
+      await records.deleteHistoryRecord(metaKey);
+      await records.putHistoryRecord(segmentKey(0), { format: FORMAT, from: 0, events: history.events.slice() });
+      await writeMeta(records, history.epoch, history.cursor, 1);
+      for (let index = 1; index < (meta3?.segments ?? 0); index += 1) {
+        await records.deleteHistoryRecord(segmentKey(index)).catch(() => void 0);
+      }
+    }
+  };
+}
+function isRecord9(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/storage/client-store.ts
+var CLIENT_STORE_NAMES = [
+  "activity",
+  "connection",
+  "cursors",
+  "deferred-applies",
+  "file-mappings",
+  "heads",
+  // P13: the accepted revision log, so a new connection pulls only the tail.
+  "history",
+  "inbox",
+  "outbox",
+  // Arch P1: out-of-band store for large outbox payload bytes, keyed by
+  // revisionId. Keeps a 25 MB attachment out of the per-plugin `data.json`,
+  // which is re-serialised on every cursor save.
+  "payloads",
+  "provenance"
+];
+var CLIENT_STORE_VERSION = 3;
+var CLIENT_DATABASE_PREFIX = "havemind-client-";
+var CLIENT_INSTANCE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+var ClientStoreError = class extends Error {
+  constructor(code, message, cause) {
+    super(message, cause === void 0 ? void 0 : { cause });
+    __publicField(this, "code", code);
+    __publicField(this, "name", "ClientStoreError");
+  }
+};
+async function ensureClientInstanceId(repository, generateId = generateClientInstanceId) {
+  const existingId = await repository.readClientInstanceId();
+  if (existingId !== null) {
+    assertClientInstanceId(existingId);
+    return existingId;
+  }
+  const generatedId = generateId();
+  assertClientInstanceId(generatedId);
+  await repository.writeClientInstanceId(generatedId);
+  return generatedId;
+}
+function isValidClientInstanceId(value) {
+  return value.length >= 16 && value.length <= 64 && CLIENT_INSTANCE_ID_PATTERN.test(value);
+}
+var IndexedDbClientStore = class {
+  constructor(options) {
+    __publicField(this, "databaseName");
+    __publicField(this, "database", null);
+    __publicField(this, "indexedDB");
+    __publicField(this, "openAttempt", 0);
+    __publicField(this, "storeState", "closed");
+    assertClientInstanceId(options.clientInstanceId);
+    const indexedDB = options.indexedDB ?? globalThis.indexedDB;
+    if (!indexedDB) {
+      throw new ClientStoreError(
+        "storage-unavailable",
+        "IndexedDB is unavailable in this Obsidian runtime."
+      );
+    }
+    this.databaseName = `${CLIENT_DATABASE_PREFIX}${options.clientInstanceId}`;
+    this.indexedDB = indexedDB;
+  }
+  get state() {
+    return this.storeState;
+  }
+  async open() {
+    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
+      return;
+    }
+    if (this.storeState === "opening") {
+      throw new ClientStoreError(
+        "transaction-failed",
+        "The IndexedDB connection is already opening."
+      );
+    }
+    const attempt = ++this.openAttempt;
+    this.storeState = "opening";
+    let request;
+    try {
+      request = this.indexedDB.open(
+        this.databaseName,
+        CLIENT_STORE_VERSION
+      );
+    } catch (error51) {
+      this.storeState = "closed";
+      throw normalizeClientStoreError(error51);
+    }
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const rejectOnce = (error51) => {
+        if (settled) return;
+        settled = true;
+        reject(error51);
+      };
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        for (const storeName of CLIENT_STORE_NAMES) {
+          if (!database.objectStoreNames.contains(storeName)) {
+            database.createObjectStore(storeName);
+          }
+        }
+      };
+      request.onblocked = () => {
+        if (attempt !== this.openAttempt) return;
+        this.storeState = "blocked";
+        rejectOnce(
+          new ClientStoreError(
+            "blocked-upgrade",
+            "IndexedDB upgrade is blocked by another open Havemind client."
+          )
+        );
+      };
+      request.onerror = () => {
+        if (attempt !== this.openAttempt) return;
+        this.storeState = "closed";
+        rejectOnce(normalizeClientStoreError(request.error));
+      };
+      request.onsuccess = () => {
+        const database = request.result;
+        if (settled || attempt !== this.openAttempt || this.storeState !== "opening") {
+          database.close();
+          rejectOnce(
+            new ClientStoreError(
+              "closed",
+              "The IndexedDB connection was closed while opening."
+            )
+          );
+          return;
+        }
+        settled = true;
+        this.database = database;
+        this.storeState = "ready";
+        database.onversionchange = () => {
+          database.close();
+          if (this.database === database) this.database = null;
+          this.storeState = "versionchange";
+        };
+        resolve();
+      };
+    });
+  }
+  close() {
+    this.openAttempt += 1;
+    this.database?.close();
+    this.database = null;
+    this.storeState = "closed";
+  }
+  /**
+   * Arch P1: store an outbox revision's base64 payload out-of-band, keyed by
+   * `revisionId`, so the large bytes stay out of the per-plugin `data.json`.
+   */
+  async putPayload(revisionId, payloadBase64) {
+    assertStorageKey(revisionId);
+    await this.runTransaction(
+      "payloads",
+      "readwrite",
+      (store) => store.put(payloadBase64, revisionId)
+    );
+  }
+  /** The stored payload for `revisionId`, or undefined when absent (torn state). */
+  async getPayload(revisionId) {
+    assertStorageKey(revisionId);
+    const value = await this.runTransaction(
+      "payloads",
+      "readonly",
+      (store) => store.get(revisionId)
+    );
+    return typeof value === "string" ? value : void 0;
+  }
+  /** Remove a stored payload; a no-op when absent. */
+  async deletePayload(revisionId) {
+    assertStorageKey(revisionId);
+    await this.runTransaction(
+      "payloads",
+      "readwrite",
+      (store) => store.delete(revisionId)
+    );
+  }
+  /** P13: one record of the persisted revision history, or undefined when absent. */
+  async getHistoryRecord(key) {
+    assertStorageKey(key);
+    return this.runTransaction(
+      "history",
+      "readonly",
+      (store) => store.get(key)
+    );
+  }
+  async putHistoryRecord(key, value) {
+    assertStorageKey(key);
+    await this.runTransaction(
+      "history",
+      "readwrite",
+      (store) => store.put(value, key)
+    );
+  }
+  /** Remove one history record; a no-op when absent. */
+  async deleteHistoryRecord(key) {
+    assertStorageKey(key);
+    await this.runTransaction(
+      "history",
+      "readwrite",
+      (store) => store.delete(key)
+    );
+  }
+  requireDatabase() {
+    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
+      return this.database;
+    }
+    if (this.storeState === "versionchange") {
+      throw new ClientStoreError(
+        "version-changed",
+        "The IndexedDB schema changed in another Havemind client."
+      );
+    }
+    throw new ClientStoreError(
+      "closed",
+      "The Havemind IndexedDB connection is not open."
+    );
+  }
+  async runTransaction(storeName, mode, createRequest) {
+    const isWrite = mode === "readwrite";
+    let transaction;
+    let request;
+    try {
+      transaction = this.requireDatabase().transaction(storeName, mode);
+      request = createRequest(transaction.objectStore(storeName));
+    } catch (error51) {
+      const normalized = normalizeClientStoreError(error51);
+      if (isWrite && normalized.code !== "closed" && normalized.code !== "version-changed") {
+        this.storeState = "write-failed";
+      }
+      throw normalized;
+    }
+    return new Promise((resolve, reject) => {
+      let requestResult;
+      let requestSucceeded = false;
+      let settled = false;
+      const fail = (error51) => {
+        if (settled) return;
+        settled = true;
+        if (isWrite) this.storeState = "write-failed";
+        reject(normalizeClientStoreError(error51));
+      };
+      request.onsuccess = () => {
+        requestResult = request.result;
+        requestSucceeded = true;
+      };
+      request.onerror = () => {
+        if (request.error) fail(request.error);
+      };
+      transaction.onerror = () => {
+        fail(transaction.error ?? request.error);
+      };
+      transaction.onabort = () => {
+        fail(transaction.error ?? request.error);
+      };
+      transaction.oncomplete = () => {
+        if (settled) return;
+        if (!requestSucceeded) {
+          fail(
+            new ClientStoreError(
+              "transaction-failed",
+              "IndexedDB completed without confirming the requested operation."
+            )
+          );
+          return;
+        }
+        settled = true;
+        if (isWrite) this.storeState = "ready";
+        resolve(requestResult);
+      };
+    });
+  }
+};
+function assertClientInstanceId(value) {
+  if (!isValidClientInstanceId(value)) {
+    throw new ClientStoreError(
+      "invalid-client-instance-id",
+      "client_instance_id must be 16-64 lowercase alphanumeric or hyphen characters."
+    );
+  }
+}
+function assertStorageKey(value) {
+  if (value.length === 0 || value.length > 256) {
+    throw new ClientStoreError(
+      "transaction-failed",
+      "IndexedDB keys must contain between 1 and 256 characters."
+    );
+  }
+}
+function generateClientInstanceId() {
+  if (!globalThis.crypto?.randomUUID) {
+    throw new ClientStoreError(
+      "storage-unavailable",
+      "Secure random UUID generation is unavailable in this Obsidian runtime."
+    );
+  }
+  return globalThis.crypto.randomUUID();
+}
+function normalizeClientStoreError(error51) {
+  if (error51 instanceof ClientStoreError) return error51;
+  if (getErrorName(error51) === "QuotaExceededError") {
+    return new ClientStoreError(
+      "quota-exceeded",
+      "IndexedDB quota was exceeded; the operation was not durably queued.",
+      error51
+    );
+  }
+  return new ClientStoreError(
+    "transaction-failed",
+    "The IndexedDB operation failed.",
+    error51
+  );
+}
+function getErrorName(error51) {
+  if (typeof error51 === "object" && error51 !== null && "name" in error51 && typeof error51.name === "string") {
+    return error51.name;
+  }
+  return null;
+}
+
+// src/runtime/adapters/plugin-data-keys.ts
+var PERSIST_KEY = "syncState";
+var PERSIST_BAK_KEY = "syncState.bak";
+var PERSIST_STAGING_KEY = "syncState.staging";
+var PERSIST_CORRUPT_PREFIX = "syncStateCorrupt.";
+var PERSIST_PRODUCER_CORRUPT_PREFIX = "pushProducerCorrupt.";
+var CLIENT_INSTANCE_KEY = "clientInstanceId";
+var PUSH_PRODUCER_KEY = "pushProducer";
+var OWNER_CONNECTION_KEY = "ownerConnection";
+var OWNER_CONNECTION_CORRUPT_PREFIX = "ownerConnectionCorrupt.";
+var CORRUPT_SIDECAR_PREFIXES = [
+  PERSIST_CORRUPT_PREFIX,
+  PERSIST_PRODUCER_CORRUPT_PREFIX,
+  OWNER_CONNECTION_CORRUPT_PREFIX
+];
+function isCorruptSidecarKey(key) {
+  return CORRUPT_SIDECAR_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+var MAX_CORRUPT_SIDECARS = 3;
+function withCorruptSidecar(base, prefix, timestamp, raw) {
+  const key = `${prefix}${timestamp}`;
+  const next = key in base ? { ...base } : { ...base, [key]: raw };
+  const stamps = Object.keys(next).filter((candidate) => candidate.startsWith(prefix)).map((candidate) => ({ candidate, stamp: Number(candidate.slice(prefix.length)) })).sort((a, b) => b.stamp - a.stamp);
+  for (const { candidate } of stamps.slice(MAX_CORRUPT_SIDECARS)) {
+    delete next[candidate];
+  }
+  return next;
+}
+
+// src/runtime/adapters/plugin-data-ports.ts
+function createPersistPort(plugin) {
+  const mutex = getPluginDataMutex(plugin);
+  return {
+    async load() {
+      return (await mutex.load())[PERSIST_KEY] ?? null;
+    },
+    async loadBackup() {
+      return (await mutex.load())[PERSIST_BAK_KEY] ?? null;
+    },
+    async save(state) {
+      await mutex.update((base) => {
+        const next = { ...base };
+        const priorPrimary = next[PERSIST_KEY];
+        if (priorPrimary !== void 0) next[PERSIST_BAK_KEY] = priorPrimary;
+        next[PERSIST_KEY] = state;
+        delete next[PERSIST_STAGING_KEY];
+        return next;
+      });
+    },
+    async preserveCorrupt(raw, timestamp) {
+      await mutex.update(
+        (base) => withCorruptSidecar(base, PERSIST_CORRUPT_PREFIX, timestamp, raw)
+      );
+    }
+  };
+}
+async function preserveCorruptProducerState(plugin, raw, timestamp) {
+  await getPluginDataMutex(plugin).update(
+    (base) => withCorruptSidecar(base, PERSIST_PRODUCER_CORRUPT_PREFIX, timestamp, raw)
+  );
+}
+function createRawPersistPort(plugin) {
+  return createSerializedDataPort(getPluginDataMutex(plugin));
+}
+function createClientInstanceRepo(plugin) {
+  return {
+    async readClientInstanceId() {
+      const value = (await getPluginDataMutex(plugin).load())[CLIENT_INSTANCE_KEY];
+      return typeof value === "string" ? value : null;
+    },
+    async writeClientInstanceId(value) {
+      await getPluginDataMutex(plugin).update((base) => ({
+        ...base,
+        [CLIENT_INSTANCE_KEY]: value
+      }));
+    }
+  };
+}
+function createOutboxPayloadStore(plugin) {
+  const ensureStore = openClientStoreLazily(
+    plugin,
+    "Havemind: outbox payload store unavailable; payloads stay inline in data.json."
+  );
+  return {
+    async putPayload(revisionId, payloadBase64) {
+      const store = await ensureStore();
+      if (store === null) {
+        throw new Error("Havemind: outbox payload store is unavailable.");
+      }
+      await store.putPayload(revisionId, payloadBase64);
+    },
+    async getPayload(revisionId) {
+      const store = await ensureStore();
+      if (store === null) return void 0;
+      return store.getPayload(revisionId);
+    },
+    async deletePayload(revisionId) {
+      const store = await ensureStore();
+      if (store === null) return;
+      await store.deletePayload(revisionId);
+    }
+  };
+}
+function createPersistedRevisionHistoryStore(plugin, scope) {
+  return createRevisionHistoryStore(
+    openClientStoreLazily(
+      plugin,
+      "Havemind: revision history store unavailable; each connection reads the full history."
+    ),
+    scope
+  );
+}
+function openClientStoreLazily(plugin, unavailableWarning) {
+  let storePromise = null;
+  return () => {
+    if (storePromise === null) {
+      storePromise = (async () => {
+        try {
+          const clientInstanceId = await ensureClientInstanceId(
+            createClientInstanceRepo(plugin)
+          );
+          const store = new IndexedDbClientStore({ clientInstanceId });
+          await store.open();
+          return store;
+        } catch {
+          console.warn(unavailableWarning);
+          return null;
+        }
+      })();
+    }
+    return storePromise;
+  };
+}
+
+// src/runtime/adapters/scheduler-hooks.ts
+function createSchedulerHooks(plugin, target = window, visibility) {
+  return {
+    onFocus(run) {
+      target.addEventListener("focus", run);
+      return () => target.removeEventListener("focus", run);
+    },
+    onOnline(run) {
+      target.addEventListener("online", run);
+      return () => target.removeEventListener("online", run);
+    },
+    onVisible(run) {
+      const source = visibility ?? (typeof document === "undefined" ? void 0 : document);
+      if (source === void 0) {
+        return () => void 0;
+      }
+      const listener = () => {
+        if (source.visibilityState !== "hidden") run();
+      };
+      source.addEventListener("visibilitychange", listener);
+      return () => source.removeEventListener("visibilitychange", listener);
+    },
+    setInterval(run, ms) {
+      const id = window.setInterval(run, ms);
+      plugin.registerInterval(id);
+      return () => window.clearInterval(id);
+    }
+  };
+}
+function createBackoffScheduler() {
+  return (callback, delayMs) => {
+    const timer = window.setTimeout(callback, delayMs);
+    return () => window.clearTimeout(timer);
+  };
+}
+
+// src/runtime/adapters/vault-file-port.ts
+var import_obsidian2 = require("obsidian");
+
+// src/sync/config-adapter.ts
+var CONFIG_DIR = ".obsidian";
+var HAVEMIND_PLUGIN_DIR = ".obsidian/plugins/havemind-sync";
+function isUnderHavemindPlugin(folder) {
+  return folder === HAVEMIND_PLUGIN_DIR || folder.startsWith(`${HAVEMIND_PLUGIN_DIR}/`);
+}
+async function listSyncableConfigPaths(adapter, root = CONFIG_DIR) {
+  const found = [];
+  const pending = [root];
+  const visited = /* @__PURE__ */ new Set();
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    if (dir === void 0 || visited.has(dir)) continue;
+    visited.add(dir);
+    let listing;
+    try {
+      listing = await adapter.list(dir);
+    } catch {
+      continue;
+    }
+    for (const file2 of listing.files) {
+      if (isSyncableConfigPath(file2)) found.push(file2);
+    }
+    for (const folder of listing.folders) {
+      if (isUnderHavemindPlugin(folder)) continue;
+      pending.push(folder);
+    }
+  }
+  found.sort();
+  return found;
+}
+async function ensureConfigParentDirs(adapter, path) {
+  const separator = path.lastIndexOf("/");
+  if (separator === -1) return;
+  const segments = path.slice(0, separator).split("/");
+  let prefix = "";
+  for (const segment of segments) {
+    prefix = prefix === "" ? segment : `${prefix}/${segment}`;
+    try {
+      await adapter.mkdir(prefix);
+    } catch {
+    }
+  }
+}
+async function writeConfigText(adapter, path, content) {
+  await ensureConfigParentDirs(adapter, path);
+  await adapter.write(path, content);
+}
+async function writeConfigBinary(adapter, path, data) {
+  await ensureConfigParentDirs(adapter, path);
+  await adapter.writeBinary(path, data);
+}
+async function removeConfig(adapter, path) {
+  if (await adapter.exists(path)) await adapter.remove(path);
+}
+
 // src/sync/config-normalize.ts
 var GRAPH_SETTINGS_PATH = ".obsidian/graph.json";
 var GRAPH_VOLATILE_KEYS = /* @__PURE__ */ new Set([
@@ -19202,6 +18702,235 @@ function mergeConfigContent(path, localText, remoteText) {
   return `${JSON.stringify({ ...localVolatile, ...remoteSemantic }, null, JSON_INDENT)}
 `;
 }
+
+// src/runtime/revision-history.ts
+var MAX_CACHED_PAYLOADS = 200;
+var RevisionHistory = class {
+  constructor(options) {
+    __publicField(this, "options", options);
+    __publicField(this, "accepted", /* @__PURE__ */ new Map());
+    __publicField(this, "ordered", []);
+    __publicField(this, "payloads", /* @__PURE__ */ new Map());
+    __publicField(this, "cursor", 0);
+    __publicField(this, "epoch", null);
+    __publicField(this, "loaded", false);
+    __publicField(this, "loading", null);
+    __publicField(this, "restoreAttempted", false);
+    /** True while the in-memory log came from the store and is not yet confirmed. */
+    __publicField(this, "unconfirmed", false);
+    __publicField(this, "persistedCursor", 0);
+  }
+  async refresh() {
+    if (this.loading !== null) return this.loading;
+    this.loading = this.load();
+    try {
+      await this.loading;
+      this.loaded = true;
+    } finally {
+      this.loading = null;
+    }
+  }
+  async load() {
+    if (!this.restoreAttempted) {
+      this.restoreAttempted = true;
+      await this.restore();
+    }
+    if (!this.unconfirmed) {
+      await this.pullAll();
+    } else {
+      try {
+        await this.pullAll();
+      } catch (error51) {
+        this.reset();
+        try {
+          await this.pullAll();
+        } catch {
+          this.reset();
+          this.restoreAttempted = false;
+          throw error51;
+        }
+      }
+    }
+    await this.persist();
+  }
+  async pullAll() {
+    let target = null;
+    do {
+      const anchor = this.unconfirmed ? this.ordered[this.cursor - 1] : void 0;
+      const page = await this.options.transport.pull(anchor === void 0 ? this.cursor : this.cursor - 1);
+      const epoch = page.epoch ?? null;
+      if (anchor !== void 0) {
+        const first = page.events[0];
+        if (page.cursor < this.cursor || epoch !== this.epoch || first === void 0 || first.serverSequence !== anchor.serverSequence || !sameEvent(first, anchor)) {
+          throw new Error("Stored revision history does not match the server.");
+        }
+        this.unconfirmed = false;
+      }
+      this.epoch = epoch;
+      target ?? (target = page.cursor);
+      for (const event of page.events) {
+        if (event.serverSequence <= this.cursor) continue;
+        if (event.serverSequence !== this.cursor + 1) throw new Error("Revision history has a gap.");
+        this.append(event);
+      }
+      if (page.events.length === 0 && this.cursor < target) throw new Error("Revision history is incomplete.");
+    } while (this.cursor < target);
+  }
+  append(event) {
+    this.accepted.set(event.revision.revisionId, event);
+    this.ordered.push(event);
+    this.cursor = event.serverSequence;
+  }
+  reset() {
+    this.accepted.clear();
+    this.ordered.length = 0;
+    this.cursor = 0;
+    this.epoch = null;
+    this.unconfirmed = false;
+    this.persistedCursor = 0;
+  }
+  /** Seed the log from the store; anything that fails validation is ignored. */
+  async restore() {
+    const store = this.options.store;
+    if (store === void 0) return;
+    let stored;
+    try {
+      stored = parseStoredHistory(await store.load());
+    } catch {
+      stored = null;
+    }
+    if (stored === null || stored.cursor === 0) return;
+    for (const event of stored.events) this.append(event);
+    this.epoch = stored.epoch;
+    this.persistedCursor = stored.cursor;
+    this.unconfirmed = true;
+  }
+  /** One store write per refresh that saw new events; a failure never fails sync. */
+  async persist() {
+    const store = this.options.store;
+    if (store === void 0 || this.persistedCursor === this.cursor) return;
+    try {
+      await store.save({ epoch: this.epoch, cursor: this.cursor, events: this.ordered }, this.persistedCursor);
+      this.persistedCursor = this.cursor;
+    } catch {
+      this.persistedCursor = 0;
+      console.warn("Havemind: could not save the revision history; the next connection reads it in full.");
+    }
+  }
+  async graph(fileId) {
+    if (!this.loaded) await this.refresh();
+    const graph = new Map([...this.accepted].filter(([, event]) => event.revision.fileId === fileId));
+    for (const queued of await this.options.state.listOutbox()) {
+      if (queued.fileId !== fileId || graph.has(queued.revisionId)) continue;
+      graph.set(queued.revisionId, { serverSequence: 0, revision: queued });
+    }
+    return graph;
+  }
+  /** A pull can receive a revision committed after the cycle snapshot. */
+  async ensureEvent(event) {
+    if (!this.accepted.has(event.revision.revisionId)) await this.refresh();
+    if (!this.accepted.has(event.revision.revisionId)) throw new Error("Incoming revision is missing from history.");
+  }
+  /** The accepted revision with this id, reading history it may still lack. */
+  async event(revisionId) {
+    if (!this.loaded || !this.accepted.has(revisionId)) await this.refresh();
+    return this.accepted.get(revisionId);
+  }
+  async allHeads() {
+    if (!this.loaded) await this.refresh();
+    const parents = new Set([...this.accepted.values()].flatMap((e) => e.revision.parentRevisionIds ?? []));
+    return [...this.accepted.values()].filter((e) => !parents.has(e.revision.revisionId));
+  }
+  async heads(fileId) {
+    if (!this.loaded) await this.refresh();
+    const events = [...this.accepted.values()].filter((event) => event.revision.fileId === fileId);
+    const parents = new Set(events.flatMap((event) => event.revision.parentRevisionIds ?? []));
+    return events.filter((event) => !parents.has(event.revision.revisionId));
+  }
+  async payload(event) {
+    const id = event.revision.revisionId;
+    const cached2 = this.payloads.get(id);
+    if (cached2 !== void 0) {
+      this.payloads.delete(id);
+      this.payloads.set(id, cached2);
+      return cached2;
+    }
+    const queued = await this.options.state.getEnvelope(id);
+    const payload = queued === void 0 ? await this.options.resolveRevision(event) : decodeRevisionPayload(Uint8Array.from(atob(queued.payloadBase64), (char) => char.charCodeAt(0)));
+    if (payload.kind === "binary") return payload;
+    this.payloads.set(id, payload);
+    if (this.payloads.size > MAX_CACHED_PAYLOADS) {
+      const oldest = this.payloads.keys().next().value;
+      if (oldest !== void 0) this.payloads.delete(oldest);
+    }
+    return payload;
+  }
+};
+function sameEvent(left, right) {
+  const a = left.revision;
+  const b = right.revision;
+  return a.revisionId === b.revisionId && a.fileId === b.fileId && a.contentHash === b.contentHash && JSON.stringify(a.parentRevisionIds ?? []) === JSON.stringify(b.parentRevisionIds ?? []);
+}
+function parseStoredHistory(value) {
+  if (!isRecord10(value) || !Array.isArray(value.events) || !Number.isSafeInteger(value.cursor)) return null;
+  const epoch = value.epoch;
+  if (epoch !== null && typeof epoch !== "string") return null;
+  if (value.events.length !== value.cursor) return null;
+  const events = [];
+  for (const [index, raw] of value.events.entries()) {
+    const event = parseStoredEvent(raw);
+    if (event === null || event.serverSequence !== index + 1) return null;
+    events.push(event);
+  }
+  return { epoch, cursor: events.length, events };
+}
+function parseStoredEvent(raw) {
+  if (!isRecord10(raw) || !Number.isSafeInteger(raw.serverSequence) || !isRecord10(raw.revision)) return null;
+  const { revisionId, fileId, contentHash, parentRevisionIds, authorMembershipId } = raw.revision;
+  if (typeof revisionId !== "string" || typeof fileId !== "string" || typeof contentHash !== "string") return null;
+  if (parentRevisionIds !== void 0 && !(Array.isArray(parentRevisionIds) && parentRevisionIds.every((id) => typeof id === "string"))) return null;
+  if (authorMembershipId !== void 0 && typeof authorMembershipId !== "string") return null;
+  return {
+    serverSequence: raw.serverSequence,
+    revision: {
+      revisionId,
+      fileId,
+      contentHash,
+      ...parentRevisionIds === void 0 ? {} : { parentRevisionIds },
+      ...authorMembershipId === void 0 ? {} : { authorMembershipId }
+    }
+  };
+}
+function isRecord10(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function ancestors(graph, start) {
+  const result = /* @__PURE__ */ new Set();
+  const queue = [start];
+  while (queue.length > 0) {
+    const id = queue.pop();
+    if (result.has(id)) continue;
+    result.add(id);
+    queue.push(...graph.get(id)?.revision.parentRevisionIds ?? []);
+  }
+  return result;
+}
+function commonAncestor(graph, left, right) {
+  const leftAncestors = ancestors(graph, left);
+  const common = [...ancestors(graph, right)].filter((id) => leftAncestors.has(id) && graph.has(id));
+  const commonSet = new Set(common);
+  const superseded = new Set(common.flatMap((id) => graph.get(id)?.revision.parentRevisionIds ?? []).filter((id) => commonSet.has(id)));
+  const nearest = common.filter((id) => !superseded.has(id));
+  return nearest.length === 1 ? graph.get(nearest[0]) ?? null : null;
+}
+
+// src/runtime/apply-deferred.ts
+var ApplyDeferredError = class extends Error {
+  constructor() {
+    super("Local content changed during remote apply.");
+    __publicField(this, "name", "ApplyDeferredError");
+  }
+};
 
 // src/obsidian/vault-adapter.ts
 var RESERVED_TOP_LEVEL_DIRECTORIES = new Set(
@@ -19590,971 +19319,6 @@ async function sha256Hex3(text) {
 function noop() {
   return void 0;
 }
-
-// src/runtime/canonicalization-rebase.ts
-var CANONICALIZATION_REBASE_VERSION = 1;
-var BINARY_EXTENSION_SET = new Set(SYNCABLE_BINARY_EXTENSIONS);
-function mappingIsBinary(mapping) {
-  return mapping.contentKind === "binary" || BINARY_EXTENSION_SET.has(pathExtension(mapping.path));
-}
-function isRecord9(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function readMapping(entry) {
-  if (!isRecord9(entry) || typeof entry.collisionKey !== "string" || typeof entry.contentHash !== "string" || typeof entry.fileId !== "string" || typeof entry.path !== "string") {
-    return null;
-  }
-  return {
-    collisionKey: entry.collisionKey,
-    ...typeof entry.content === "string" ? { content: entry.content } : {},
-    contentHash: entry.contentHash,
-    ...typeof entry.contentKind === "string" ? { contentKind: entry.contentKind } : {},
-    fileId: entry.fileId,
-    path: entry.path
-  };
-}
-async function rebaseCanonicalizedHashes(deps) {
-  const targetVersion = deps.targetVersion ?? CANONICALIZATION_REBASE_VERSION;
-  const raw = await deps.data.load();
-  const data = isRecord9(raw) ? raw : {};
-  const marker = data[deps.keys.markerKey];
-  if (typeof marker === "number" && marker >= targetVersion) {
-    return { ran: false, mappingsRebased: 0, baseHashesRebased: 0, missingFiles: 0 };
-  }
-  let mappingsRebased = 0;
-  let baseHashesRebased = 0;
-  let missingFiles = 0;
-  const pathByFileId = /* @__PURE__ */ new Map();
-  const binaryFileIds = /* @__PURE__ */ new Set();
-  const producer = data[deps.keys.producerKey];
-  let nextProducer;
-  if (isRecord9(producer) && Array.isArray(producer.mappings)) {
-    const nextMappings2 = [];
-    for (const entry of producer.mappings) {
-      const mapping = readMapping(entry);
-      if (mapping === null) {
-        nextMappings2.push(entry);
-        continue;
-      }
-      pathByFileId.set(mapping.fileId, mapping.path);
-      if (mappingIsBinary(mapping)) {
-        binaryFileIds.add(mapping.fileId);
-        nextMappings2.push(entry);
-        continue;
-      }
-      if (!deps.vault.exists(mapping.path)) {
-        missingFiles += 1;
-        nextMappings2.push(entry);
-        continue;
-      }
-      const canonical = deps.canonicalize(await deps.vault.read(mapping.path));
-      const contentHash = await deps.hash(canonical);
-      nextMappings2.push({ ...mapping, ...mapping.content === void 0 ? {} : { content: canonical }, contentHash });
-      mappingsRebased += 1;
-    }
-    nextProducer = { ...producer, mappings: nextMappings2 };
-  }
-  const persist = data[deps.keys.persistKey];
-  let nextPersist;
-  if (isRecord9(persist) && isRecord9(persist.baseHashes)) {
-    if (isRecord9(persist.pathOwners)) {
-      for (const [ownerPath, ownerFileId] of Object.entries(persist.pathOwners)) {
-        if (typeof ownerFileId === "string" && !pathByFileId.has(ownerFileId)) {
-          pathByFileId.set(ownerFileId, ownerPath);
-        }
-      }
-    }
-    const nextBaseHashes = {};
-    for (const [fileId, hash2] of Object.entries(persist.baseHashes)) {
-      if (binaryFileIds.has(fileId)) {
-        nextBaseHashes[fileId] = hash2;
-        continue;
-      }
-      const path = pathByFileId.get(fileId);
-      if (typeof hash2 !== "string" || path === void 0 || !deps.vault.exists(path)) {
-        if (typeof hash2 === "string" && (path === void 0 || !deps.vault.exists(path))) {
-          missingFiles += 1;
-        }
-        nextBaseHashes[fileId] = hash2;
-        continue;
-      }
-      const canonical = deps.canonicalize(await deps.vault.read(path));
-      nextBaseHashes[fileId] = await deps.hash(canonical);
-      baseHashesRebased += 1;
-    }
-    nextPersist = { ...persist, baseHashes: nextBaseHashes };
-  }
-  await deps.data.save({
-    ...data,
-    ...nextProducer === void 0 ? {} : { [deps.keys.producerKey]: nextProducer },
-    ...nextPersist === void 0 ? {} : { [deps.keys.persistKey]: nextPersist },
-    [deps.keys.markerKey]: targetVersion
-  });
-  return { ran: true, mappingsRebased, baseHashesRebased, missingFiles };
-}
-
-// src/runtime/revision-history-store.ts
-var MAX_HISTORY_SEGMENTS = 64;
-var FORMAT = 1;
-var KEY_PREFIX = "revision-history";
-function createRevisionHistoryStore(openRecords, scope) {
-  const metaKey = `${KEY_PREFIX}|${scope.vaultId}`;
-  const segmentKey = (index) => `${metaKey}|${index}`;
-  const readMeta = async (records) => {
-    const value = await records.getHistoryRecord(metaKey);
-    if (!isRecord10(value) || value.format !== FORMAT) return null;
-    if (value.apiBaseUrl !== scope.apiBaseUrl || value.vaultId !== scope.vaultId) return null;
-    if (value.epoch !== null && typeof value.epoch !== "string") return null;
-    if (!Number.isSafeInteger(value.cursor) || !Number.isSafeInteger(value.segments)) return null;
-    return value;
-  };
-  const writeMeta = (records, epoch, cursor, segments) => records.putHistoryRecord(metaKey, {
-    format: FORMAT,
-    apiBaseUrl: scope.apiBaseUrl,
-    vaultId: scope.vaultId,
-    epoch,
-    cursor,
-    segments
-  });
-  return {
-    async load() {
-      const records = await openRecords();
-      if (records === null) return null;
-      const meta3 = await readMeta(records);
-      if (meta3 === null || meta3.segments < 0 || meta3.segments > MAX_HISTORY_SEGMENTS) return null;
-      const segments = await Promise.all(
-        Array.from({ length: meta3.segments }, (_, index) => records.getHistoryRecord(segmentKey(index)))
-      );
-      const events = [];
-      for (const segment of segments) {
-        if (!isRecord10(segment) || segment.format !== FORMAT || segment.from !== events.length) return null;
-        if (!Array.isArray(segment.events)) return null;
-        events.push(...segment.events);
-      }
-      return events.length === meta3.cursor ? { epoch: meta3.epoch, cursor: meta3.cursor, events } : null;
-    },
-    async save(history, persistedCursor) {
-      const records = await openRecords();
-      if (records === null) return;
-      const meta3 = await readMeta(records);
-      if (meta3 !== null && persistedCursor > 0 && meta3.cursor === persistedCursor && meta3.epoch === history.epoch && meta3.segments < MAX_HISTORY_SEGMENTS) {
-        await records.putHistoryRecord(segmentKey(meta3.segments), {
-          format: FORMAT,
-          from: persistedCursor,
-          events: history.events.slice(persistedCursor)
-        });
-        await writeMeta(records, history.epoch, history.cursor, meta3.segments + 1);
-        return;
-      }
-      await records.deleteHistoryRecord(metaKey);
-      await records.putHistoryRecord(segmentKey(0), { format: FORMAT, from: 0, events: history.events.slice() });
-      await writeMeta(records, history.epoch, history.cursor, 1);
-      for (let index = 1; index < (meta3?.segments ?? 0); index += 1) {
-        await records.deleteHistoryRecord(segmentKey(index)).catch(() => void 0);
-      }
-    }
-  };
-}
-function isRecord10(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// src/storage/client-store.ts
-var CLIENT_STORE_NAMES = [
-  "activity",
-  "connection",
-  "cursors",
-  "deferred-applies",
-  "file-mappings",
-  "heads",
-  // P13: the accepted revision log, so a new connection pulls only the tail.
-  "history",
-  "inbox",
-  "outbox",
-  // Arch P1: out-of-band store for large outbox payload bytes, keyed by
-  // revisionId. Keeps a 25 MB attachment out of the per-plugin `data.json`,
-  // which is re-serialised on every cursor save.
-  "payloads",
-  "provenance"
-];
-var CLIENT_STORE_VERSION = 3;
-var CLIENT_DATABASE_PREFIX = "havemind-client-";
-var CLIENT_INSTANCE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-var ClientStoreError = class extends Error {
-  constructor(code, message, cause) {
-    super(message, cause === void 0 ? void 0 : { cause });
-    __publicField(this, "code", code);
-    __publicField(this, "name", "ClientStoreError");
-  }
-};
-async function ensureClientInstanceId(repository, generateId = generateClientInstanceId) {
-  const existingId = await repository.readClientInstanceId();
-  if (existingId !== null) {
-    assertClientInstanceId(existingId);
-    return existingId;
-  }
-  const generatedId = generateId();
-  assertClientInstanceId(generatedId);
-  await repository.writeClientInstanceId(generatedId);
-  return generatedId;
-}
-function isValidClientInstanceId(value) {
-  return value.length >= 16 && value.length <= 64 && CLIENT_INSTANCE_ID_PATTERN.test(value);
-}
-var IndexedDbClientStore = class {
-  constructor(options) {
-    __publicField(this, "databaseName");
-    __publicField(this, "database", null);
-    __publicField(this, "indexedDB");
-    __publicField(this, "openAttempt", 0);
-    __publicField(this, "storeState", "closed");
-    assertClientInstanceId(options.clientInstanceId);
-    const indexedDB = options.indexedDB ?? globalThis.indexedDB;
-    if (!indexedDB) {
-      throw new ClientStoreError(
-        "storage-unavailable",
-        "IndexedDB is unavailable in this Obsidian runtime."
-      );
-    }
-    this.databaseName = `${CLIENT_DATABASE_PREFIX}${options.clientInstanceId}`;
-    this.indexedDB = indexedDB;
-  }
-  get state() {
-    return this.storeState;
-  }
-  async open() {
-    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
-      return;
-    }
-    if (this.storeState === "opening") {
-      throw new ClientStoreError(
-        "transaction-failed",
-        "The IndexedDB connection is already opening."
-      );
-    }
-    const attempt = ++this.openAttempt;
-    this.storeState = "opening";
-    let request;
-    try {
-      request = this.indexedDB.open(
-        this.databaseName,
-        CLIENT_STORE_VERSION
-      );
-    } catch (error51) {
-      this.storeState = "closed";
-      throw normalizeClientStoreError(error51);
-    }
-    await new Promise((resolve, reject) => {
-      let settled = false;
-      const rejectOnce = (error51) => {
-        if (settled) return;
-        settled = true;
-        reject(error51);
-      };
-      request.onupgradeneeded = () => {
-        const database = request.result;
-        for (const storeName of CLIENT_STORE_NAMES) {
-          if (!database.objectStoreNames.contains(storeName)) {
-            database.createObjectStore(storeName);
-          }
-        }
-      };
-      request.onblocked = () => {
-        if (attempt !== this.openAttempt) return;
-        this.storeState = "blocked";
-        rejectOnce(
-          new ClientStoreError(
-            "blocked-upgrade",
-            "IndexedDB upgrade is blocked by another open Havemind client."
-          )
-        );
-      };
-      request.onerror = () => {
-        if (attempt !== this.openAttempt) return;
-        this.storeState = "closed";
-        rejectOnce(normalizeClientStoreError(request.error));
-      };
-      request.onsuccess = () => {
-        const database = request.result;
-        if (settled || attempt !== this.openAttempt || this.storeState !== "opening") {
-          database.close();
-          rejectOnce(
-            new ClientStoreError(
-              "closed",
-              "The IndexedDB connection was closed while opening."
-            )
-          );
-          return;
-        }
-        settled = true;
-        this.database = database;
-        this.storeState = "ready";
-        database.onversionchange = () => {
-          database.close();
-          if (this.database === database) this.database = null;
-          this.storeState = "versionchange";
-        };
-        resolve();
-      };
-    });
-  }
-  close() {
-    this.openAttempt += 1;
-    this.database?.close();
-    this.database = null;
-    this.storeState = "closed";
-  }
-  /**
-   * Arch P1: store an outbox revision's base64 payload out-of-band, keyed by
-   * `revisionId`, so the large bytes stay out of the per-plugin `data.json`.
-   */
-  async putPayload(revisionId, payloadBase64) {
-    assertStorageKey(revisionId);
-    await this.runTransaction(
-      "payloads",
-      "readwrite",
-      (store) => store.put(payloadBase64, revisionId)
-    );
-  }
-  /** The stored payload for `revisionId`, or undefined when absent (torn state). */
-  async getPayload(revisionId) {
-    assertStorageKey(revisionId);
-    const value = await this.runTransaction(
-      "payloads",
-      "readonly",
-      (store) => store.get(revisionId)
-    );
-    return typeof value === "string" ? value : void 0;
-  }
-  /** Remove a stored payload; a no-op when absent. */
-  async deletePayload(revisionId) {
-    assertStorageKey(revisionId);
-    await this.runTransaction(
-      "payloads",
-      "readwrite",
-      (store) => store.delete(revisionId)
-    );
-  }
-  /** P13: one record of the persisted revision history, or undefined when absent. */
-  async getHistoryRecord(key) {
-    assertStorageKey(key);
-    return this.runTransaction(
-      "history",
-      "readonly",
-      (store) => store.get(key)
-    );
-  }
-  async putHistoryRecord(key, value) {
-    assertStorageKey(key);
-    await this.runTransaction(
-      "history",
-      "readwrite",
-      (store) => store.put(value, key)
-    );
-  }
-  /** Remove one history record; a no-op when absent. */
-  async deleteHistoryRecord(key) {
-    assertStorageKey(key);
-    await this.runTransaction(
-      "history",
-      "readwrite",
-      (store) => store.delete(key)
-    );
-  }
-  requireDatabase() {
-    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
-      return this.database;
-    }
-    if (this.storeState === "versionchange") {
-      throw new ClientStoreError(
-        "version-changed",
-        "The IndexedDB schema changed in another Havemind client."
-      );
-    }
-    throw new ClientStoreError(
-      "closed",
-      "The Havemind IndexedDB connection is not open."
-    );
-  }
-  async runTransaction(storeName, mode, createRequest) {
-    const isWrite = mode === "readwrite";
-    let transaction;
-    let request;
-    try {
-      transaction = this.requireDatabase().transaction(storeName, mode);
-      request = createRequest(transaction.objectStore(storeName));
-    } catch (error51) {
-      const normalized = normalizeClientStoreError(error51);
-      if (isWrite && normalized.code !== "closed" && normalized.code !== "version-changed") {
-        this.storeState = "write-failed";
-      }
-      throw normalized;
-    }
-    return new Promise((resolve, reject) => {
-      let requestResult;
-      let requestSucceeded = false;
-      let settled = false;
-      const fail = (error51) => {
-        if (settled) return;
-        settled = true;
-        if (isWrite) this.storeState = "write-failed";
-        reject(normalizeClientStoreError(error51));
-      };
-      request.onsuccess = () => {
-        requestResult = request.result;
-        requestSucceeded = true;
-      };
-      request.onerror = () => {
-        if (request.error) fail(request.error);
-      };
-      transaction.onerror = () => {
-        fail(transaction.error ?? request.error);
-      };
-      transaction.onabort = () => {
-        fail(transaction.error ?? request.error);
-      };
-      transaction.oncomplete = () => {
-        if (settled) return;
-        if (!requestSucceeded) {
-          fail(
-            new ClientStoreError(
-              "transaction-failed",
-              "IndexedDB completed without confirming the requested operation."
-            )
-          );
-          return;
-        }
-        settled = true;
-        if (isWrite) this.storeState = "ready";
-        resolve(requestResult);
-      };
-    });
-  }
-};
-function assertClientInstanceId(value) {
-  if (!isValidClientInstanceId(value)) {
-    throw new ClientStoreError(
-      "invalid-client-instance-id",
-      "client_instance_id must be 16-64 lowercase alphanumeric or hyphen characters."
-    );
-  }
-}
-function assertStorageKey(value) {
-  if (value.length === 0 || value.length > 256) {
-    throw new ClientStoreError(
-      "transaction-failed",
-      "IndexedDB keys must contain between 1 and 256 characters."
-    );
-  }
-}
-function generateClientInstanceId() {
-  if (!globalThis.crypto?.randomUUID) {
-    throw new ClientStoreError(
-      "storage-unavailable",
-      "Secure random UUID generation is unavailable in this Obsidian runtime."
-    );
-  }
-  return globalThis.crypto.randomUUID();
-}
-function normalizeClientStoreError(error51) {
-  if (error51 instanceof ClientStoreError) return error51;
-  if (getErrorName(error51) === "QuotaExceededError") {
-    return new ClientStoreError(
-      "quota-exceeded",
-      "IndexedDB quota was exceeded; the operation was not durably queued.",
-      error51
-    );
-  }
-  return new ClientStoreError(
-    "transaction-failed",
-    "The IndexedDB operation failed.",
-    error51
-  );
-}
-function getErrorName(error51) {
-  if (typeof error51 === "object" && error51 !== null && "name" in error51 && typeof error51.name === "string") {
-    return error51.name;
-  }
-  return null;
-}
-
-// src/runtime/adapters/plugin-data-keys.ts
-var PERSIST_KEY = "syncState";
-var PERSIST_BAK_KEY = "syncState.bak";
-var PERSIST_STAGING_KEY = "syncState.staging";
-var PERSIST_CORRUPT_PREFIX = "syncStateCorrupt.";
-var PERSIST_PRODUCER_CORRUPT_PREFIX = "pushProducerCorrupt.";
-var CANONICALIZATION_REBASE_MARKER_KEY = "canonicalizationRebaseVersion";
-var CLIENT_INSTANCE_KEY = "clientInstanceId";
-var PUSH_PRODUCER_KEY = "pushProducer";
-var OWNER_CONNECTION_KEY = "ownerConnection";
-var OWNER_CONNECTION_CORRUPT_PREFIX = "ownerConnectionCorrupt.";
-var CORRUPT_SIDECAR_PREFIXES = [
-  PERSIST_CORRUPT_PREFIX,
-  PERSIST_PRODUCER_CORRUPT_PREFIX,
-  OWNER_CONNECTION_CORRUPT_PREFIX
-];
-function isCorruptSidecarKey(key) {
-  return CORRUPT_SIDECAR_PREFIXES.some((prefix) => key.startsWith(prefix));
-}
-var MAX_CORRUPT_SIDECARS = 3;
-function withCorruptSidecar(base, prefix, timestamp, raw) {
-  const key = `${prefix}${timestamp}`;
-  const next = key in base ? { ...base } : { ...base, [key]: raw };
-  const stamps = Object.keys(next).filter((candidate) => candidate.startsWith(prefix)).map((candidate) => ({ candidate, stamp: Number(candidate.slice(prefix.length)) })).sort((a, b) => b.stamp - a.stamp);
-  for (const { candidate } of stamps.slice(MAX_CORRUPT_SIDECARS)) {
-    delete next[candidate];
-  }
-  return next;
-}
-
-// src/runtime/adapters/plugin-data-ports.ts
-function createPersistPort(plugin) {
-  const mutex = getPluginDataMutex(plugin);
-  return {
-    async load() {
-      return (await mutex.load())[PERSIST_KEY] ?? null;
-    },
-    async loadBackup() {
-      return (await mutex.load())[PERSIST_BAK_KEY] ?? null;
-    },
-    async save(state) {
-      await mutex.update((base) => {
-        const next = { ...base };
-        const priorPrimary = next[PERSIST_KEY];
-        if (priorPrimary !== void 0) next[PERSIST_BAK_KEY] = priorPrimary;
-        next[PERSIST_KEY] = state;
-        delete next[PERSIST_STAGING_KEY];
-        return next;
-      });
-    },
-    async preserveCorrupt(raw, timestamp) {
-      await mutex.update(
-        (base) => withCorruptSidecar(base, PERSIST_CORRUPT_PREFIX, timestamp, raw)
-      );
-    }
-  };
-}
-async function preserveCorruptProducerState(plugin, raw, timestamp) {
-  await getPluginDataMutex(plugin).update(
-    (base) => withCorruptSidecar(base, PERSIST_PRODUCER_CORRUPT_PREFIX, timestamp, raw)
-  );
-}
-async function runCanonicalizationRebase(plugin) {
-  const vaultApi = plugin.app.vault;
-  const vault = {
-    exists: (path) => vaultApi.getAbstractFileByPath(path) !== null,
-    read: async (path) => {
-      const file2 = vaultApi.getAbstractFileByPath(path);
-      return file2 === null ? "" : vaultApi.read(file2);
-    }
-  };
-  await rebaseCanonicalizedHashes({
-    data: {
-      load: () => getPluginDataMutex(plugin).load(),
-      save: (data) => getPluginDataMutex(plugin).update(() => data)
-    },
-    vault,
-    hash: (content) => hashPlaintext(content),
-    canonicalize: canonicalizeMarkdown,
-    keys: {
-      markerKey: CANONICALIZATION_REBASE_MARKER_KEY,
-      persistKey: PERSIST_KEY,
-      producerKey: PUSH_PRODUCER_KEY
-    }
-  });
-}
-function createRawPersistPort(plugin) {
-  return createSerializedDataPort(getPluginDataMutex(plugin));
-}
-function createClientInstanceRepo(plugin) {
-  return {
-    async readClientInstanceId() {
-      const value = (await getPluginDataMutex(plugin).load())[CLIENT_INSTANCE_KEY];
-      return typeof value === "string" ? value : null;
-    },
-    async writeClientInstanceId(value) {
-      await getPluginDataMutex(plugin).update((base) => ({
-        ...base,
-        [CLIENT_INSTANCE_KEY]: value
-      }));
-    }
-  };
-}
-function createOutboxPayloadStore(plugin) {
-  const ensureStore = openClientStoreLazily(
-    plugin,
-    "Havemind: outbox payload store unavailable; payloads stay inline in data.json."
-  );
-  return {
-    async putPayload(revisionId, payloadBase64) {
-      const store = await ensureStore();
-      if (store === null) {
-        throw new Error("Havemind: outbox payload store is unavailable.");
-      }
-      await store.putPayload(revisionId, payloadBase64);
-    },
-    async getPayload(revisionId) {
-      const store = await ensureStore();
-      if (store === null) return void 0;
-      return store.getPayload(revisionId);
-    },
-    async deletePayload(revisionId) {
-      const store = await ensureStore();
-      if (store === null) return;
-      await store.deletePayload(revisionId);
-    }
-  };
-}
-function createPersistedRevisionHistoryStore(plugin, scope) {
-  return createRevisionHistoryStore(
-    openClientStoreLazily(
-      plugin,
-      "Havemind: revision history store unavailable; each connection reads the full history."
-    ),
-    scope
-  );
-}
-function openClientStoreLazily(plugin, unavailableWarning) {
-  let storePromise = null;
-  return () => {
-    if (storePromise === null) {
-      storePromise = (async () => {
-        try {
-          const clientInstanceId = await ensureClientInstanceId(
-            createClientInstanceRepo(plugin)
-          );
-          const store = new IndexedDbClientStore({ clientInstanceId });
-          await store.open();
-          return store;
-        } catch {
-          console.warn(unavailableWarning);
-          return null;
-        }
-      })();
-    }
-    return storePromise;
-  };
-}
-
-// src/runtime/adapters/scheduler-hooks.ts
-function createSchedulerHooks(plugin, target = window, visibility) {
-  return {
-    onFocus(run) {
-      target.addEventListener("focus", run);
-      return () => target.removeEventListener("focus", run);
-    },
-    onOnline(run) {
-      target.addEventListener("online", run);
-      return () => target.removeEventListener("online", run);
-    },
-    onVisible(run) {
-      const source = visibility ?? (typeof document === "undefined" ? void 0 : document);
-      if (source === void 0) {
-        return () => void 0;
-      }
-      const listener = () => {
-        if (source.visibilityState !== "hidden") run();
-      };
-      source.addEventListener("visibilitychange", listener);
-      return () => source.removeEventListener("visibilitychange", listener);
-    },
-    setInterval(run, ms) {
-      const id = window.setInterval(run, ms);
-      plugin.registerInterval(id);
-      return () => window.clearInterval(id);
-    }
-  };
-}
-function createBackoffScheduler() {
-  return (callback, delayMs) => {
-    const timer = window.setTimeout(callback, delayMs);
-    return () => window.clearTimeout(timer);
-  };
-}
-
-// src/runtime/adapters/vault-file-port.ts
-var import_obsidian3 = require("obsidian");
-
-// src/sync/config-adapter.ts
-var CONFIG_DIR = ".obsidian";
-var HAVEMIND_PLUGIN_DIR = ".obsidian/plugins/havemind-sync";
-function isUnderHavemindPlugin(folder) {
-  return folder === HAVEMIND_PLUGIN_DIR || folder.startsWith(`${HAVEMIND_PLUGIN_DIR}/`);
-}
-async function listSyncableConfigPaths(adapter, root = CONFIG_DIR) {
-  const found = [];
-  const pending = [root];
-  const visited = /* @__PURE__ */ new Set();
-  while (pending.length > 0) {
-    const dir = pending.pop();
-    if (dir === void 0 || visited.has(dir)) continue;
-    visited.add(dir);
-    let listing;
-    try {
-      listing = await adapter.list(dir);
-    } catch {
-      continue;
-    }
-    for (const file2 of listing.files) {
-      if (isSyncableConfigPath(file2)) found.push(file2);
-    }
-    for (const folder of listing.folders) {
-      if (isUnderHavemindPlugin(folder)) continue;
-      pending.push(folder);
-    }
-  }
-  found.sort();
-  return found;
-}
-async function ensureConfigParentDirs(adapter, path) {
-  const separator = path.lastIndexOf("/");
-  if (separator === -1) return;
-  const segments = path.slice(0, separator).split("/");
-  let prefix = "";
-  for (const segment of segments) {
-    prefix = prefix === "" ? segment : `${prefix}/${segment}`;
-    try {
-      await adapter.mkdir(prefix);
-    } catch {
-    }
-  }
-}
-async function writeConfigText(adapter, path, content) {
-  await ensureConfigParentDirs(adapter, path);
-  await adapter.write(path, content);
-}
-async function writeConfigBinary(adapter, path, data) {
-  await ensureConfigParentDirs(adapter, path);
-  await adapter.writeBinary(path, data);
-}
-async function removeConfig(adapter, path) {
-  if (await adapter.exists(path)) await adapter.remove(path);
-}
-
-// src/runtime/revision-history.ts
-var MAX_CACHED_PAYLOADS = 200;
-var RevisionHistory = class {
-  constructor(options) {
-    __publicField(this, "options", options);
-    __publicField(this, "accepted", /* @__PURE__ */ new Map());
-    __publicField(this, "ordered", []);
-    __publicField(this, "payloads", /* @__PURE__ */ new Map());
-    __publicField(this, "cursor", 0);
-    __publicField(this, "epoch", null);
-    __publicField(this, "loaded", false);
-    __publicField(this, "loading", null);
-    __publicField(this, "restoreAttempted", false);
-    /** True while the in-memory log came from the store and is not yet confirmed. */
-    __publicField(this, "unconfirmed", false);
-    __publicField(this, "persistedCursor", 0);
-  }
-  async refresh() {
-    if (this.loading !== null) return this.loading;
-    this.loading = this.load();
-    try {
-      await this.loading;
-      this.loaded = true;
-    } finally {
-      this.loading = null;
-    }
-  }
-  async load() {
-    if (!this.restoreAttempted) {
-      this.restoreAttempted = true;
-      await this.restore();
-    }
-    if (!this.unconfirmed) {
-      await this.pullAll();
-    } else {
-      try {
-        await this.pullAll();
-      } catch (error51) {
-        this.reset();
-        try {
-          await this.pullAll();
-        } catch {
-          this.reset();
-          this.restoreAttempted = false;
-          throw error51;
-        }
-      }
-    }
-    await this.persist();
-  }
-  async pullAll() {
-    let target = null;
-    do {
-      const anchor = this.unconfirmed ? this.ordered[this.cursor - 1] : void 0;
-      const page = await this.options.transport.pull(anchor === void 0 ? this.cursor : this.cursor - 1);
-      const epoch = page.epoch ?? null;
-      if (anchor !== void 0) {
-        const first = page.events[0];
-        if (page.cursor < this.cursor || epoch !== this.epoch || first === void 0 || first.serverSequence !== anchor.serverSequence || !sameEvent(first, anchor)) {
-          throw new Error("Stored revision history does not match the server.");
-        }
-        this.unconfirmed = false;
-      }
-      this.epoch = epoch;
-      target ?? (target = page.cursor);
-      for (const event of page.events) {
-        if (event.serverSequence <= this.cursor) continue;
-        if (event.serverSequence !== this.cursor + 1) throw new Error("Revision history has a gap.");
-        this.append(event);
-      }
-      if (page.events.length === 0 && this.cursor < target) throw new Error("Revision history is incomplete.");
-    } while (this.cursor < target);
-  }
-  append(event) {
-    this.accepted.set(event.revision.revisionId, event);
-    this.ordered.push(event);
-    this.cursor = event.serverSequence;
-  }
-  reset() {
-    this.accepted.clear();
-    this.ordered.length = 0;
-    this.cursor = 0;
-    this.epoch = null;
-    this.unconfirmed = false;
-    this.persistedCursor = 0;
-  }
-  /** Seed the log from the store; anything that fails validation is ignored. */
-  async restore() {
-    const store = this.options.store;
-    if (store === void 0) return;
-    let stored;
-    try {
-      stored = parseStoredHistory(await store.load());
-    } catch {
-      stored = null;
-    }
-    if (stored === null || stored.cursor === 0) return;
-    for (const event of stored.events) this.append(event);
-    this.epoch = stored.epoch;
-    this.persistedCursor = stored.cursor;
-    this.unconfirmed = true;
-  }
-  /** One store write per refresh that saw new events; a failure never fails sync. */
-  async persist() {
-    const store = this.options.store;
-    if (store === void 0 || this.persistedCursor === this.cursor) return;
-    try {
-      await store.save({ epoch: this.epoch, cursor: this.cursor, events: this.ordered }, this.persistedCursor);
-      this.persistedCursor = this.cursor;
-    } catch {
-      this.persistedCursor = 0;
-      console.warn("Havemind: could not save the revision history; the next connection reads it in full.");
-    }
-  }
-  async graph(fileId) {
-    if (!this.loaded) await this.refresh();
-    const graph = new Map([...this.accepted].filter(([, event]) => event.revision.fileId === fileId));
-    for (const queued of await this.options.state.listOutbox()) {
-      if (queued.fileId !== fileId || graph.has(queued.revisionId)) continue;
-      graph.set(queued.revisionId, { serverSequence: 0, revision: queued });
-    }
-    return graph;
-  }
-  /** A pull can receive a revision committed after the cycle snapshot. */
-  async ensureEvent(event) {
-    if (!this.accepted.has(event.revision.revisionId)) await this.refresh();
-    if (!this.accepted.has(event.revision.revisionId)) throw new Error("Incoming revision is missing from history.");
-  }
-  async allHeads() {
-    if (!this.loaded) await this.refresh();
-    const parents = new Set([...this.accepted.values()].flatMap((e) => e.revision.parentRevisionIds ?? []));
-    return [...this.accepted.values()].filter((e) => !parents.has(e.revision.revisionId));
-  }
-  async heads(fileId) {
-    if (!this.loaded) await this.refresh();
-    const events = [...this.accepted.values()].filter((event) => event.revision.fileId === fileId);
-    const parents = new Set(events.flatMap((event) => event.revision.parentRevisionIds ?? []));
-    return events.filter((event) => !parents.has(event.revision.revisionId));
-  }
-  async payload(event) {
-    const id = event.revision.revisionId;
-    const cached2 = this.payloads.get(id);
-    if (cached2 !== void 0) {
-      this.payloads.delete(id);
-      this.payloads.set(id, cached2);
-      return cached2;
-    }
-    const queued = await this.options.state.getEnvelope(id);
-    const payload = queued === void 0 ? await this.options.resolveRevision(event) : decodeRevisionPayload(Uint8Array.from(atob(queued.payloadBase64), (char) => char.charCodeAt(0)));
-    if (payload.kind === "binary") return payload;
-    this.payloads.set(id, payload);
-    if (this.payloads.size > MAX_CACHED_PAYLOADS) {
-      const oldest = this.payloads.keys().next().value;
-      if (oldest !== void 0) this.payloads.delete(oldest);
-    }
-    return payload;
-  }
-};
-function sameEvent(left, right) {
-  const a = left.revision;
-  const b = right.revision;
-  return a.revisionId === b.revisionId && a.fileId === b.fileId && a.contentHash === b.contentHash && JSON.stringify(a.parentRevisionIds ?? []) === JSON.stringify(b.parentRevisionIds ?? []);
-}
-function parseStoredHistory(value) {
-  if (!isRecord11(value) || !Array.isArray(value.events) || !Number.isSafeInteger(value.cursor)) return null;
-  const epoch = value.epoch;
-  if (epoch !== null && typeof epoch !== "string") return null;
-  if (value.events.length !== value.cursor) return null;
-  const events = [];
-  for (const [index, raw] of value.events.entries()) {
-    const event = parseStoredEvent(raw);
-    if (event === null || event.serverSequence !== index + 1) return null;
-    events.push(event);
-  }
-  return { epoch, cursor: events.length, events };
-}
-function parseStoredEvent(raw) {
-  if (!isRecord11(raw) || !Number.isSafeInteger(raw.serverSequence) || !isRecord11(raw.revision)) return null;
-  const { revisionId, fileId, contentHash, parentRevisionIds, authorMembershipId } = raw.revision;
-  if (typeof revisionId !== "string" || typeof fileId !== "string" || typeof contentHash !== "string") return null;
-  if (parentRevisionIds !== void 0 && !(Array.isArray(parentRevisionIds) && parentRevisionIds.every((id) => typeof id === "string"))) return null;
-  if (authorMembershipId !== void 0 && typeof authorMembershipId !== "string") return null;
-  return {
-    serverSequence: raw.serverSequence,
-    revision: {
-      revisionId,
-      fileId,
-      contentHash,
-      ...parentRevisionIds === void 0 ? {} : { parentRevisionIds },
-      ...authorMembershipId === void 0 ? {} : { authorMembershipId }
-    }
-  };
-}
-function isRecord11(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function ancestors(graph, start) {
-  const result = /* @__PURE__ */ new Set();
-  const queue = [start];
-  while (queue.length > 0) {
-    const id = queue.pop();
-    if (result.has(id)) continue;
-    result.add(id);
-    queue.push(...graph.get(id)?.revision.parentRevisionIds ?? []);
-  }
-  return result;
-}
-function commonAncestor(graph, left, right) {
-  const leftAncestors = ancestors(graph, left);
-  const common = [...ancestors(graph, right)].filter((id) => leftAncestors.has(id) && graph.has(id));
-  const commonSet = new Set(common);
-  const superseded = new Set(common.flatMap((id) => graph.get(id)?.revision.parentRevisionIds ?? []).filter((id) => commonSet.has(id)));
-  const nearest = common.filter((id) => !superseded.has(id));
-  return nearest.length === 1 ? graph.get(nearest[0]) ?? null : null;
-}
-
-// src/runtime/apply-deferred.ts
-var ApplyDeferredError = class extends Error {
-  constructor() {
-    super("Local content changed during remote apply.");
-    __publicField(this, "name", "ApplyDeferredError");
-  }
-};
 
 // src/runtime/keyed-mutex.ts
 function noop2() {
@@ -21200,7 +19964,7 @@ async function ensureWritableConflictFolder(vault, folder) {
     await vault.createFolder(folder);
     return folder;
   }
-  if (abstract instanceof import_obsidian3.TFolder) {
+  if (abstract instanceof import_obsidian2.TFolder) {
     return folder;
   }
   const fallback = `${folder} (files)`;
@@ -21209,7 +19973,7 @@ async function ensureWritableConflictFolder(vault, folder) {
     await vault.createFolder(fallback);
     return fallback;
   }
-  if (fallbackAbstract instanceof import_obsidian3.TFolder) {
+  if (fallbackAbstract instanceof import_obsidian2.TFolder) {
     return fallback;
   }
   return "";
@@ -21239,7 +20003,7 @@ async function ensureParentFolders(vault, path) {
       await vault.createFolder(prefix);
       continue;
     }
-    if (existing instanceof import_obsidian3.TFolder) {
+    if (existing instanceof import_obsidian2.TFolder) {
       continue;
     }
     throw new ParentFolderOccupiedError(prefix);
@@ -21490,7 +20254,7 @@ var ObsidianOnboardingSecrets = class {
 };
 
 // src/runtime/adapters/shared.ts
-function isRecord12(value) {
+function isRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -21499,7 +20263,7 @@ function parseOwnerConnection(raw) {
   if (raw === null || raw === void 0) {
     return { status: "absent" };
   }
-  if (!isRecord12(raw) || !isCanonicalHttpsOrigin(raw.apiBaseUrl) || typeof raw.vaultId !== "string") {
+  if (!isRecord11(raw) || !isCanonicalHttpsOrigin(raw.apiBaseUrl) || typeof raw.vaultId !== "string") {
     return { status: "corrupt", raw };
   }
   return {
@@ -21640,17 +20404,17 @@ function createConfigPollTick(deps) {
 }
 
 // src/runtime/adapters/vault-change-listeners.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 function registerVaultChangeListeners(vault, handlers) {
   const refs = [
     vault.on("create", (file2) => {
-      if (file2 instanceof import_obsidian4.TFile) handlers.onCreate(file2.path);
+      if (file2 instanceof import_obsidian3.TFile) handlers.onCreate(file2.path);
     }),
     vault.on("modify", (file2) => {
-      if (file2 instanceof import_obsidian4.TFile) handlers.onModify(file2.path);
+      if (file2 instanceof import_obsidian3.TFile) handlers.onModify(file2.path);
     }),
     vault.on("delete", (file2) => {
-      if (file2 instanceof import_obsidian4.TFolder) {
+      if (file2 instanceof import_obsidian3.TFolder) {
         handlers.onFolderDelete(file2.path);
         return;
       }
@@ -21659,9 +20423,9 @@ function registerVaultChangeListeners(vault, handlers) {
     }),
     vault.on("rename", (file2, oldPath) => {
       if (typeof oldPath !== "string") return;
-      if (file2 instanceof import_obsidian4.TFile) {
+      if (file2 instanceof import_obsidian3.TFile) {
         handlers.onRename(oldPath, file2.path);
-      } else if (file2 instanceof import_obsidian4.TFolder) {
+      } else if (file2 instanceof import_obsidian3.TFolder) {
         handlers.onFolderRename(oldPath, file2.path);
       }
     })
@@ -21674,7 +20438,7 @@ function registerVaultChangeListeners(vault, handlers) {
 // src/runtime/adapters/producer-state.ts
 var EMPTY_PRODUCER_STATE = { mappings: [], heads: {} };
 function isValidProducerMapping(entry) {
-  return isRecord12(entry) && typeof entry.collisionKey === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
+  return isRecord11(entry) && typeof entry.collisionKey === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
 }
 function buildProducerMapping(entry) {
   return {
@@ -21700,7 +20464,7 @@ function parseProducerStateResult(raw) {
       quarantinedMappings: []
     };
   }
-  if (!isRecord12(raw) || !Array.isArray(raw.mappings) || !isRecord12(raw.heads)) {
+  if (!isRecord11(raw) || !Array.isArray(raw.mappings) || !isRecord11(raw.heads)) {
     console.warn(
       "Havemind: producer state was present but structurally corrupt; its raw bytes were preserved to a sidecar and an empty state was used for this session."
     );
@@ -21812,7 +20576,7 @@ async function pairOwnerDevice(options) {
     throw new OwnerPairError(`Owner pairing returned HTTP ${response.status}.`);
   }
   const json2 = response.json;
-  if (!isRecord13(json2) || typeof json2.vaultId !== "string" || typeof json2.deviceId !== "string") {
+  if (!isRecord12(json2) || typeof json2.vaultId !== "string" || typeof json2.deviceId !== "string") {
     throw new OwnerPairError("Owner pairing response was malformed.");
   }
   return {
@@ -21821,7 +20585,7 @@ async function pairOwnerDevice(options) {
     ...typeof json2.membershipId === "string" ? { memberId: json2.membershipId } : {}
   };
 }
-function isRecord13(value) {
+function isRecord12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -22029,7 +20793,7 @@ var OnboardingController = class {
       return this.state;
     }
     const durable = parseDurableState(stored);
-    if (isRecord14(stored) && stored.phase !== durable.phase) {
+    if (isRecord13(stored) && stored.phase !== durable.phase) {
       await this.connect(durable);
       return this.state;
     }
@@ -22229,7 +20993,7 @@ function parseDiscoveryResponse(response, expectedUrl, expectedOrigin) {
     "service"
   ]) || body.service !== "havemind" || !isCanonicalDisplayText(body.name, 80) || !Array.isArray(body.authMethods) || body.authMethods.length !== 1 || body.authMethods[0] !== "opaque-token" || !Array.isArray(body.capabilities) || body.capabilities.length > 64 || body.capabilities.some(
     (capability) => typeof capability !== "string" || !CAPABILITY_PATTERN.test(capability)
-  ) || !isRecord14(body.protocol) || !hasExactKeys(body.protocol, ["major", "maxMinor", "minMinor"]) || !isNonnegativeInteger(body.protocol.major) || !isNonnegativeInteger(body.protocol.minMinor) || !isNonnegativeInteger(body.protocol.maxMinor) || body.protocol.minMinor > body.protocol.maxMinor || typeof body.apiBaseUrl !== "string") {
+  ) || !isRecord13(body.protocol) || !hasExactKeys(body.protocol, ["major", "maxMinor", "minMinor"]) || !isNonnegativeInteger(body.protocol.major) || !isNonnegativeInteger(body.protocol.minMinor) || !isNonnegativeInteger(body.protocol.maxMinor) || body.protocol.minMinor > body.protocol.maxMinor || typeof body.apiBaseUrl !== "string") {
     throw new OnboardingError("invalid-response");
   }
   const apiBaseUrl = parseCanonicalApiBaseUrl(
@@ -22303,11 +21067,11 @@ function parseApprovalResponse(response, expectedUrl) {
   };
 }
 function parseSuccessfulResponse(response, expectedUrl) {
-  if (!isRecord14(response) || response.finalUrl !== expectedUrl) {
+  if (!isRecord13(response) || response.finalUrl !== expectedUrl) {
     throw new OnboardingError("redirect-refused");
   }
   if (response.status !== 200) throw new OnboardingError("remote-failed");
-  if (!isRecord14(response.body)) {
+  if (!isRecord13(response.body)) {
     throw new OnboardingError("invalid-response");
   }
   return response.body;
@@ -22337,7 +21101,7 @@ function negotiateProtocol(server) {
   return { major: CLIENT_PROTOCOL.major, minor: maximum };
 }
 function parseDurableState(value) {
-  if (!isRecord14(value) || typeof value.phase !== "string") {
+  if (!isRecord13(value) || typeof value.phase !== "string") {
     throw new OnboardingError("invalid-state");
   }
   const phase = value.phase;
@@ -22411,7 +21175,7 @@ function parseDurableState(value) {
   return structuredClone(value);
 }
 function validateStoredConnectionMetadata(value) {
-  if (typeof value.serverOrigin !== "string" || !isCanonicalHttpsOrigin2(value.serverOrigin) || typeof value.apiBaseUrl !== "string" || !isApiBaseForOrigin(value.apiBaseUrl, value.serverOrigin) || !isCanonicalDisplayText(value.serverName, 80) || !isCanonicalDisplayText(value.vaultName, 120) || !isCanonicalDisplayText(value.inviterDisplayName, 80) || !isCanonicalDisplayText(value.intendedMemberDisplayName, 80) || !isCanonicalUuid(value.vaultId) || !isCanonicalUuid(value.memberId) || !isCanonicalIsoTimestamp(value.expiresAt) || !isRecord14(value.protocolVersion) || !hasExactKeys(value.protocolVersion, ["major", "minor"]) || value.protocolVersion.major !== 1 || value.protocolVersion.minor !== 0) {
+  if (typeof value.serverOrigin !== "string" || !isCanonicalHttpsOrigin2(value.serverOrigin) || typeof value.apiBaseUrl !== "string" || !isApiBaseForOrigin(value.apiBaseUrl, value.serverOrigin) || !isCanonicalDisplayText(value.serverName, 80) || !isCanonicalDisplayText(value.vaultName, 120) || !isCanonicalDisplayText(value.inviterDisplayName, 80) || !isCanonicalDisplayText(value.intendedMemberDisplayName, 80) || !isCanonicalUuid(value.vaultId) || !isCanonicalUuid(value.memberId) || !isCanonicalIsoTimestamp(value.expiresAt) || !isRecord13(value.protocolVersion) || !hasExactKeys(value.protocolVersion, ["major", "minor"]) || value.protocolVersion.major !== 1 || value.protocolVersion.minor !== 0) {
     throw new OnboardingError("invalid-state");
   }
 }
@@ -22502,11 +21266,11 @@ function isNonnegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 function hasExactKeys(value, expectedKeys) {
-  if (!isRecord14(value)) return false;
+  if (!isRecord13(value)) return false;
   const keys = Object.keys(value);
   return keys.length === expectedKeys.length && expectedKeys.every((key) => Object.hasOwn(value, key));
 }
-function isRecord14(value) {
+function isRecord13(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function parseInviteEnvelopeSafely(value) {
@@ -22624,19 +21388,19 @@ var PluginDataOnboardingStore = class {
   async mutate(next) {
     this.cache = next;
     const data = await this.persist.load();
-    const base = isRecord15(data) ? data : {};
+    const base = isRecord14(data) ? data : {};
     await this.persist.save({ ...base, [ONBOARDING_KEY]: next });
   }
 };
 function parsePersisted(raw) {
-  const container = isRecord15(raw) ? raw[ONBOARDING_KEY] : null;
-  if (!isRecord15(container)) {
+  const container = isRecord14(raw) ? raw[ONBOARDING_KEY] : null;
+  if (!isRecord14(container)) {
     return { state: null };
   }
-  const state = isRecord15(container.state) ? container.state : null;
+  const state = isRecord14(container.state) ? container.state : null;
   return { state };
 }
-function isRecord15(value) {
+function isRecord14(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -22749,7 +21513,7 @@ function createRemoteApplyProducerSync(getProducer) {
 }
 
 // src/runtime/adapters/push-producer.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/sync/config-poller.ts
 async function pollConfigOnce(deps) {
@@ -23549,12 +22313,6 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
           "Havemind: failed to preserve corrupt producer state to a sidecar."
         );
       }
-      if (result.status === "ok" && result.quarantinedMappings.length === 0 && isRecord12(raw) && Array.isArray(raw.mappings) && raw.mappings.some((m) => isRecord12(m) && "content" in m)) {
-        await getPluginDataMutex(plugin).update((base) => {
-          const current = parseProducerStateResult(base[PUSH_PRODUCER_KEY]);
-          return current.status === "ok" && current.quarantinedMappings.length === 0 ? { ...base, [PUSH_PRODUCER_KEY]: current.state } : base;
-        });
-      }
       return result.state;
     },
     async save(next) {
@@ -23630,7 +22388,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       await repository.recover();
       blocked = await initializeIdentities?.(repository, snapshot) ?? /* @__PURE__ */ new Set();
       if (disposed) return;
-      if (blocked.size > 0) new import_obsidian5.Notice(`Havemind: ${blocked.size} existing file(s) need conflict resolution before upload.`);
+      if (blocked.size > 0) new import_obsidian4.Notice(`Havemind: ${blocked.size} existing file(s) need conflict resolution before upload.`);
       const result = await reconcileVaultState({ observer, repository, vault: {
         ...snapshot,
         listSyncablePaths: async () => (await snapshot.listSyncablePaths()).filter((path) => {
@@ -23639,10 +22397,10 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
         })
       } });
       if (result.skipped > 0) {
-        new import_obsidian5.Notice(`Havemind: ${result.skipped} file(s) could not be synced and were skipped.`);
+        new import_obsidian4.Notice(`Havemind: ${result.skipped} file(s) could not be synced and were skipped.`);
         warnSkippedPaths(result);
       }
-      for (const notice of formatReconcileNotices(result)) new import_obsidian5.Notice(notice);
+      for (const notice of formatReconcileNotices(result)) new import_obsidian4.Notice(notice);
       initialized = true;
     })();
     try {
@@ -23673,10 +22431,10 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       () => triggerSync(),
       (error51) => {
         if (error51 instanceof RevisionPayloadTooLargeError) {
-          new import_obsidian5.Notice(`Havemind: ${error51.message}`);
+          new import_obsidian4.Notice(`Havemind: ${error51.message}`);
           return;
         }
-        new import_obsidian5.Notice(
+        new import_obsidian4.Notice(
           "Havemind: a change could not be queued, see the Havemind panel."
         );
       }
@@ -23718,7 +22476,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     );
   };
   const commitPathRecovery = new CommitPathRecovery({
-    notify: (message) => new import_obsidian5.Notice(message),
+    notify: (message) => new import_obsidian4.Notice(message),
     rearm: (path) => modifyDebouncer.trigger(path),
     recordFailedToQueue: async (path) => {
       await state.recordFailedToQueue(path);
@@ -23749,7 +22507,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       },
       (error51) => {
         if (error51 instanceof RevisionPayloadTooLargeError) {
-          new import_obsidian5.Notice(`Havemind: ${error51.message}`);
+          new import_obsidian4.Notice(`Havemind: ${error51.message}`);
           return;
         }
         void commitPathRecovery.onCommitFailure(path).catch(() => {
@@ -23801,7 +22559,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
     }),
     recordActivity,
     triggerSync,
-    notify: (message) => new import_obsidian5.Notice(message)
+    notify: (message) => new import_obsidian4.Notice(message)
   });
   const configPollId = window.setInterval(() => {
     if (typeof document !== "undefined" && document.hidden) return;
@@ -23835,7 +22593,7 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
 }
 
 // src/runtime/adapters/sync-controller.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/sync/sync-runner.ts
 var PARENT_QUARANTINED_REASON = "parent-quarantined";
@@ -23860,6 +22618,7 @@ function buildLineageIndex(outbox) {
     childrenOf: (revisionId) => children.get(revisionId) ?? []
   };
 }
+var MAX_APPLY_ATTEMPTS = 3;
 var DEFAULT_BASE_BACKOFF_MS = 5e3;
 var DEFAULT_MAX_BACKOFF_MS = 6e4;
 var DEFAULT_MAX_PUSH_BATCH_BYTES = 512 * 1024;
@@ -23900,6 +22659,8 @@ var SyncRunner = class {
      * `cursor` (not a page end), so it is a stable boundary even when the catch-up
      * spans several paged cycles.
      */
+    /** Consecutive failed applies per incoming revision, reset on success. */
+    __publicField(this, "applyFailures", /* @__PURE__ */ new Map());
     __publicField(this, "bootstrapTarget", null);
     this.options = {
       baseBackoffMs: options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS,
@@ -24146,6 +22907,20 @@ var SyncRunner = class {
     }
     return batches;
   }
+  /**
+   * Applies a parked incoming change again. True when it no longer needs to be
+   * listed (applied, a conflict copy written, or already superseded); false
+   * while an unsaved editor still holds the file. A failure is thrown.
+   */
+  async retryParked(revisionId) {
+    const parked = await this.options.state.listParkedRemote?.();
+    const event = parked?.find((item) => item.revision.revisionId === revisionId);
+    if (event === void 0) return true;
+    const outcome = await this.options.vault.applyRemote(event, { bootstrap: false });
+    if (outcome === "deferred") return false;
+    await this.options.state.unparkRemote?.(revisionId);
+    return true;
+  }
   async runPull() {
     let cursor = await this.options.state.loadCursor();
     const { cursor: serverHead, events } = await this.options.transport.pull(cursor);
@@ -24188,11 +22963,30 @@ var SyncRunner = class {
         await this.options.vault.recordConflict(remoteEvent);
         conflicts += 1;
       } else {
-        const outcome = await this.options.vault.applyRemote(remoteEvent, {
-          // At or below the connect-time head → part of the initial catch-up, so
-          // its Activity entry is suppressed (baseline). Beyond it → a live edit.
-          bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
-        });
+        let outcome;
+        try {
+          outcome = await this.options.vault.applyRemote(remoteEvent, {
+            // At or below the connect-time head → part of the initial catch-up, so
+            // its Activity entry is suppressed (baseline). Beyond it → a live edit.
+            bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
+          });
+        } catch (error51) {
+          const id = remoteEvent.revision.revisionId;
+          const attempts = (this.applyFailures.get(id) ?? 0) + 1;
+          if (isAuthDenied(error51) || this.options.state.parkRemote === void 0 || attempts < MAX_APPLY_ATTEMPTS) {
+            this.applyFailures.set(id, attempts);
+            throw error51;
+          }
+          this.applyFailures.delete(id);
+          await this.options.state.parkRemote(
+            remoteEvent,
+            error51 instanceof Error ? error51.message : String(error51)
+          );
+          cursor = remoteEvent.serverSequence;
+          await this.options.state.saveCursor(cursor);
+          continue;
+        }
+        this.applyFailures.delete(remoteEvent.revision.revisionId);
         if (outcome === "deferred") {
           deferred += 1;
           break;
@@ -24469,7 +23263,7 @@ function isPermanentStatus(status) {
   return status === 400 || status === 403 || status === 413 || status === 422;
 }
 function stampCurrentIdentity(header, identity) {
-  if (identity === void 0 || !isRecord16(header)) {
+  if (identity === void 0 || !isRecord15(header)) {
     return header;
   }
   return {
@@ -24555,16 +23349,16 @@ function wholeRequestCode(response) {
   } catch {
     return void 0;
   }
-  if (!isRecord16(body) || !isRecord16(body.error)) return void 0;
+  if (!isRecord15(body) || !isRecord15(body.error)) return void 0;
   return typeof body.error.code === "string" ? body.error.code : void 0;
 }
 function parsePushResponse(response) {
   const body = response.json;
-  if (!isRecord16(body) || !Array.isArray(body.results)) {
+  if (!isRecord15(body) || !Array.isArray(body.results)) {
     throw malformed("push response missing results array");
   }
   return body.results.map((result) => {
-    if (!isRecord16(result) || typeof result.revisionId !== "string") {
+    if (!isRecord15(result) || typeof result.revisionId !== "string") {
       throw malformed("push result missing revisionId");
     }
     if (result.status === "rejected") {
@@ -24578,7 +23372,7 @@ function parsePushResponse(response) {
         ...result.code === "MISSING_PARENT" ? { missingParent: true } : {}
       };
     }
-    if (!isRecord16(result.receipt)) {
+    if (!isRecord15(result.receipt)) {
       throw malformed("push result missing receipt");
     }
     const receiptRevisionId = result.receipt.revisionId;
@@ -24598,11 +23392,11 @@ function parsePushResponse(response) {
 }
 function parsePullResponse(response) {
   const body = response.json;
-  if (!isRecord16(body) || !Number.isSafeInteger(body.cursor) || !Array.isArray(body.events)) {
+  if (!isRecord15(body) || !Number.isSafeInteger(body.cursor) || !Array.isArray(body.events)) {
     throw malformed("pull response missing cursor or events");
   }
   const events = body.events.map((raw) => {
-    if (!isRecord16(raw) || !Number.isSafeInteger(raw.serverSequence) || typeof raw.revisionId !== "string" || typeof raw.fileId !== "string" || !isRecord16(raw.receipt) || typeof raw.receipt.blobHash !== "string") {
+    if (!isRecord15(raw) || !Number.isSafeInteger(raw.serverSequence) || typeof raw.revisionId !== "string" || typeof raw.fileId !== "string" || !isRecord15(raw.receipt) || typeof raw.receipt.blobHash !== "string") {
       throw malformed("pull event is malformed");
     }
     const rawParents = raw.receipt.parentRevisionIds;
@@ -24628,7 +23422,7 @@ function parsePullResponse(response) {
 function malformed(detail) {
   return new RequestUrlTransportError("malformed-response", detail);
 }
-function isRecord16(value) {
+function isRecord15(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -24930,7 +23724,7 @@ var WakeSubscription = class {
       throw new Error(`wake long-poll returned HTTP ${response.status}`);
     }
     const body = response.json;
-    if (!isRecord17(body) || !Number.isSafeInteger(body.cursor)) {
+    if (!isRecord16(body) || !Number.isSafeInteger(body.cursor)) {
       throw new Error("wake long-poll response missing numeric cursor");
     }
     return body.cursor;
@@ -24986,7 +23780,7 @@ var WakeSubscription = class {
 function isAuthDenied2(error51) {
   return typeof error51 === "object" && error51 !== null && error51.authDenied === true;
 }
-function isRecord17(value) {
+function isRecord16(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -25023,7 +23817,7 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
       plugin.app.workspace.trigger?.("css-change");
     },
     notify: (message) => {
-      new import_obsidian6.Notice(message);
+      new import_obsidian5.Notice(message);
     }
   });
   const history = new RevisionHistory({
@@ -25135,6 +23929,18 @@ function buildSyncController(plugin, connection, onStatus, hooks, producerSync, 
     controller,
     state,
     initializeProducer: (producer, vault2) => bootstrapIdentities({ history, state, producer, vault: vault2 }),
+    lastAuthor: async (fileId) => newestAuthor(await history.heads(fileId)),
+    retryParked: (revisionId) => runner.retryParked(revisionId),
+    // The Activity feed's Restore reads a revision's text from the history.
+    revisionContent: async (revisionId) => {
+      const event = await history.event(revisionId);
+      if (event === void 0) return null;
+      const payload = await history.payload(event);
+      if (payload.kind === "binary" || payload.operation === "delete" || payload.content === null) {
+        return null;
+      }
+      return { fileId: event.revision.fileId, path: payload.path, content: payload.content };
+    },
     // The conflict sweep merges a copy over the ancestor the history gives.
     conflictAncestor: async (copyPath, fileId, targetPath) => {
       const revisionId = state.revisionForConflictCopy(copyPath);
@@ -25177,7 +23983,7 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
   const producerSync = createRemoteApplyProducerSync(() => producerRef.current);
   const fileApplyLock = new KeyedMutex();
   let producer = null;
-  const { controller, state, initializeProducer, conflictAncestor } = buildSyncController(
+  const { controller, state, initializeProducer, conflictAncestor, revisionContent, lastAuthor, retryParked } = buildSyncController(
     plugin,
     {
       apiBaseUrl: resolvers.apiBaseUrl,
@@ -25202,7 +24008,6 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
       await producer?.initialize();
     }
   );
-  await runCanonicalizationRebase(plugin);
   if (hasPushIdentity) {
     producer = startPushProducer(
       plugin,
@@ -25245,6 +24050,9 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     serverName: serverNameFromUrl(connection.apiBaseUrl),
     syncNow: () => controller.syncNow(),
     conflictAncestor,
+    revisionContent,
+    lastAuthor,
+    retryParked,
     readRoster: (selfMembershipId) => fetchVaultMembers({
       apiBaseUrl: connection.apiBaseUrl,
       vaultId: connection.vaultId,
@@ -25451,7 +24259,7 @@ async function approveRedeemedDevice(options) {
     throw describeFailure(response.status, response.json);
   }
   const json2 = response.json;
-  if (!isRecord18(json2) || typeof json2.deviceId !== "string" || typeof json2.membershipId !== "string" || typeof json2.userId !== "string") {
+  if (!isRecord17(json2) || typeof json2.deviceId !== "string" || typeof json2.membershipId !== "string" || typeof json2.userId !== "string") {
     throw new ApproveDeviceError("The approval response was malformed.");
   }
   return {
@@ -25461,8 +24269,21 @@ async function approveRedeemedDevice(options) {
     status: "approved"
   };
 }
+async function rejectPendingDevice(options) {
+  const token = await options.getAccessToken();
+  const response = await options.requestUrl({
+    url: `${options.apiBaseUrl}/vaults/${options.vaultId}/invitations/${options.invitationId}/reject`,
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    throw: false,
+    body: JSON.stringify({})
+  });
+  if (response.status < 200 || response.status >= 300) {
+    throw describeFailure(response.status, response.json);
+  }
+}
 function describeFailure(status, json2) {
-  const error51 = isRecord18(json2) && isRecord18(json2.error) ? json2.error : void 0;
+  const error51 = isRecord17(json2) && isRecord17(json2.error) ? json2.error : void 0;
   const code = typeof error51?.code === "string" ? error51.code : void 0;
   const attemptsRemaining = typeof error51?.attemptsRemaining === "number" ? error51.attemptsRemaining : void 0;
   if (code === "PHRASE_MISMATCH") {
@@ -25482,7 +24303,7 @@ function describeFailure(status, json2) {
   }
   return new ApproveDeviceError(`Approval returned HTTP ${status}.`);
 }
-function isRecord18(value) {
+function isRecord17(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -25516,7 +24337,7 @@ async function createVaultInvitation(options) {
     );
   }
   const json2 = response.json;
-  if (!isRecord19(json2) || typeof json2.invitationToken !== "string" || typeof json2.expiresAt !== "string" || typeof json2.invitationId !== "string") {
+  if (!isRecord18(json2) || typeof json2.invitationToken !== "string" || typeof json2.expiresAt !== "string" || typeof json2.invitationId !== "string") {
     throw new CreateInvitationError("Invitation response was malformed.");
   }
   let envelope;
@@ -25537,7 +24358,7 @@ async function createVaultInvitation(options) {
     invitationId: json2.invitationId
   };
 }
-function isRecord19(value) {
+function isRecord18(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -25561,14 +24382,14 @@ async function listPendingApprovals(options) {
       `Pending approvals returned HTTP ${response.status}.`
     );
   }
-  const pending = isRecord20(response.json) ? response.json.pending : void 0;
+  const pending = isRecord19(response.json) ? response.json.pending : void 0;
   if (!Array.isArray(pending)) {
     throw new ListPendingApprovalsError("Pending approvals response was malformed.");
   }
   return pending.map(parsePendingApproval);
 }
 function parsePendingApproval(value) {
-  if (!isRecord20(value) || typeof value.invitationId !== "string" || typeof value.expiresAt !== "string") {
+  if (!isRecord19(value) || typeof value.invitationId !== "string" || typeof value.expiresAt !== "string") {
     throw new ListPendingApprovalsError("Pending approvals response was malformed.");
   }
   if (value.intendedRole !== void 0 && value.intendedRole !== "editor" && value.intendedRole !== "owner") {
@@ -25584,7 +24405,7 @@ function parsePendingApproval(value) {
     invitationId: value.invitationId
   };
 }
-function isRecord20(value) {
+function isRecord19(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -25663,6 +24484,28 @@ async function approvePendingDeviceForOwner(plugin, options) {
     verificationPhrase: options.verificationPhrase,
     getAccessToken: () => accessProvider.getAccessToken()
   });
+}
+async function rejectPendingDeviceForOwner(plugin, options) {
+  const connected = await resolveConnectedVault(plugin);
+  if (connected === null) {
+    return null;
+  }
+  const clientInstanceId = await ensureClientInstanceId(
+    createClientInstanceRepo(plugin)
+  );
+  const secrets = new ObsidianOnboardingSecrets({
+    clientInstanceId,
+    secretStorage: plugin.app.secretStorage
+  });
+  const accessProvider = sharedAccessProvider(plugin, connected.apiBaseUrl, secrets);
+  await rejectPendingDevice({
+    requestUrl: createRequestUrlFn(),
+    apiBaseUrl: connected.apiBaseUrl,
+    vaultId: connected.vaultId,
+    invitationId: options.invitationId,
+    getAccessToken: () => accessProvider.getAccessToken()
+  });
+  return "rejected";
 }
 async function listPendingApprovalsForOwner(plugin) {
   const connected = await resolveConnectedVault(plugin);
@@ -25840,8 +24683,8 @@ function browserClipboardCopyDeps() {
 }
 
 // src/ui/confirm-modal.ts
-var import_obsidian7 = require("obsidian");
-var ConfirmModal = class extends import_obsidian7.Modal {
+var import_obsidian6 = require("obsidian");
+var ConfirmModal = class extends import_obsidian6.Modal {
   constructor(app, options) {
     super(app);
     __publicField(this, "options");
@@ -25868,10 +24711,10 @@ var ConfirmModal = class extends import_obsidian7.Modal {
 };
 
 // src/ui/conflict-modal.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/ui/primitives.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 function prefersReducedMotion() {
   return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -25885,7 +24728,7 @@ function renderViewTitle(content, text) {
   heading.addClass("havemind-view-title");
   const icon = heading.createEl("span", { attr: DECORATIVE });
   icon.addClass("havemind-title-icon");
-  (0, import_obsidian8.setIcon)(icon, "hexagon");
+  (0, import_obsidian7.setIcon)(icon, "hexagon");
 }
 function labelledField(parent, id, label, tag, options = {}) {
   parent.createEl("label", { text: label, attr: { for: id } });
@@ -26012,7 +24855,7 @@ function renderConflictModalBody(container, model, actions) {
   keepBoth.addClass("havemind-conflict-action");
   keepBoth.onClickEvent(() => actions.onKeepBoth());
 }
-var ConflictResolveModal = class extends import_obsidian9.Modal {
+var ConflictResolveModal = class extends import_obsidian8.Modal {
   constructor(app, model, actions) {
     super(app);
     __publicField(this, "model");
@@ -26029,7 +24872,7 @@ var ConflictResolveModal = class extends import_obsidian9.Modal {
 };
 
 // src/ui/onboarding-view.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 
 // src/runtime/handshake.ts
 function groupCode(code) {
@@ -26158,7 +25001,7 @@ function buildPaneTabs(input) {
 }
 
 // src/ui/pane-tabs-section.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 var PANE_TABPANEL_ID = "havemind-tabpanel";
 function paneTabDomId(id) {
   return `havemind-tab-${id}`;
@@ -26208,7 +25051,7 @@ function renderPaneTabs(content, options) {
     if (tab.needsAttention === true) button.addClass("needs-attention");
     const icon = button.createEl("span", { attr: DECORATIVE });
     icon.addClass("havemind-tab-icon");
-    (0, import_obsidian10.setIcon)(icon, tab.icon);
+    (0, import_obsidian9.setIcon)(icon, tab.icon);
     button.createEl("span", { text: tab.label }).addClass("havemind-tab-label");
     if (tab.count !== void 0) {
       button.createEl("span", { text: `${tab.count}` }).addClass("havemind-tab-count");
@@ -26308,14 +25151,14 @@ function buildHostView() {
 }
 
 // src/ui/entry-chooser-section.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 function renderEntryChooser(content, options) {
   const { model } = options;
   const head = content.createDiv();
   head.addClass("havemind-entry-head");
   const mark = head.createEl("span", { attr: DECORATIVE });
   mark.addClass("havemind-pane-mark");
-  (0, import_obsidian11.setIcon)(mark, "hexagon");
+  (0, import_obsidian10.setIcon)(mark, "hexagon");
   head.createEl("span", { text: model.heading, cls: "havemind-pane-title" });
   content.createDiv({ text: model.subheading }).addClass("havemind-entry-subheading");
   content.createDiv({ text: model.question }).addClass("havemind-hint");
@@ -26473,12 +25316,36 @@ function buildGettingStartedViewModel() {
   };
 }
 
+// src/activity/activity.ts
+function actorLabel(actor) {
+  return actor.kind === "initial-import" ? "Initial import" : actor.displayName;
+}
+function buildActivityFeed(records) {
+  return records.map(
+    (record2) => ({
+      revisionId: record2.revisionId,
+      fileId: record2.fileId,
+      path: record2.path,
+      kind: record2.kind,
+      actorLabel: actorLabel(record2.actor),
+      actorId: record2.actor.kind === "author" ? record2.actor.actorId : null,
+      timestamp: record2.timestamp,
+      canRestore: record2.content !== null
+    })
+  ).sort((left, right) => {
+    if (left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+    return left.revisionId < right.revisionId ? 1 : -1;
+  });
+}
+
 // src/runtime/activity-render.ts
-function defaultFormatTimestamp3(timestamp) {
+function defaultFormatTimestamp2(timestamp) {
   return new Date(timestamp).toISOString();
 }
 function buildActivityViewModel(records, options = {}) {
-  const format = options.formatTimestamp ?? defaultFormatTimestamp3;
+  const format = options.formatTimestamp ?? defaultFormatTimestamp2;
   const ordered = buildActivityFeed(records);
   const visible = options.limit === void 0 ? ordered : ordered.slice(0, options.limit);
   const rows = visible.map(
@@ -26572,10 +25439,10 @@ function renderGettingStarted(content, model) {
 
 // src/ui/roster-section.ts
 function renderRejoinRoster(content, roster, actions) {
-  content.createEl("h4", { text: "Connected" });
+  content.createEl("h4", { text: "Members" });
   if (roster.empty) {
     const empty = content.createDiv({
-      text: "No members yet. Approved devices appear here as connected."
+      text: "No members yet. Approved devices appear here."
     });
     empty.addClass("havemind-empty");
     return;
@@ -26585,7 +25452,6 @@ function renderRejoinRoster(content, roster, actions) {
     item.addClass("havemind-roster-row");
     const dot = item.createEl("span", { attr: DECORATIVE });
     dot.addClass("havemind-roster-dot");
-    if (!row.connected) dot.addClass("is-disconnected");
     dot.style.setProperty(
       "color",
       row.self ? "var(--interactive-accent)" : `var(${row.colorToken})`
@@ -26594,7 +25460,7 @@ function renderRejoinRoster(content, roster, actions) {
     text.addClass("havemind-roster-copy");
     text.createDiv({ text: row.displayName }).addClass("havemind-roster-name");
     const meta3 = text.createDiv({
-      text: row.self ? `${row.role} \xB7 you` : `${row.role} \xB7 ${row.statusLabel}`
+      text: row.self ? `${row.role} \xB7 you` : row.role
     });
     meta3.addClass("havemind-hint");
     meta3.addClass("havemind-roster-meta");
@@ -26606,14 +25472,9 @@ function renderRejoinRoster(content, roster, actions) {
         status.addClass("havemind-rejoin-waiting");
       } else {
         const rejoin = item.createEl("button", { text: "Rejoin" });
-        rejoin.addClass("mod-cta");
         rejoin.addClass("havemind-roster-action");
         rejoin.onClickEvent(() => actions.onRejoin?.(row.membershipId));
       }
-    } else if (row.connected && !row.self && actions.onMarkDisconnected) {
-      const mark = item.createEl("button", { text: "Mark offline" });
-      mark.addClass("havemind-roster-action");
-      mark.onClickEvent(() => actions.onMarkDisconnected?.(row.membershipId));
     }
     if (row.removable && actions.onRemove) {
       let armed = false;
@@ -26639,7 +25500,7 @@ function renderRejoinRoster(content, roster, actions) {
 }
 
 // src/ui/screens/status-indicator.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 function renderStatusIndicator(content, panel, actions = {}, includeRecovery = true) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
@@ -26652,7 +25513,7 @@ function renderStatusIndicator(content, panel, actions = {}, includeRecovery = t
     if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
   } else {
     const icon = row.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian12.setIcon)(icon, panel.icon);
+    (0, import_obsidian11.setIcon)(icon, panel.icon);
   }
   row.createEl("span", { text: ` ${panel.label}` });
   const detail = content.createDiv();
@@ -26739,7 +25600,7 @@ function renderConnectionControls(content, panel, helpOpen, actions) {
 }
 
 // src/ui/screens/invite-composer.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/ui/screens/invitation-envelope.ts
 var COPY_FAILED = "Could not copy automatically. Select and copy the invitation manually.";
@@ -26787,12 +25648,12 @@ function renderInvitationEnvelope(content, model, actions) {
 }
 
 // src/ui/screens/pending-approval-row.ts
-var import_obsidian13 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 function renderPendingRow(content, entry, actions, codes = {}) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-pending-row");
   row.style.setProperty("color", "var(--text-accent)");
-  (0, import_obsidian13.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
+  (0, import_obsidian12.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
   row.createEl("span", {
     text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires ${entry.expiresAt}`
   });
@@ -26826,6 +25687,13 @@ function renderPendingRow(content, entry, actions, codes = {}) {
       (message) => status.setText(message)
     );
   });
+  const onReject = actions.onReject;
+  if (onReject !== void 0) {
+    armedButton(row, "Reject", "Confirm reject", "mod-warning", () => {
+      status.setText("Rejecting\u2026");
+      onReject(entry.invitationId, (message) => status.setText(message));
+    });
+  }
 }
 
 // src/ui/screens/invite-composer.ts
@@ -26900,7 +25768,7 @@ function renderNotice(content, notice, kind) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-success)");
-  (0, import_obsidian14.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
+  (0, import_obsidian13.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
   row.createEl("span", { text: ` ${notice}` });
 }
 
@@ -26919,7 +25787,7 @@ function renderPeopleTab(body, composer, actions) {
 }
 
 // src/ui/conflict-section.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 function renderConflictSection(content, copies, actions) {
   if (copies.length === 0) return;
   const block = renderAlarmBlock(content, "havemind-alarm-conflict");
@@ -26927,7 +25795,7 @@ function renderConflictSection(content, copies, actions) {
   header.addClass("havemind-conflict-header");
   const icon = header.createEl("span", { attr: DECORATIVE });
   icon.addClass("havemind-conflict-icon");
-  (0, import_obsidian15.setIcon)(icon, "git-merge");
+  (0, import_obsidian14.setIcon)(icon, "git-merge");
   header.createEl("span", {
     text: copies.length === 1 ? " 1 conflict" : ` ${copies.length} conflicts`
   });
@@ -26965,7 +25833,7 @@ function renderSendQueueSection(content, view, actions) {
   if (view.failed.length === 0) return;
   const block = renderAlarmBlock(content, "havemind-alarm-send");
   const header = block.createDiv({
-    text: view.failed.length === 1 ? "1 change couldn't be sent" : `${view.failed.length} changes couldn't be sent`
+    text: view.failed.length === 1 ? "1 change couldn't be synced" : `${view.failed.length} changes couldn't be synced`
   });
   header.addClass("havemind-send-failed");
   const rows = block.createDiv();
@@ -27046,7 +25914,6 @@ function buildTabScreens(context) {
         renderRejoinRoster(rosterTarget, roster, {
           waiting: options.rejoinWaitingProvider?.() ?? /* @__PURE__ */ new Set(),
           ...options.onRejoin === void 0 ? {} : { onRejoin: options.onRejoin },
-          ...options.onMarkDisconnected === void 0 ? {} : { onMarkDisconnected: options.onMarkDisconnected },
           ...options.onRemove === void 0 ? {} : { onRemove: options.onRemove }
         });
       },
@@ -27055,7 +25922,8 @@ function buildTabScreens(context) {
         onCreate: options.onCreateInvitation,
         onCopy: options.onCopyInvitation,
         onDismiss: options.onDismissInvitation,
-        onApprove: options.onApprove
+        onApprove: options.onApprove,
+        onReject: options.onReject
       }),
       onOpenComposer: options.onOpenComposer
     })
@@ -27182,13 +26050,13 @@ var RepaintScheduler = class {
 };
 
 // src/ui/screens/guest-invalid.ts
-var import_obsidian16 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 function renderGuestInvalid(content, ownerName, actions) {
   const view = buildSpentInvitation(ownerName);
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-error)");
-  (0, import_obsidian16.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
+  (0, import_obsidian15.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
   row.createEl("span", { text: ` ${view.heading}` });
   content.createDiv({ text: view.explanation }).addClass("havemind-hint");
   actions.renderForm(content);
@@ -27214,14 +26082,14 @@ function readPaneState(options, entryChoice, draftToken) {
 }
 
 // src/ui/pane-header.ts
-var import_obsidian17 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 function renderPaneHeader(content, options) {
   const strip = content.createDiv();
   strip.addClass("havemind-pane-header");
   const markWrap = strip.createDiv();
   markWrap.addClass("havemind-pane-mark");
   const mark = markWrap.createEl("span", { attr: DECORATIVE });
-  (0, import_obsidian17.setIcon)(mark, "hexagon");
+  (0, import_obsidian16.setIcon)(mark, "hexagon");
   if (options.alarmed === true) {
     const dot = markWrap.createEl("span", {
       attr: { title: "Needs attention" }
@@ -27229,25 +26097,12 @@ function renderPaneHeader(content, options) {
     dot.addClass("havemind-pane-mark-dot");
   }
   strip.createEl("span", { text: options.title, cls: "havemind-pane-title" });
-  if (options.authorOverlayOn !== void 0 && options.onToggleAuthorOverlay !== void 0) {
-    const on = options.authorOverlayOn;
-    const toggle = strip.createEl("button", {
-      attr: {
-        "aria-label": "Authorship colours",
-        "aria-pressed": on ? "true" : "false"
-      }
-    });
-    toggle.addClass("havemind-header-action");
-    if (on) toggle.addClass("is-on");
-    (0, import_obsidian17.setIcon)(toggle, "eye");
-    toggle.onClickEvent(() => options.onToggleAuthorOverlay?.());
-  }
   if (options.onInvite !== void 0) {
     const invite = strip.createEl("button", {
       attr: { "aria-label": "Invite someone" }
     });
     invite.addClass("havemind-header-action");
-    (0, import_obsidian17.setIcon)(invite, "user-plus");
+    (0, import_obsidian16.setIcon)(invite, "user-plus");
     invite.onClickEvent(() => options.onInvite?.());
   }
   const more = strip.createEl("button", {
@@ -27258,7 +26113,7 @@ function renderPaneHeader(content, options) {
   });
   more.addClass("havemind-header-action");
   more.addClass("havemind-pane-more");
-  (0, import_obsidian17.setIcon)(more, "more-horizontal");
+  (0, import_obsidian16.setIcon)(more, "more-horizontal");
   more.onClickEvent(() => options.onToggleMenu());
   if (!options.menuOpen) return;
   const menu = content.createDiv();
@@ -27318,7 +26173,7 @@ function buildHeaderMenuItems(panel, helpOpen, actions) {
 
 // src/ui/screens/pane-chrome.ts
 function renderPaneChrome(content, options) {
-  const { panel, overlayOn } = options;
+  const { panel } = options;
   renderPaneHeader(content, {
     title: "Havemind",
     menuOpen: options.menuOpen,
@@ -27326,8 +26181,6 @@ function renderPaneChrome(content, options) {
     items: options.items,
     alarmed: options.alarmed,
     // Only once connected, hence the `showForm` guard on each.
-    ...panel.showForm || overlayOn === void 0 ? {} : { authorOverlayOn: overlayOn },
-    ...panel.showForm || options.onToggleAuthorOverlay === void 0 ? {} : { onToggleAuthorOverlay: options.onToggleAuthorOverlay },
     ...panel.showForm || options.onInvite === void 0 ? {} : { onInvite: options.onInvite }
   });
 }
@@ -27340,7 +26193,6 @@ function renderPaneChromeFor(content, panel, options, state, callbacks) {
     panel,
     menuOpen: state.menuOpen,
     alarmed: attentionCount(options) > 0,
-    overlayOn: safeRead("authorOverlay", options.authorOverlayProvider, void 0),
     items: buildHeaderMenuItems(panel, state.helpOpen, {
       onSyncNow: options.onSyncNow,
       onDisconnect: options.onDisconnect,
@@ -27358,7 +26210,6 @@ function renderPaneChromeFor(content, panel, options, state, callbacks) {
       callbacks.setMenuOpen(!state.menuOpen);
       callbacks.repaint();
     },
-    onToggleAuthorOverlay: options.onToggleAuthorOverlay,
     onInvite: options.onOpenComposer
   });
 }
@@ -27367,7 +26218,7 @@ function renderPaneChromeFor(content, panel, options, state, callbacks) {
 var HAVEMIND_ONBOARDING_VIEW = "havemind-onboarding";
 
 // src/ui/onboarding-view.ts
-var HavemindOnboardingView = class extends import_obsidian18.ItemView {
+var HavemindOnboardingView = class extends import_obsidian17.ItemView {
   constructor(leaf, options = {}) {
     super(leaf);
     __publicField(this, "options");
@@ -27556,12 +26407,12 @@ function planQuarantineRequeueFallback(requeued, path) {
 }
 
 // src/ui/setting-tab.ts
-var import_obsidian19 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 function formatMemberCount(count) {
   if (count === 0) return "No members recorded yet";
   return count === 1 ? "1 member" : `${count} members`;
 }
-var HavemindSettingTab = class extends import_obsidian19.PluginSettingTab {
+var HavemindSettingTab = class extends import_obsidian18.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     /**
@@ -27576,12 +26427,12 @@ var HavemindSettingTab = class extends import_obsidian19.PluginSettingTab {
     this.containerEl.empty();
     const plugin = this.havemind;
     const info = plugin.settingsInfo();
-    new import_obsidian19.Setting(this.containerEl).setName("Havemind").setHeading();
-    new import_obsidian19.Setting(this.containerEl).setName("Server").setDesc(info.server);
-    new import_obsidian19.Setting(this.containerEl).setName("Connection").setDesc(info.status);
-    new import_obsidian19.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
-    new import_obsidian19.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
-    new import_obsidian19.Setting(this.containerEl).setName("Actions").setHeading();
+    new import_obsidian18.Setting(this.containerEl).setName("Havemind").setHeading();
+    new import_obsidian18.Setting(this.containerEl).setName("Server").setDesc(info.server);
+    new import_obsidian18.Setting(this.containerEl).setName("Connection").setDesc(info.status);
+    new import_obsidian18.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
+    new import_obsidian18.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
+    new import_obsidian18.Setting(this.containerEl).setName("Actions").setHeading();
     this.renderActions(plugin, info);
     const refresh = this.containerEl.createEl("button", { text: "Refresh" });
     refresh.onClickEvent(() => this.display());
@@ -27593,30 +26444,21 @@ var HavemindSettingTab = class extends import_obsidian19.PluginSettingTab {
    */
   renderActions(plugin, info) {
     const actions = plugin.connectionActions();
-    new import_obsidian19.Setting(this.containerEl).setName("Havemind panel").setDesc(
+    new import_obsidian18.Setting(this.containerEl).setName("Havemind panel").setDesc(
       "Connect a device, invite a peer, resolve conflicts and inspect the send queue."
     ).addButton(
       (button) => button.setButtonText("Open Havemind panel").setCta().onClick(() => plugin.revealPanel())
     );
-    new import_obsidian19.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
+    new import_obsidian18.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
       (button) => button.setButtonText("Sync now").setDisabled(!info.connected).onClick(() => actions.syncNow())
     );
-    new import_obsidian19.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
+    new import_obsidian18.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
       (button) => button.setButtonText("Disconnect").setDisabled(!info.connected).onClick(() => actions.disconnect())
     );
-    new import_obsidian19.Setting(this.containerEl).setName("Reset connection").setDesc(
+    new import_obsidian18.Setting(this.containerEl).setName("Reset connection").setDesc(
       "Clear the stored pairing so this device can be paired again. No note is touched."
     ).addButton(
       (button) => button.setButtonText("Reset connection").onClick(() => actions.resetConnection())
-    );
-    const overlayOn = plugin.authorOverlayEnabled();
-    new import_obsidian19.Setting(this.containerEl).setName("Author overlay").setDesc(
-      overlayOn ? "Currently on. Each note shows who last changed it, by colour and by name." : "Currently off. Author colours and names are hidden in both editor views."
-    ).addButton(
-      (button) => button.setButtonText(overlayOn ? "Hide authors" : "Show authors").onClick(() => {
-        plugin.toggleAuthorOverlay();
-        this.display();
-      })
     );
   }
 };
@@ -27651,9 +26493,9 @@ var PluginViewRegistry = class {
 };
 
 // src/main.ts
+var PARKED_ROW_PREFIX = "received:";
 var CONFLICT_SWEEP_DEBOUNCE_MS = 2e3;
-var SHOW_AUTHORS_KEY = "showAuthors";
-var HavemindPlugin = class extends import_obsidian20.Plugin {
+var HavemindPlugin = class extends import_obsidian19.Plugin {
   constructor() {
     super(...arguments);
     __publicField(this, "statusItem", null);
@@ -27691,8 +26533,6 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     __publicField(this, "views", new PluginViewRegistry());
     /** Live feed behind the Activity view (previously orphaned, now wired). */
     __publicField(this, "activityLog", new ActivityLog());
-    /** Bumped on every Activity feed change, so the editor overlay can rebuild. */
-    __publicField(this, "activityRevision", 0);
     /** Disposer for the activityLog subscription set up in onload(); torn down in onunload(). */
     __publicField(this, "activityLogUnsubscribe", null);
     /**
@@ -27706,7 +26546,6 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
      * (pilot heuristic, no server liveness signal yet, see renderRejoinRoster):
      * their roster rows draw as disconnected and offer Rejoin.
      */
-    __publicField(this, "deadMembershipIds", []);
     /** Membership ids the owner has issued a rejoin grant for (awaiting reconnect). */
     __publicField(this, "rejoinWaiting", /* @__PURE__ */ new Set());
     /**
@@ -27780,25 +26619,11 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     __publicField(this, "conflictSweepGuard", new RerunGuard(
       () => this.runConflictSweepOnce()
     ));
-    /**
-     * F6 author overlay: whether "Show authors" is on for this vault. OFF by
-     * default, attribution decoration changes how every note looks, so it is
-     * opt-in. Persisted under `showAuthors` in `data.json` through the shared
-     * plugin-data mutex; a data.json that cannot be read leaves the flag
-     * session-only rather than blocking load.
-     */
-    __publicField(this, "showAuthors", false);
-    /**
-     * True once the user has decided for this session. `restoreAuthorOverlayFlag`
-     * runs asynchronously from `onload`, so a toggle can land BEFORE the stored
-     * value comes back off disk; without this guard the restore would silently
-     * undo that toggle and then persist the undone value.
-     */
-    __publicField(this, "authorOverlayChosen", false);
+    /** Status bar item naming who last edited the open note. */
+    __publicField(this, "lastEditedItem", null);
   }
   onload() {
     this.activityLogUnsubscribe = this.activityLog.subscribe(() => {
-      this.activityRevision += 1;
       this.views.refreshOnboarding();
     });
     this.registerView(HAVEMIND_ONBOARDING_VIEW, (leaf) => {
@@ -27806,16 +26631,16 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
         // A phone joins vaults, it does not run them: hosting needs Docker, a
         // terminal and a machine that stays awake. The entry chooser drops the
         // host branch there rather than walking the user to a dead end.
-        canHost: !import_obsidian20.Platform.isMobileApp,
+        canHost: !import_obsidian19.Platform.isMobileApp,
         // The activity feed is a tab of this pane (plans/007 Stage 0): the log
         // snapshot mapped through the roster, so each row shows the author's
         // display name and colour.
         activityFeedProvider: () => activityEntriesToRecords(this.activityLog.snapshot(), this.rosterMembers),
-        onRestore: (revisionId) => this.handleRestore(revisionId),
+        onRestore: (revisionId) => {
+          void this.handleRestore(revisionId);
+        },
         // The overlay toggle lost its ribbon icon in Stage 0 and lives in the
         // pane footer now, beside the vault it annotates.
-        authorOverlayProvider: () => this.authorOverlayEnabled(),
-        onToggleAuthorOverlay: () => this.toggleAuthorOverlay(),
         arrivedWithInvitationProvider: () => this.arrivedWithInvitation,
         onOpenComposer: () => {
           void this.openCreateConnectionView();
@@ -27836,13 +26661,13 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
         recoveryRequiredProvider: () => this.syncState?.isRecoveryRequired() ?? false,
         onRetrySend: (revisionId) => {
           void this.retrySend(revisionId).catch(() => {
-            new import_obsidian20.Notice("Havemind: could not retry this queued change.");
+            new import_obsidian19.Notice("Havemind: could not retry this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
         onDiscardSend: (revisionId) => {
           void this.discardSend(revisionId).catch(() => {
-            new import_obsidian20.Notice("Havemind: could not discard this queued change.");
+            new import_obsidian19.Notice("Havemind: could not discard this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
@@ -27851,7 +26676,6 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
         onRejoin: (membershipId) => {
           void this.requestRejoin(membershipId);
         },
-        onMarkDisconnected: (membershipId) => this.markMemberDisconnected(membershipId),
         onRemove: (membershipId) => {
           void this.removeMember(membershipId);
         },
@@ -27877,6 +26701,9 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
         onDismissInvitation: () => this.dismissInvitation(),
         onApprove: (invitationId, verificationPhrase, report) => {
           void this.approvePendingDevice(invitationId, verificationPhrase, report);
+        },
+        onReject: (invitationId, report) => {
+          void this.rejectPendingDevice(invitationId, report);
         },
         onClosed: () => this.views.unregisterOnboarding(view)
       });
@@ -27924,32 +26751,9 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
         actions.resetConnection();
       }
     });
-    this.addCommand({
-      id: "show-authors",
-      name: "Show authors",
-      callback: () => this.toggleAuthorOverlay()
-    });
     this.addRibbonIcon("hexagon", "Open Havemind", () => {
       void this.openHavemindPane();
     });
-    this.registerEditorExtension(
-      createAuthorOverlayExtension({
-        overlayFor: (path, content) => {
-          const input = this.overlayInputFor(path, content);
-          return input === null ? null : buildLivePreviewOverlay(input);
-        },
-        // P14: nothing is read while the overlay is off, and marks are rebuilt
-        // only when the feed, the roster or the text actually change.
-        enabled: () => this.showAuthors,
-        revision: () => [this.activityRevision, this.rosterMembers]
-      })
-    );
-    this.registerMarkdownPostProcessor(
-      createAuthorReadingViewProcessor({
-        overlayFor: (path, content, section) => this.readingViewOverlay(path, content, section)
-      })
-    );
-    void this.restoreAuthorOverlayFlag();
     this.statusItem = this.addStatusBarItem();
     this.statusItem.addClass("havemind-status-bar");
     this.statusItem.onClickEvent(() => {
@@ -27965,6 +26769,14 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       void this.openView(HAVEMIND_ONBOARDING_VIEW);
     });
     this.setStatus(formatStatusBar({ status: "disconnected" }));
+    this.lastEditedItem = this.addStatusBarItem();
+    const workspace = this.app.workspace;
+    const fileOpen = workspace.on?.("file-open", () => {
+      void this.refreshLastEdited();
+    });
+    if (fileOpen !== void 0 && fileOpen !== null) {
+      this.registerEvent(fileOpen);
+    }
     this.addSettingTab(new HavemindSettingTab(this.app, this));
     this.registerObsidianProtocolHandler("havemind-join", (data) => {
       if (!isSafePassiveJoinProtocolData(data)) return;
@@ -28049,6 +26861,24 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     const expiry = Date.parse(this.pendingInvitation.expiresAt);
     return Number.isFinite(expiry) && Date.now() >= expiry;
   }
+  /** Owner action: refuse the device waiting on `invitationId` and drop its row. */
+  async rejectPendingDevice(invitationId, report) {
+    try {
+      const rejected = await rejectPendingDeviceForOwner(this, { invitationId });
+      if (rejected === null) {
+        report("Connect as the vault owner before rejecting a device.");
+        return;
+      }
+      this.pendingApprovals = this.pendingApprovals.filter(
+        (entry) => entry.invitationId !== invitationId
+      );
+      this.connectionNotice = "Device rejected. Its invitation no longer works.";
+      this.connectionNoticeKind = void 0;
+      this.views.refreshOnboardingNow();
+    } catch (error51) {
+      report(error51 instanceof Error ? error51.message : "Could not reject the device.");
+    }
+  }
   /**
    * Owner action: approve the joining device that read out `verificationPhrase`
    * against `POST …/invitations/:invitationId/approve`. The phrase is a
@@ -28118,7 +26948,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       this.connectionStatus = "offline";
       this.connectionError = "Havemind could not start syncing. Try reconnecting.";
       this.setStatus(formatStatusBar({ status: "offline" }));
-      new import_obsidian20.Notice("Havemind: could not start syncing. Try reconnecting.");
+      new import_obsidian19.Notice("Havemind: could not start syncing. Try reconnecting.");
       this.views.refreshOnboarding();
     }
   }
@@ -28170,34 +27000,37 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     };
   }
   /**
-   * Handles the Activity feed's "Restore" click: runs the append-only restore
-   * over the current feed history and records the result as a new,
-   * locally-attributed entry. A restore that cannot be performed (unknown or
-   * deleted target, unreconciled history) is surfaced via a Notice rather
-   * than silently doing nothing.
+   * The Activity feed's Restore: writes the note's text from that revision as a
+   * normal edit, which then syncs like any other. Reports what happened.
    */
-  handleRestore(revisionId) {
-    const self = this.rosterMembers.find((member) => member.self);
-    if (self === void 0) {
-      new import_obsidian20.Notice("Havemind: connect before restoring a revision.");
+  async handleRestore(revisionId) {
+    const connection = this.connection;
+    const state = this.syncState;
+    if (connection?.revisionContent === void 0 || state === null) {
+      new import_obsidian19.Notice("Havemind: connect before restoring a revision.");
       return;
     }
-    const history = activityEntriesToRecords(
-      this.activityLog.snapshot(),
-      this.rosterMembers
-    );
-    const entry = restoreActivityEntry({
-      history,
-      targetRevisionId: revisionId,
-      restorer: { actorId: self.membershipId, displayName: self.displayName },
-      now: Date.now(),
-      newRevisionId: globalThis.crypto.randomUUID()
-    });
-    if (entry === null) {
-      new import_obsidian20.Notice("Havemind: could not restore that revision.");
-      return;
+    try {
+      const result = await restoreRevision(
+        {
+          revisionContent: connection.revisionContent,
+          currentPath: (fileId) => state.pathForFileId(fileId),
+          vault: this.app.vault
+        },
+        revisionId
+      );
+      if (result.outcome === "unavailable") {
+        new import_obsidian19.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
+      } else if (result.outcome === "unchanged") {
+        new import_obsidian19.Notice(`Havemind: ${result.path} already has that text.`);
+      } else {
+        new import_obsidian19.Notice(`Havemind: restored ${result.path} to that version.`);
+      }
+    } catch (error51) {
+      new import_obsidian19.Notice(
+        `Havemind: could not restore that version, ${error51 instanceof Error ? error51.message : "unexpected error"}`
+      );
     }
-    this.activityLog.record(entry);
   }
   /**
    * The Obsidian-backed conflict vault port. `this.app.vault` is not modelled on
@@ -28218,7 +27051,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     try {
       return await this.openConflictModalOnce(copyPath);
     } catch {
-      new import_obsidian20.Notice("Havemind: could not open this conflict. Try again.");
+      new import_obsidian19.Notice("Havemind: could not open this conflict. Try again.");
       this.views.refreshOnboarding();
       return null;
     }
@@ -28248,16 +27081,16 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       void resolver.resolve(copy, action).then(
         (outcome) => {
           if (outcome === "vanished") {
-            new import_obsidian20.Notice("This conflict was already auto-resolved.");
+            new import_obsidian19.Notice("This conflict was already auto-resolved.");
           }
           if (outcome === "target-missing") {
-            new import_obsidian20.Notice("The note was moved or deleted, so the conflict copy was kept.");
+            new import_obsidian19.Notice("The note was moved or deleted, so the conflict copy was kept.");
           }
           modal2.close();
           this.views.refreshOnboarding();
         },
         () => {
-          new import_obsidian20.Notice("Havemind: could not resolve this conflict. Try again.");
+          new import_obsidian19.Notice("Havemind: could not resolve this conflict. Try again.");
           this.views.refreshOnboarding();
         }
       );
@@ -28284,7 +27117,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       role: self.role,
       self: true
     }).catch(() => {
-      new import_obsidian20.Notice("Havemind: could not save this device in the member roster.");
+      new import_obsidian19.Notice("Havemind: could not save this device in the member roster.");
       this.views.refreshOnboarding();
     });
   }
@@ -28405,7 +27238,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
   async syncNow() {
     const connection = this.connection;
     if (connection === null) {
-      new import_obsidian20.Notice("Havemind: connect before syncing.");
+      new import_obsidian19.Notice("Havemind: connect before syncing.");
       return;
     }
     if (connection.syncNow !== void 0 && this.connectionStatus !== "reconnect-required") {
@@ -28450,6 +27283,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     if (status === "synced") {
       this.lastSyncedAt = Date.now();
       this.connectionError = void 0;
+      void this.refreshLastEdited();
     }
     if (status === "reset-required") {
       this.connectionError = void 0;
@@ -28472,7 +27306,15 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     if (state === null) return null;
     return buildSendQueueStatus({
       outbox: state.outboxAges(),
-      quarantine: state.quarantineSnapshot().map((item) => {
+      quarantine: [
+        ...state.quarantineSnapshot(),
+        // Incoming changes this device could not apply (B2) share the same rows.
+        ...state.parkedSnapshot().map((item) => ({
+          ...item,
+          revisionId: `${PARKED_ROW_PREFIX}${item.revisionId}`,
+          reason: `Could not be received: ${item.reason}`
+        }))
+      ].map((item) => {
         const path = state.pathForFileId(item.fileId);
         return {
           revisionId: item.revisionId,
@@ -28493,6 +27335,10 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
    * pushing a phantom empty create for a vanished file.
    */
   async retrySend(revisionId) {
+    if (revisionId.startsWith(PARKED_ROW_PREFIX)) {
+      await this.retryParked(revisionId.slice(PARKED_ROW_PREFIX.length));
+      return;
+    }
     const failedPath = parseFailedToQueuePath(revisionId);
     if (failedPath !== null) {
       await this.retryFromDisk(revisionId, failedPath, { discardOnRetrigger: false });
@@ -28510,7 +27356,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       return;
     }
     if (fallback.kind === "discard-dead-letter") {
-      new import_obsidian20.Notice(fallback.notice);
+      new import_obsidian19.Notice(fallback.notice);
       await this.syncState?.discardQuarantined(revisionId);
     }
     this.views.refreshOnboarding();
@@ -28536,12 +27382,31 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
   async retryFromDisk(revisionId, path, options) {
     const outcome = this.connection?.retryFailedCommit?.(path);
     const effect = planRetryFromDisk(outcome, path, options.discardOnRetrigger);
-    if (effect.notice !== null) new import_obsidian20.Notice(effect.notice);
+    if (effect.notice !== null) new import_obsidian19.Notice(effect.notice);
     if (effect.discard) await this.syncState?.discardQuarantined(revisionId);
     this.views.refreshOnboardingNow();
   }
   /** Permanently discard a quarantined send (SND-01). */
+  /** Applies a parked incoming change again (B2). */
+  async retryParked(revisionId) {
+    try {
+      const done = await this.connection?.retryParked?.(revisionId) ?? false;
+      if (!done) {
+        new import_obsidian19.Notice("Havemind: the note is open with unsaved changes, or you are not connected. Try again later.");
+      }
+    } catch (error51) {
+      new import_obsidian19.Notice(
+        `Havemind: still cannot apply this change, ${error51 instanceof Error ? error51.message : "unexpected error"}`
+      );
+    }
+    this.views.refreshOnboardingNow();
+  }
   async discardSend(revisionId) {
+    if (revisionId.startsWith(PARKED_ROW_PREFIX)) {
+      await this.syncState?.unparkRemote(revisionId.slice(PARKED_ROW_PREFIX.length));
+      this.views.refreshOnboardingNow();
+      return;
+    }
     await this.syncState?.discardQuarantined(revisionId);
     this.views.refreshOnboardingNow();
   }
@@ -28567,7 +27432,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     this.notifiedQuarantineIds = new Set(next);
     for (const item of fresh) {
       const label = item.path ?? item.fileId;
-      new import_obsidian20.Notice(
+      new import_obsidian19.Notice(
         `A change to ${label} could not be sent, see the Havemind panel.`
       );
     }
@@ -28586,7 +27451,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     this.conflictSweepTimer = globalThis.setTimeout(() => {
       this.conflictSweepTimer = null;
       void this.runConflictSweep().catch(() => {
-        new import_obsidian20.Notice("Havemind: automatic conflict repair could not finish.");
+        new import_obsidian19.Notice("Havemind: automatic conflict repair could not finish.");
         this.views.refreshOnboarding();
       });
     }, CONFLICT_SWEEP_DEBOUNCE_MS);
@@ -28611,25 +27476,14 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       fileIdForCopy: (path) => state.fileIdForConflictCopy(path),
       ancestorFor: async (copyPath, fileId, targetPath) => await this.connection?.conflictAncestor?.(copyPath, fileId, targetPath) ?? null,
       notify: (message) => {
-        new import_obsidian20.Notice(`Havemind: ${message}`);
+        new import_obsidian19.Notice(`Havemind: ${message}`);
       }
     });
     this.views.refreshOnboarding();
   }
   /** The rejoin-aware roster projection over the persistent members. */
   rejoinRosterView() {
-    return buildRejoinRosterView(this.rosterMembers, this.deadMembershipIds);
-  }
-  /**
-   * Owner action (pilot heuristic): assert a connected contact has fallen off so
-   * their row offers Rejoin. No server liveness signal reaches the owner yet, so
-   * "disconnected" is owner-driven, see renderRejoinRoster.
-   */
-  markMemberDisconnected(membershipId) {
-    if (!this.deadMembershipIds.includes(membershipId)) {
-      this.deadMembershipIds = [...this.deadMembershipIds, membershipId];
-    }
-    this.views.refreshOnboarding();
+    return buildRejoinRosterView(this.rosterMembers);
   }
   /**
    * Owner action: issue a rejoin grant for a known-dead contact via the existing
@@ -28640,13 +27494,13 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     try {
       const waiting = await requestRejoinGrantForOwner(this, { membershipId });
       if (waiting === null) {
-        new import_obsidian20.Notice("Havemind: connect as the vault owner before rejoining a member.");
+        new import_obsidian19.Notice("Havemind: connect as the vault owner before rejoining a member.");
         return;
       }
       this.rejoinWaiting = /* @__PURE__ */ new Set([...this.rejoinWaiting, membershipId]);
       this.views.refreshOnboardingNow();
     } catch (error51) {
-      new import_obsidian20.Notice(
+      new import_obsidian19.Notice(
         `Havemind: could not request rejoin, ${error51 instanceof Error ? error51.message : "unexpected error"}`
       );
     }
@@ -28668,22 +27522,19 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     try {
       const removed = await revokeMembershipForOwner(this, { membershipId });
       if (removed === null) {
-        new import_obsidian20.Notice(
+        new import_obsidian19.Notice(
           "Havemind: connect as the vault owner before removing a member."
         );
         return;
       }
       this.rosterMembers = await this.rosterStore().removeMember(membershipId);
-      this.deadMembershipIds = this.deadMembershipIds.filter(
-        (id) => id !== membershipId
-      );
       this.rejoinWaiting = new Set(
         [...this.rejoinWaiting].filter((id) => id !== membershipId)
       );
-      new import_obsidian20.Notice(`Removed ${displayName} from the vault.`);
+      new import_obsidian19.Notice(`Removed ${displayName} from the vault.`);
       this.views.refreshOnboardingNow();
     } catch (error51) {
-      new import_obsidian20.Notice(
+      new import_obsidian19.Notice(
         `Havemind: could not remove member, ${error51 instanceof Error ? error51.message : "unexpected error"}`
       );
     }
@@ -28769,7 +27620,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     this.disarmRejoin();
     this.connectionError = "Rejoin failed, the server rejected the automatic rejoin. Reconnect manually to resume syncing.";
     this.setStatus(formatStatusBar({ status: "reconnect-required" }));
-    new import_obsidian20.Notice(
+    new import_obsidian19.Notice(
       "Havemind: rejoin failed. Reconnect manually to resume syncing."
     );
     this.views.refreshOnboarding();
@@ -28873,7 +27724,6 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       await resetHavemindConnectionState(this);
       forgetSharedAccessProvider(this);
       this.rosterMembers = [];
-      this.deadMembershipIds = [];
       this.rejoinWaiting = /* @__PURE__ */ new Set();
       this.pendingInvitation = null;
       this.pendingApprovals = [];
@@ -28887,11 +27737,11 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       this.lastSyncedAt = void 0;
       this.connectionError = void 0;
       this.setStatus(formatStatusBar({ status: "disconnected" }));
-      new import_obsidian20.Notice(
+      new import_obsidian19.Notice(
         "Havemind: connection reset. Paste a new invitation or pairing token to connect."
       );
     } catch (error51) {
-      new import_obsidian20.Notice(
+      new import_obsidian19.Notice(
         `Havemind: could not reset the connection, ${error51 instanceof Error ? error51.message : "unexpected error"}`
       );
     } finally {
@@ -28941,74 +27791,21 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
       connected: this.connection !== null
     };
   }
-  /** Whether the F6 author overlay is currently drawing. */
-  authorOverlayEnabled() {
-    return this.showAuthors;
-  }
-  /**
-   * The "Show authors" action, shared by the command, the ribbon and the
-   * settings tab. Holds no listener of its own: both overlay surfaces read this
-   * flag through a closure, so flipping it plus asking Obsidian to re-run the
-   * registered editor extensions is the whole effect. Reading view redraws on
-   * its next render, which the Notice says out loud rather than leaving the user
-   * wondering why one pane changed and the other did not.
-   */
-  toggleAuthorOverlay() {
-    this.showAuthors = !this.showAuthors;
-    this.authorOverlayChosen = true;
-    this.app.workspace.updateOptions?.();
-    new import_obsidian20.Notice(
-      `Havemind: author overlay ${this.showAuthors ? "on" : "off"}. Reading view updates on its next render.`
-    );
-    void this.persistAuthorOverlayFlag();
-  }
-  /** Reads the persisted "Show authors" flag; absent or unreadable means off. */
-  async restoreAuthorOverlayFlag() {
-    try {
-      const stored = await getPluginDataMutex(this).load();
-      if (this.authorOverlayChosen) return;
-      this.showAuthors = stored[SHOW_AUTHORS_KEY] === true;
-      if (this.showAuthors) {
-        this.app.workspace.updateOptions?.();
+  /** Names the last editor of the open note in the status bar. */
+  async refreshLastEdited() {
+    const item = this.lastEditedItem;
+    if (item === null) return;
+    const file2 = this.app.workspace.getActiveFile?.();
+    const fileId = file2 === null || file2 === void 0 ? null : this.syncState?.fileIdAtPath(file2.path) ?? null;
+    let author = null;
+    if (fileId !== null) {
+      try {
+        author = await this.connection?.lastAuthor?.(fileId) ?? null;
+      } catch {
+        author = null;
       }
-    } catch {
     }
-  }
-  /** Persists the flag without disturbing any other `data.json` key. */
-  async persistAuthorOverlayFlag() {
-    try {
-      await getPluginDataMutex(this).update((current) => ({
-        ...current,
-        [SHOW_AUTHORS_KEY]: this.showAuthors
-      }));
-    } catch {
-    }
-  }
-  /**
-   * Overlay input for one file, honestly degraded to whole-file attribution,
-   * see `attribution/overlay-source.ts` for why per-line is not derivable yet.
-   */
-  overlayInputFor(path, content) {
-    return buildFileOverlayInput({
-      enabled: this.showAuthors,
-      path,
-      content,
-      entries: this.activityLog.snapshot(),
-      roster: this.rosterMembers,
-      reducedMotion: prefersReducedMotion(),
-      formatTimestamp: formatActivityTime
-    });
-  }
-  /** The Reading-view overlay for the one block Obsidian just rendered. */
-  readingViewOverlay(path, content, section) {
-    const input = this.overlayInputFor(path, content);
-    if (input === null) return null;
-    return buildReadingViewOverlay(input, [
-      {
-        blockId: `${path}:${section.lineStart}-${section.lineEnd}`,
-        section: { lineStart: section.lineStart, lineEnd: section.lineEnd }
-      }
-    ]);
+    item.setText(lastEditedLabel(author, this.rosterMembers));
   }
   connectionPanel() {
     return buildConnectionPanel({
@@ -29081,7 +27878,7 @@ var HavemindPlugin = class extends import_obsidian20.Plugin {
     if (item === null) return;
     item.empty();
     const glyph = item.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian20.setIcon)(glyph, "hexagon");
+    (0, import_obsidian19.setIcon)(glyph, "hexagon");
     item.createEl("span", { text: view.text });
   }
   /**
