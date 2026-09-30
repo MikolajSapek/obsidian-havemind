@@ -26,7 +26,12 @@ __export(main_exports, {
   default: () => HavemindPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian19 = require("obsidian");
+var import_obsidian24 = require("obsidian");
+
+// src/runtime/is-record.ts
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 // src/onboarding/invite.ts
 var INVITE_ENVELOPE_VERSION = 1;
@@ -144,1183 +149,674 @@ function decodeBase64Url(value) {
   if (encodeBase64Url(bytes) !== value) throw new InviteFormatError();
   return bytes;
 }
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
-// src/runtime/producer-recovery.ts
-function validRecovery(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const row = value;
-  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string" && s.length > 0);
-  if (typeof row.id !== "string" || !row.id || !["apply", "resolution"].includes(String(row.kind)) || !strings(row.fileIds) || !strings(row.discardRevisionIds) || typeof row.state !== "object" || row.state === null) return false;
-  if (row.applyState !== void 0) {
-    if (typeof row.applyState !== "object" || row.applyState === null) return false;
-    const saved = row.applyState;
-    if (!["pathOwners", "baseHashes", "baseContents"].every((key) => typeof saved[key] === "object" && saved[key] !== null && !Array.isArray(saved[key]) && Object.values(saved[key]).every((value2) => typeof value2 === "string"))) return false;
-  }
-  const state = row.state;
-  if (!Array.isArray(state.mappings) || typeof state.heads !== "object" || state.heads === null || Array.isArray(state.heads)) return false;
-  return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
-    if (typeof m !== "object" || m === null) return false;
-    const item = m;
-    return ["fileId", "path", "collisionKey", "contentHash"].every((key) => typeof item[key] === "string") && (row.kind !== "resolution" || item.contentKind === "binary" || typeof item.content === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
-  });
-}
-
-// src/runtime/sync-state.ts
-var PAYLOAD_MISSING_REASON = "payload-missing";
-var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
-var QUARANTINED_ENVELOPE_BUDGET_BYTES = 5 * 1024 * 1024;
-var FAILED_TO_QUEUE_PREFIX = "failed-to-queue:";
-function failedToQueueRevisionId(path) {
-  return `${FAILED_TO_QUEUE_PREFIX}${path}`;
-}
-function parseFailedToQueuePath(revisionId) {
-  if (!revisionId.startsWith(FAILED_TO_QUEUE_PREFIX)) return null;
-  const path = revisionId.slice(FAILED_TO_QUEUE_PREFIX.length);
-  return path.length === 0 ? null : path;
-}
-function emptyState() {
-  return {
-    version: 1,
-    cursor: 0,
-    outbox: [],
-    locallyAuthored: [],
-    deferred: [],
-    quarantine: [],
-    pathOwners: {},
-    baseHashes: {},
-    baseContents: {},
-    conflictArtifacts: {},
-    quarantinedEnvelopes: {}
-  };
-}
-function parentIdsFromHeader(header) {
-  if (!isRecord2(header)) return [];
-  const ids = header.parentRevisionIds;
-  if (!Array.isArray(ids)) return [];
-  return ids.filter((id) => typeof id === "string");
-}
-function base64ByteLength(base643) {
-  const length = base643.length;
-  if (length === 0) return 0;
-  let padding = 0;
-  if (base643.endsWith("==")) padding = 2;
-  else if (base643.endsWith("=")) padding = 1;
-  return Math.floor(length * 3 / 4) - padding;
-}
-var DurableSyncState = class {
-  constructor(options) {
-    __publicField(this, "persist");
-    __publicField(this, "maxLocallyAuthored");
-    __publicField(this, "now");
-    __publicField(this, "envelopeBudgetBytes");
+// src/runtime/plugin-data-mutex.ts
+var PluginDataMutex = class {
+  constructor(access) {
+    __publicField(this, "access");
+    __publicField(this, "queue", Promise.resolve());
     /**
-     * Optional out-of-band payload store (arch P1). Undefined → payloads always
-     * stay inline in `data.json` (legacy behaviour, unchanged). Present → payload
-     * bytes are mirrored here and stripped from the on-disk blob; every access is
-     * wrapped in a fallible guard so an unavailable store degrades to inline.
+     * The blob as last read or written (P4). This plugin is the only writer of
+     * its data.json, so after the first read the disk is re-read only when
+     * Obsidian reports an external change ({@link invalidate}). Every load and
+     * update used to read the whole file again, about 93 times a sync cycle.
      */
-    __publicField(this, "parkReasons", /* @__PURE__ */ new Map());
-    __publicField(this, "payloadStore");
-    __publicField(this, "keepBaseContents");
-    /**
-     * The set of outbox/stash `revisionId`s whose payload currently lives in the
-     * payload store (so the on-disk form strips their inline bytes). Populated on
-     * enqueue/requeue, on load rehydration, and on legacy-blob migration; pruned
-     * on receipt/discard/eviction. A revisionId absent here keeps its bytes inline
-     * (the fallback path), so the disk form only ever strips a payload the store
-     * actually holds, never one that would then be irrecoverable.
-     */
-    __publicField(this, "externalized", /* @__PURE__ */ new Set());
     __publicField(this, "cache", null);
-    /**
-     * Set when the primary blob was present-but-corrupt with an UNRECOVERABLE
-     * outbox (the queue container itself could not be read), no usable `.bak`
-     * existed, and the raw bytes were preserved to a sidecar for manual recovery
-     * (GAP-1). It is a purely OBSERVABLE signal (see {@link isRecoveryRequired}),
-     * never a save lock, the instance resumes from a clean, writable empty state
-     * and the primary is rewritten so a restart never re-locks. Surfaced to the UI
-     * so the user sees "local queue needs recovery" rather than silently assuming
-     * the queue drained. A salvageable corruption (readable outbox, only a
-     * non-outbox core field damaged) never sets this: the queue is kept and the
-     * cleaned state is written back, so nothing is at risk.
-     */
-    __publicField(this, "recoveryRequired", false);
-    /**
-     * De-dupes concurrent cold-cache loads. Without it, two callers that both find
-     * a null cache each `await persist.load()`; the later resolution re-parses the
-     * on-disk blob and clobbers any cache mutation the first caller made during the
-     * await (an enqueued revision, an advanced cursor), a silent dropped push at
-     * connect (rule 3). All concurrent callers share this single in-flight load.
-     */
-    __publicField(this, "loadPromise", null);
-    /**
-     * Serializes every read-modify-write critical section against the shared
-     * in-memory cache. Each mutating method reads the cache (`ensureLoaded`) and
-     * writes it back (`mutate`) as a `{ ...state, field }` spread, with `await`
-     * points in between. On a WARM cache `ensureLoaded` reads synchronously, so
-     * two sections that overlap each capture the SAME snapshot and the later
-     * `mutate` silently drops the earlier one's write, a lost update. In the
-     * two-device sync loop this dropped a file's base CONTENT while keeping its
-     * base HASH, which then made the three-way merge (it needs the ancestor
-     * content) fail and spawn a SPURIOUS conflict copy (rule 3: zero silent
-     * overwrites / data loss). This is the in-memory analogue of the data.json
-     * `PluginDataMutex`, which only guards the on-disk save, not the cache RMW.
-     * Chaining each section on this single tail makes it run to completion before
-     * the next one reads, so no committed write is ever clobbered. Read-only
-     * accessors stay off the queue: `mutate` swaps the whole cache object in one
-     * synchronous assignment, so any read sees a complete, consistent snapshot.
-     */
-    __publicField(this, "mutationTail", Promise.resolve());
-    this.persist = options.persist;
-    this.maxLocallyAuthored = options.maxLocallyAuthored ?? DEFAULT_MAX_LOCALLY_AUTHORED;
-    this.now = options.now ?? (() => Date.now());
-    this.envelopeBudgetBytes = options.quarantinedEnvelopeBudgetBytes ?? QUARANTINED_ENVELOPE_BUDGET_BYTES;
-    this.payloadStore = options.payloadStore;
-    this.keepBaseContents = options.keepBaseContents ?? true;
+    this.access = access;
   }
-  /** `state` without base contents when they are not kept (A2). */
-  trimmed(state) {
-    return this.keepBaseContents || Object.keys(state.baseContents).length === 0 ? state : { ...state, baseContents: {} };
+  /** The current blob (an empty record when absent/malformed). */
+  load() {
+    return this.enqueue(async () => ({ ...await this.current() }));
   }
   /**
-   * Whether the last load found a present-but-corrupt blob with an unparseable
-   * non-empty outbox and no usable backup (GAP-1). While true, no mutation is
-   * persisted (the corrupt blob and its sidecar copy are left intact), and the
-   * UI/status should tell the user the local queue needs recovery.
+   * Atomically read-modify-write the whole blob: `mutator` receives the LATEST
+   * snapshot (read inside the critical section) and returns the blob to
+   * persist. Runs strictly after every previously-enqueued operation.
    */
-  isRecoveryRequired() {
-    return this.recoveryRequired;
-  }
-  async pendingProducerRecoveries() {
-    return (await this.ensureLoaded()).producerRecovery ?? [];
-  }
-  async startProducerRecovery(record2, replacement) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if ((state.producerRecovery ?? []).some((r) => r.fileIds.some((id) => record2.fileIds.includes(id)))) {
-        throw new Error("Producer recovery must finish before another transaction.");
-      }
-      const ids = new Set(record2.discardRevisionIds);
-      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
-      if (originals.length !== ids.size || this.hasUncoveredChildren(state, ids)) return false;
-      if (replacement !== void 0 && (ids.has(replacement.revisionId) || parentIdsFromHeader(replacement.header).some((id) => ids.has(id)))) return false;
-      await this.mutate({
-        ...state,
-        outbox: [...state.outbox.filter((e) => !ids.has(e.revisionId)), ...replacement === void 0 ? [] : [{ ...replacement, enqueuedAt: this.now() }]],
-        producerRecovery: [...state.producerRecovery ?? [], record2.kind === "apply" ? {
-          ...record2,
-          applyState: {
-            pathOwners: Object.fromEntries(Object.entries(state.pathOwners).filter(([, id]) => record2.fileIds.includes(id))),
-            baseHashes: Object.fromEntries(Object.entries(state.baseHashes).filter(([id]) => record2.fileIds.includes(id))),
-            baseContents: Object.fromEntries(Object.entries(state.baseContents).filter(([id]) => record2.fileIds.includes(id)))
-          }
-        } : record2],
-        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: originals.map((e) => ({ ...e, payloadExternalized: false })) } }
-      });
-      return true;
+  update(mutator) {
+    return this.enqueue(async () => {
+      const next = mutator({ ...await this.current() });
+      await this.access.saveData(next);
+      this.cache = next;
     });
   }
-  hasUncoveredChildren(state, ids) {
-    return [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((e) => !ids.has(e.revisionId) && parentIdsFromHeader(e.header).some((id) => ids.has(id)));
+  /** Forgets the cached blob; the next operation reads data.json again. */
+  invalidate() {
+    this.cache = null;
   }
-  async recoverProducerQueue(id) {
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const record2 = state.producerRecovery?.find((r) => r.id === id);
-      if (record2 === void 0) return;
-      if (record2.kind === "resolution") {
-        const pathOwners = { ...state.pathOwners };
-        const baseHashes = { ...state.baseHashes };
-        const baseContents = { ...state.baseContents };
-        for (const fileId of record2.fileIds) {
-          const mapping = record2.state.mappings.find((m) => m.fileId === fileId);
-          for (const [path, owner] of Object.entries(pathOwners)) {
-            if (owner === fileId && path !== mapping?.path) delete pathOwners[path];
-          }
-          if (mapping === void 0) {
-            delete baseHashes[fileId];
-            delete baseContents[fileId];
-          } else {
-            pathOwners[mapping.path] = fileId;
-            baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
-            if (mapping.contentKind !== "binary" && mapping.content !== void 0 && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
-          }
-        }
-        await this.mutate({ ...state, pathOwners, baseHashes, baseContents });
-        return;
-      }
-      const ids = new Set(record2.discardRevisionIds);
-      if (this.hasUncoveredChildren(state, ids)) throw new Error("Recovery would orphan pending work.");
-      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
-      const undo = record2.applyState;
-      await this.mutate({
-        ...state,
-        ...undo === void 0 ? {} : {
-          pathOwners: { ...Object.fromEntries(Object.entries(state.pathOwners).filter(([, fileId]) => !record2.fileIds.includes(fileId))), ...undo.pathOwners },
-          baseHashes: { ...Object.fromEntries(Object.entries(state.baseHashes).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseHashes },
-          baseContents: { ...Object.fromEntries(Object.entries(state.baseContents).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseContents }
-        },
-        outbox: state.outbox.filter((e) => !ids.has(e.revisionId)),
-        ...originals.length === 0 ? {} : { reconciliationBackups: {
-          ...state.reconciliationBackups,
-          [id]: [...state.reconciliationBackups?.[id] ?? [], ...originals.map((e) => ({ ...e, payloadExternalized: false }))]
-        } }
-      });
-    });
-  }
-  async completeProducerRecovery(id) {
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({ ...state, producerRecovery: (state.producerRecovery ?? []).filter((r) => r.id !== id) });
-    });
-  }
-  async enqueueAutomaticMerge(envelope) {
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const record2 = state.producerRecovery?.find((r) => r.kind === "apply" && r.fileIds.includes(envelope.fileId));
-      if (record2 === void 0) throw new Error("Automatic merge requires a durable apply transaction.");
-      await this.mutate({
-        ...state,
-        outbox: [...state.outbox, { ...envelope, enqueuedAt: this.now() }],
-        producerRecovery: state.producerRecovery?.map((r) => r.id === record2.id ? { ...r, discardRevisionIds: [...r.discardRevisionIds, envelope.revisionId] } : r) ?? []
-      });
-    });
-  }
-  async loadCursor() {
-    return (await this.ensureLoaded()).cursor;
-  }
-  async saveCursor(sequence) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({ ...state, cursor: sequence });
-    });
-  }
-  async listOutbox() {
-    const state = await this.ensureLoaded();
-    return state.outbox.map((envelope) => {
-      const parentRevisionIds = parentIdsFromHeader(envelope.header);
-      return {
-        revisionId: envelope.revisionId,
-        fileId: envelope.fileId,
-        contentHash: envelope.contentHash,
-        payloadBytes: base64ByteLength(envelope.payloadBase64),
-        // Omitted when empty so a root create carries no dependency (and existing
-        // exact-shape assertions on parentless rows are unchanged).
-        ...parentRevisionIds.length > 0 ? { parentRevisionIds } : {}
-      };
-    });
-  }
-  /**
-   * Two peers can independently publish byte-identical merges of the same heads.
-   * The server accepts one and rejects the other with HEAD_SET_CHANGED. After
-   * applying the accepted merge, discard only a redundant leaf in our queue.
-   * Never claim the rejected ID was accepted, and never orphan a queued child.
-   */
-  async retireEquivalentMerges(event) {
-    const remoteParents = event.revision.parentRevisionIds ?? [];
-    if (remoteParents.length < 2) return;
-    await this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const dependentParents = new Set([...state.outbox, ...Object.values(state.quarantinedEnvelopes)].flatMap((entry) => parentIdsFromHeader(entry.header)));
-      const retired = state.outbox.filter((entry) => {
-        const parents = parentIdsFromHeader(entry.header);
-        return entry.fileId === event.revision.fileId && entry.contentHash === event.revision.contentHash && parents.length >= 2 && parents.every((id) => remoteParents.includes(id)) && !dependentParents.has(entry.revisionId);
-      });
-      if (retired.length === 0) return;
-      const ids = new Set(retired.map((entry) => entry.revisionId));
-      await this.mutate({
-        ...state,
-        outbox: state.outbox.filter((entry) => !ids.has(entry.revisionId)),
-        reconciliationBackups: {
-          ...state.reconciliationBackups,
-          [event.revision.revisionId]: [
-            ...state.reconciliationBackups?.[event.revision.revisionId] ?? [],
-            ...retired.map((entry) => ({ ...entry, payloadExternalized: false }))
-          ]
-        }
-      });
-    });
-  }
-  async recordPushReceipt(receipt) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const outbox = state.outbox.filter(
-        (envelope) => envelope.revisionId !== receipt.revisionId
-      );
-      await this.mutate({
-        ...state,
-        outbox,
-        locallyAuthored: this.rememberAuthored(
-          state.locallyAuthored,
-          receipt.revisionId
-        )
-      });
-      await this.dropPayload(receipt.revisionId);
-    });
-  }
-  async quarantineOutboxItem(revisionId, reason) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const failed = state.outbox.find(
-        (envelope) => envelope.revisionId === revisionId
-      );
-      const outbox = state.outbox.filter(
-        (envelope) => envelope.revisionId !== revisionId
-      );
-      const entry = {
-        revisionId,
-        fileId: failed?.fileId ?? "",
-        reason,
-        ...failed === void 0 ? {} : { parentRevisionIds: parentIdsFromHeader(failed.header) }
-      };
-      const quarantine = [
-        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
-        entry
-      ];
-      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
-      if (failed !== void 0) {
-        quarantinedEnvelopes[revisionId] = failed;
-      }
-      const budgeted = this.evictStashesOverBudget(quarantinedEnvelopes);
-      for (const evictedId of Object.keys(quarantinedEnvelopes)) {
-        if (!(evictedId in budgeted)) {
-          await this.dropPayload(evictedId);
-        }
-      }
-      await this.mutate({
-        ...state,
-        outbox,
-        quarantine,
-        quarantinedEnvelopes: budgeted
-      });
-    });
-  }
-  /**
-   * Returns a copy of `envelopes` trimmed to the byte budget (MAJOR 4). Object
-   * key order is insertion order, so iterating from the front evicts the OLDEST
-   * stashes until the summed decoded payload bytes fit. A single stash larger
-   * than the whole budget is evicted too, its row survives and Retry re-commits
-   * from disk, which is the only recovery once the bytes are dropped.
-   */
-  evictStashesOverBudget(envelopes) {
-    const entries = Object.entries(envelopes);
-    let total = entries.reduce(
-      (sum, [, env]) => sum + base64ByteLength(env.payloadBase64),
-      0
-    );
-    if (total <= this.envelopeBudgetBytes) return envelopes;
-    const trimmed = { ...envelopes };
-    for (const [key, env] of entries) {
-      if (total <= this.envelopeBudgetBytes) break;
-      total -= base64ByteLength(env.payloadBase64);
-      delete trimmed[key];
+  async current() {
+    if (this.cache === null) {
+      const data = await this.access.loadData();
+      this.cache = isRecord(data) ? data : {};
     }
-    return trimmed;
-  }
-  /**
-   * Record a durable "failed to queue" entry (SND-02): a local change whose
-   * commit-path enqueue permanently failed (e.g. a transient readText/saveData
-   * failure that survived a bounded re-arm), so it never reached the outbox and
-   * has no envelope to retry. It reuses the SND-01 quarantine machinery so the
-   * send-queue panel surfaces it alongside server-rejected sends under the
-   * distinguishable reason `failed-to-queue`, keyed by a synthetic revisionId
-   * derived from the path (see {@link failedToQueueRevisionId}) so repeated
-   * failures for the same file coalesce into one row rather than flooding the
-   * panel. Nothing is ever silently dropped.
-   *
-   * Discard behaves identically to a server-rejected send, but Retry does NOT:
-   * a failed-to-queue row has no stashed envelope (it never reached the outbox),
-   * so `requeueQuarantined` is inert for it. Retry instead re-triggers the
-   * commit chain for the path from disk (MAJOR 2, routed by the caller via
-   * {@link parseFailedToQueuePath}), the on-disk content is the source of truth.
-   */
-  async recordFailedToQueue(path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const revisionId = failedToQueueRevisionId(path);
-      const entry = {
-        revisionId,
-        fileId: path,
-        reason: "failed-to-queue"
-      };
-      const quarantine = [
-        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
-        entry
-      ];
-      await this.mutate({ ...state, quarantine });
-    });
-  }
-  async listQuarantine() {
-    return (await this.ensureLoaded()).quarantine;
-  }
-  /**
-   * The parents of a quarantined revision, or undefined when `revisionId` is
-   * not quarantined or its parents were never recorded (a legacy row whose
-   * stash was evicted). The producer walks past a quarantined head with this.
-   */
-  async quarantinedParents(revisionId) {
-    const state = await this.ensureLoaded();
-    const row = state.quarantine.find((item) => item.revisionId === revisionId);
-    if (row === void 0) return void 0;
-    if (row.parentRevisionIds !== void 0) return row.parentRevisionIds;
-    const stashed = state.quarantinedEnvelopes[revisionId];
-    return stashed === void 0 ? void 0 : parentIdsFromHeader(stashed.header);
-  }
-  /** Includes unsent authored revisions; used to distinguish local work from history replay. */
-  async hasAuthoredRevision(revisionId) {
-    const state = await this.ensureLoaded();
-    return state.locallyAuthored.includes(revisionId) || state.outbox.some((entry) => entry.revisionId === revisionId);
-  }
-  async isLocallyAuthored(revisionId) {
-    const state = await this.ensureLoaded();
-    return state.locallyAuthored.includes(revisionId);
-  }
-  /**
-   * Synchronous owner lookup against the warmed cache. Returns the fileId that
-   * owns `path`, or null if Havemind has not materialized a file there. The
-   * vault adapter uses this to update already-synced files in place while
-   * routing genuine collisions (a foreign file at the path) to conflicts.
-   */
-  fileIdAtPath(path) {
-    return this.cache?.pathOwners[path] ?? null;
-  }
-  /**
-   * Records an applied revision: `fileId` owns `path`, with base `hash` and,
-   * for markdown, base `content`. One write instead of three (P1), and never a
-   * half-recorded base after a crash between them.
-   */
-  async recordApplied(fileId, path, hash2, content) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        pathOwners: { ...state.pathOwners, [path]: fileId },
-        baseHashes: { ...state.baseHashes, [fileId]: hash2 },
-        ...content === null ? {} : { baseContents: { ...state.baseContents, [fileId]: content } }
-      });
-    });
-  }
-  async recordPathOwner(fileId, path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        pathOwners: { ...state.pathOwners, [path]: fileId }
-      });
-    });
-  }
-  async forgetPath(path) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(path in state.pathOwners)) return;
-      const pathOwners = { ...state.pathOwners };
-      delete pathOwners[path];
-      await this.mutate({ ...state, pathOwners });
-    });
-  }
-  /**
-   * Synchronous lookup of the last synced base content hash for a file against
-   * the warmed cache, or null when Havemind has no recorded base yet. The vault
-   * adapter uses this to detect whether the on-disk content has diverged from
-   * the shared base before applying an incoming remote revision.
-   */
-  baseHashFor(fileId) {
-    return this.cache?.baseHashes[fileId] ?? null;
-  }
-  async recordBaseHash(fileId, hash2) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        baseHashes: { ...state.baseHashes, [fileId]: hash2 }
-      });
-    });
-  }
-  async forgetBaseHash(fileId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(fileId in state.baseHashes)) return;
-      const baseHashes = { ...state.baseHashes };
-      delete baseHashes[fileId];
-      await this.mutate({ ...state, baseHashes });
-    });
-  }
-  /**
-   * The exact base CONTENT for a file (the merge ancestor, MRG-01), or null when
-   * none is recorded. Synchronous against the warmed cache, like `baseHashFor`.
-   */
-  baseContentFor(fileId) {
-    return this.cache?.baseContents[fileId] ?? null;
-  }
-  async recordBaseContent(fileId, content) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        baseContents: { ...state.baseContents, [fileId]: content }
-      });
-    });
-  }
-  async forgetBaseContent(fileId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!(fileId in state.baseContents)) return;
-      const baseContents = { ...state.baseContents };
-      delete baseContents[fileId];
-      await this.mutate({ ...state, baseContents });
-    });
-  }
-  /**
-   * The conflict-artifact path already written for `revisionId` (MRG-02
-   * cascade guard), or null if this revision has not conflicted before.
-   * Synchronous against the warmed cache.
-   */
-  conflictArtifactPathFor(revisionId) {
-    return this.cache?.conflictArtifacts[revisionId] ?? null;
-  }
-  async recordConflictArtifactPath(revisionId, path, fileId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        conflictArtifacts: { ...state.conflictArtifacts, [revisionId]: path },
-        ...fileId === void 0 ? {} : {
-          conflictCopyFileIds: {
-            ...state.conflictCopyFileIds,
-            [path]: fileId
-          }
-        }
-      });
-    });
-  }
-  /** The remote revision a conflict copy holds, or null when not recorded. */
-  revisionForConflictCopy(path) {
-    for (const [revisionId, copyPath] of Object.entries(this.cache?.conflictArtifacts ?? {})) {
-      if (copyPath === path) return revisionId;
-    }
-    return null;
-  }
-  /** The fileId a conflict copy was written for, or null when not recorded. */
-  fileIdForConflictCopy(path) {
-    return this.cache?.conflictCopyFileIds?.[path] ?? null;
-  }
-  async enqueue(envelope) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const stamped = envelope.enqueuedAt === void 0 ? { ...envelope, enqueuedAt: this.now() } : envelope;
-      if (await this.safePutPayload(stamped.revisionId, stamped.payloadBase64)) {
-        this.externalized.add(stamped.revisionId);
-      } else {
-        this.externalized.delete(stamped.revisionId);
-      }
-      const outbox = [
-        ...state.outbox.filter(
-          (entry) => entry.revisionId !== envelope.revisionId
-        ),
-        stamped
-      ];
-      await this.mutate({ ...state, outbox });
-    });
-  }
-  /**
-   * Outbox items paired with their enqueue time (SND-01), read synchronously
-   * against the warm cache. A missing `enqueuedAt` (legacy blob) is reported as
-   * 0, "very old", so a pre-upgrade item still counts as waiting. The runner
-   * always warms the cache before it pushes, so the panel's synchronous read
-   * finds a populated cache once connected; a cold cache reports no ages.
-   */
-  outboxAges() {
-    return (this.cache?.outbox ?? []).map((envelope) => ({
-      revisionId: envelope.revisionId,
-      enqueuedAt: envelope.enqueuedAt ?? 0
-    }));
-  }
-  /** Synchronous quarantine snapshot against the warm cache (SND-01). */
-  quarantineSnapshot() {
-    return this.cache?.quarantine ?? [];
-  }
-  /** The vault path a fileId currently owns (reverse of `fileIdAtPath`), or null. */
-  pathForFileId(fileId) {
-    const owners = this.cache?.pathOwners ?? {};
-    for (const [path, owner] of Object.entries(owners)) {
-      if (owner === fileId) return path;
-    }
-    return null;
-  }
-  /**
-   * Retry a quarantined send (SND-01): re-enqueue its stashed envelope through
-   * the normal outbox machinery (fresh enqueue time), then drop it from the
-   * quarantine and the stash. Returns true when it re-enqueued, false when
-   * nothing is stashed for `revisionId`, already requeued/discarded, or the
-   * stash was evicted under the byte budget (MAJOR 4). A false return leaves the
-   * quarantine row intact so the caller can degrade Retry to a re-commit from
-   * disk; a double click cannot double-enqueue because the second call finds no
-   * stash and returns false.
-   */
-  async requeueQuarantined(revisionId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const stashed = state.quarantinedEnvelopes[revisionId];
-      if (stashed === void 0) return false;
-      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
-      delete quarantinedEnvelopes[revisionId];
-      const outbox = [
-        ...state.outbox.filter((entry) => entry.revisionId !== revisionId),
-        { ...stashed, enqueuedAt: this.now() }
-      ];
-      const quarantine = state.quarantine.filter(
-        (item) => item.revisionId !== revisionId
-      );
-      await this.mutate({ ...state, outbox, quarantine, quarantinedEnvelopes });
-      return true;
-    });
-  }
-  /**
-   * Permanently drop a quarantined send (SND-01): remove it from the quarantine
-   * and forget its stashed envelope. Idempotent, dropping an unknown id is a
-   * no-op.
-   */
-  async discardQuarantined(revisionId) {
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      if (!state.quarantine.some((item) => item.revisionId === revisionId) && state.quarantinedEnvelopes[revisionId] === void 0) {
-        return;
-      }
-      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
-      delete quarantinedEnvelopes[revisionId];
-      const quarantine = state.quarantine.filter(
-        (item) => item.revisionId !== revisionId
-      );
-      await this.mutate({ ...state, quarantine, quarantinedEnvelopes });
-      await this.dropPayload(revisionId);
-    });
-  }
-  async getEnvelope(revisionId) {
-    await this.ensureLoaded();
-    return this.peekEnvelope(revisionId);
-  }
-  /**
-   * Synchronous lookup against the warmed cache. The runner always awaits
-   * `listOutbox` (which loads the cache) before it pushes, so the transport's
-   * synchronous `resolveEnvelope` finds a warm cache by the time it runs.
-   */
-  peekEnvelope(revisionId) {
-    const found = this.cache?.outbox.find(
-      (envelope) => envelope.revisionId === revisionId
-    );
-    if (found === void 0) return void 0;
-    return {
-      header: found.header,
-      idempotencyKey: found.idempotencyKey,
-      payloadBase64: found.payloadBase64
-    };
-  }
-  /**
-   * Incoming changes this device could not apply, set aside so the rest of the
-   * vault keeps syncing (B2). Persisted in the `deferred` field; the failure
-   * reason is kept for this session only.
-   */
-  async listParkedRemote() {
-    return (await this.ensureLoaded()).deferred;
-  }
-  async parkRemote(event, reason) {
-    this.parkReasons.set(event.revision.revisionId, reason);
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      const others = state.deferred.filter(
-        (item) => item.revision.revisionId !== event.revision.revisionId
-      );
-      await this.mutate({ ...state, deferred: [...others, event] });
-    });
-  }
-  async unparkRemote(revisionId) {
-    this.parkReasons.delete(revisionId);
-    return this.runExclusive(async () => {
-      const state = await this.ensureLoaded();
-      await this.mutate({
-        ...state,
-        deferred: state.deferred.filter((item) => item.revision.revisionId !== revisionId)
-      });
-    });
-  }
-  /** Parked incoming changes for the panel, from the in-memory cache. */
-  parkedSnapshot() {
-    return (this.cache?.deferred ?? []).map((event) => ({
-      revisionId: event.revision.revisionId,
-      fileId: event.revision.fileId,
-      reason: this.parkReasons.get(event.revision.revisionId) ?? "This device could not apply this change."
-    }));
-  }
-  rememberAuthored(existing, revisionId) {
-    if (existing.includes(revisionId)) return existing;
-    const next = [...existing, revisionId];
-    return next.length > this.maxLocallyAuthored ? next.slice(next.length - this.maxLocallyAuthored) : next;
-  }
-  async ensureLoaded() {
-    if (this.cache !== null) return this.cache;
-    if (this.loadPromise === null) {
-      this.loadPromise = this.persist.load().then((raw) => this.hydrate(raw)).then(() => this.reconcilePayloads()).finally(() => {
-        this.loadPromise = null;
-      });
-    }
-    await this.loadPromise;
-    if (this.cache === null) this.cache = emptyState();
     return this.cache;
   }
-  /**
-   * Parse the loaded primary blob into the cache (GAP-1 fail-closed policy). A
-   * mutation may have populated the cache while the load was in flight (e.g. an
-   * enqueue that awaited this same shared promise and then wrote); never clobber
-   * it, re-check `this.cache === null` before each assignment.
-   *
-   *  - ABSENT (null/undefined): a clean first run → empty, writable state.
-   *  - OK: the parsed state (with bad outbox envelopes quarantined, not nuked).
-   *  - CORRUPT (present but a core field failed): try the `.bak` first; if it is
-   *    a valid present state, recover from it. Otherwise, with no usable backup:
-   *      · SALVAGE when the outbox is still readable (only a non-outbox core
-   *        field is damaged): keep the queue + locally-authored ids, reset the
-   *        unrecoverable fields to safe defaults, preserve the raw blob to a
-   *        sidecar, and write the CLEANED state back as the new primary. Nothing
-   *        is at risk, so recovery is NOT flagged and the next load reads 'ok'.
-   *      · UNRECOVERABLE when the queue container itself cannot be read: preserve
-   *        the raw blob to a sidecar for manual recovery, resume from a clean,
-   *        writable empty state, rewrite the primary to it (so a restart never
-   *        re-locks), and set the observable recovery signal.
-   */
-  async hydrate(raw) {
-    if (this.cache !== null) return;
-    if (isRecord2(raw) && !validRecoveryFields(raw)) {
-      await this.persist.preserveCorrupt(raw, this.now());
-      throw new Error("Invalid producer recovery journal; sync is paused with original state preserved.");
-    }
-    const outcome = parsePersistedState(raw);
-    if (outcome.status !== "corrupt") {
-      if (this.cache === null) this.cache = this.trimmed(outcome.state);
-      return;
-    }
-    if (isRecord2(raw) && (raw.producerRecovery !== void 0 || raw.reconciliationBackups !== void 0)) {
-      await this.persist.preserveCorrupt(raw, this.now());
-      throw new Error("Corrupt sync state includes recovery data; original state preserved.");
-    }
-    const backup = await this.persist.loadBackup();
-    if (this.cache !== null) return;
-    const backupOutcome = parsePersistedState(backup);
-    if (backupOutcome.status === "ok") {
-      await this.persist.preserveCorrupt(raw, this.now());
-      if (this.cache === null) {
-        this.cache = this.trimmed(backupOutcome.state);
-        if (salvageHasOutboxEntriesMissingFrom(outcome.salvage, backupOutcome.state.outbox)) {
-          this.recoveryRequired = true;
-        }
-      }
-      return;
-    }
-    await this.persist.preserveCorrupt(raw, this.now());
-    if (this.cache !== null) return;
-    if (outcome.salvage !== null) {
-      this.cache = this.trimmed(outcome.salvage);
-    } else {
-      this.cache = emptyState();
-      if (outcome.outboxAtRisk) this.recoveryRequired = true;
-    }
-    await this.persist.save(this.toDiskForm(this.cache));
-  }
-  async mutate(next) {
-    const kept = this.trimmed(next);
-    await this.persist.save(this.toDiskForm(kept));
-    this.cache = kept;
-  }
-  /**
-   * Arch P1: the on-disk projection of `state`. For every outbox/stash envelope
-   * whose payload is externalized (its `revisionId` is in {@link externalized},
-   * i.e. the store durably holds the bytes), the inline `payloadBase64` is
-   * replaced by `''` and marked `payloadExternalized: true`. A payload NOT in the
-   * set (legacy, or an inline-fallback under an unavailable store) is written
-   * inline unchanged, so the disk form only ever strips bytes the store actually
-   * holds, never bytes that would then be irrecoverable. Returns `state` itself
-   * when nothing is externalized (the legacy path), so behaviour is identical to
-   * before when no payload store is configured.
-   */
-  toDiskForm(state) {
-    if (this.externalized.size === 0) return state;
-    const strip = (env) => this.externalized.has(env.revisionId) ? { ...env, payloadBase64: "", payloadExternalized: true } : env;
-    const quarantinedEnvelopes = {};
-    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
-      quarantinedEnvelopes[key] = strip(env);
-    }
-    return {
-      ...state,
-      outbox: state.outbox.map(strip),
-      quarantinedEnvelopes
-    };
-  }
-  /** Fallible payload-store read: undefined on absence OR any store failure. */
-  async safeGetPayload(revisionId) {
-    if (this.payloadStore === void 0) return void 0;
-    try {
-      return await this.payloadStore.getPayload(revisionId);
-    } catch {
-      return void 0;
-    }
-  }
-  /**
-   * Fallible payload-store write. Returns true when the bytes are durably in the
-   * store (so the caller marks the id externalized and the disk form strips it),
-   * false when there is no store or the write threw (keep the payload inline,
-   * the graceful mobile/unavailable fallback).
-   */
-  async safePutPayload(revisionId, payloadBase64) {
-    if (this.payloadStore === void 0) return false;
-    try {
-      await this.payloadStore.putPayload(revisionId, payloadBase64);
-      return true;
-    } catch {
-      console.warn(
-        `Havemind: outbox payload for ${revisionId} could not be externalized; keeping it inline in data.json.`
-      );
-      return false;
-    }
-  }
-  /**
-   * Drop a revision's externalized payload from the store when it leaves BOTH the
-   * outbox and the stash for good (receipt, discard, budget eviction). A no-op
-   * when the id was never externalized (inline path). Best-effort: a failed
-   * delete only leaks bytes, never corrupts state, so it is swallowed.
-   */
-  async dropPayload(revisionId) {
-    if (!this.externalized.has(revisionId)) return;
-    if (this.payloadStore !== void 0) {
-      try {
-        await this.payloadStore.deletePayload(revisionId);
-      } catch {
-      }
-    }
-    this.externalized.delete(revisionId);
-  }
-  /**
-   * Reconcile outbox/stash payloads with the out-of-band store after load (arch
-   * P1). For each envelope:
-   *  - EXTERNALIZED (a reference: empty inline bytes + marker): fetch the bytes.
-   *    Present → rehydrate them into the in-memory cache so `peekEnvelope` drains
-   *    the real payload; missing/unresolvable → fail-closed. A missing OUTBOX
-   *    payload is quarantined (never drained empty); a missing STASH payload is
-   *    dropped (its quarantine row already records the failure), mirroring the
-   *    byte-budget eviction contract.
-   *  - INLINE (legacy or fallback): opportunistically MIGRATE the bytes into the
-   *    store, marking the id externalized so the next save shrinks `data.json`.
-   * When anything changed, the cleaned/migrated state is persisted immediately
-   * (disk form) so a legacy blob is shrunk on first load, not only on next edit.
-   */
-  async reconcilePayloads() {
-    const state = this.cache;
-    if (state === null) return;
-    let cacheChanged = false;
-    let persistNeeded = false;
-    const nextOutbox = [];
-    const addedQuarantine = [];
-    for (const env of state.outbox) {
-      if (env.payloadExternalized === true) {
-        const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string") {
-          this.externalized.add(env.revisionId);
-          nextOutbox.push({ ...env, payloadBase64: payload });
-          cacheChanged = true;
-        } else {
-          console.warn(
-            `Havemind: outbox payload for ${env.revisionId} is missing from the store; quarantining it (fail-closed).`
-          );
-          addedQuarantine.push({
-            revisionId: env.revisionId,
-            fileId: env.fileId,
-            reason: PAYLOAD_MISSING_REASON
-          });
-          cacheChanged = true;
-          persistNeeded = true;
-        }
-      } else {
-        nextOutbox.push(env);
-        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
-          this.externalized.add(env.revisionId);
-          persistNeeded = true;
-        }
-      }
-    }
-    const nextStash = {};
-    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
-      if (env.payloadExternalized === true) {
-        const payload = await this.safeGetPayload(env.revisionId);
-        if (typeof payload === "string") {
-          this.externalized.add(env.revisionId);
-          nextStash[key] = { ...env, payloadBase64: payload };
-          cacheChanged = true;
-        } else {
-          persistNeeded = true;
-        }
-      } else {
-        nextStash[key] = env;
-        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
-          this.externalized.add(env.revisionId);
-          persistNeeded = true;
-        }
-      }
-    }
-    if (!cacheChanged && !persistNeeded) return;
-    const next = {
-      ...state,
-      outbox: nextOutbox,
-      quarantine: [...state.quarantine, ...addedQuarantine],
-      quarantinedEnvelopes: nextStash
-    };
-    this.cache = next;
-    if (persistNeeded) {
-      await this.persist.save(this.toDiskForm(next));
-    }
-  }
-  /**
-   * Runs a read-modify-write `section` (an `ensureLoaded` + `mutate` pair)
-   * atomically with respect to every other section, by chaining them on a
-   * single tail. See {@link mutationTail} for why this is required. `section`s
-   * never nest (no mutating method calls another), so this cannot deadlock; the
-   * tail swallows outcomes so one section's rejection never wedges the next.
-   */
-  runExclusive(section) {
-    const run = this.mutationTail.then(section, section);
-    this.mutationTail = run.then(
+  enqueue(task) {
+    const run = this.queue.then(task, task);
+    this.queue = run.then(
       () => void 0,
       () => void 0
     );
     return run;
   }
 };
-var CORRUPT_ENVELOPE_PREFIX = "corrupt-envelope:";
-function parseOutboxEntries(outbox) {
-  const parsedOutbox = [];
-  const quarantinedBadEnvelopes = [];
-  outbox.forEach((entry, index) => {
-    const parsed = parseEnvelope(entry);
-    if (parsed === null) {
-      quarantinedBadEnvelopes.push(quarantineForCorruptEnvelope(entry, index));
-    } else {
-      parsedOutbox.push(parsed);
+function createSerializedDataPort(mutex) {
+  let lastLoaded = {};
+  return {
+    async load() {
+      lastLoaded = await mutex.load();
+      return lastLoaded;
+    },
+    async save(data) {
+      const loadedAtSave = lastLoaded;
+      await mutex.update((disk) => {
+        const next = { ...disk };
+        for (const key of Object.keys(data)) {
+          if (data[key] !== loadedAtSave[key]) {
+            next[key] = data[key];
+          }
+        }
+        return next;
+      });
     }
-  });
-  if (quarantinedBadEnvelopes.length > 0) {
-    console.warn(
-      `Havemind: ${quarantinedBadEnvelopes.length} unparseable outbox envelope(s) were quarantined; the rest of the outbox was preserved.`
+  };
+}
+var mutexes = /* @__PURE__ */ new WeakMap();
+function getPluginDataMutex(access) {
+  const existing = mutexes.get(access);
+  if (existing !== void 0) return existing;
+  const created = new PluginDataMutex(access);
+  mutexes.set(access, created);
+  return created;
+}
+
+// src/runtime/activity-restore.ts
+async function restoreRevision(deps, revisionId) {
+  const revision = await deps.revisionContent(revisionId);
+  if (revision === null) return { outcome: "unavailable" };
+  const path = deps.currentPath(revision.fileId) ?? revision.path;
+  const file2 = deps.vault.getAbstractFileByPath(path);
+  if (file2 === null) {
+    await deps.vault.create(path, revision.content);
+    return { outcome: "restored", path };
+  }
+  if (await deps.vault.read(file2) === revision.content) {
+    return { outcome: "unchanged", path };
+  }
+  await deps.vault.modify(file2, revision.content);
+  return { outcome: "restored", path };
+}
+
+// src/runtime/activity-log.ts
+var DEFAULT_MAX_ENTRIES = 200;
+var REMOTE_COLOR_ID = "havemind-remote";
+var ActivityLog = class {
+  constructor(options = {}) {
+    __publicField(this, "entries", []);
+    __publicField(this, "listeners", /* @__PURE__ */ new Set());
+    __publicField(this, "maxEntries");
+    this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  }
+  /** Records (or replaces by revisionId) an entry and notifies subscribers. */
+  record(entry) {
+    const next = this.entries.filter(
+      (existing) => existing.revisionId !== entry.revisionId
     );
-  }
-  return { parsedOutbox, quarantinedBadEnvelopes };
-}
-function parsePersistedState(raw) {
-  if (raw === null || raw === void 0) {
-    return { status: "absent", state: emptyState(), salvage: null, outboxAtRisk: false };
-  }
-  const strict = strictParse(raw);
-  if (strict !== null) {
-    return { status: "ok", state: strict, salvage: null, outboxAtRisk: false };
-  }
-  return {
-    status: "corrupt",
-    state: emptyState(),
-    salvage: salvageState(raw),
-    outboxAtRisk: outboxAtRisk(raw)
-  };
-}
-function validRecoveryFields(raw) {
-  if (raw.producerRecovery !== void 0 && (!Array.isArray(raw.producerRecovery) || !raw.producerRecovery.every(validRecovery))) return false;
-  if (raw.reconciliationBackups !== void 0) {
-    if (!isRecord2(raw.reconciliationBackups)) return false;
-    if (!Object.values(raw.reconciliationBackups).every((entries) => Array.isArray(entries) && entries.every((entry) => parseEnvelope(entry) !== null && isRecord2(entry) && entry.payloadExternalized !== true))) return false;
-  }
-  return true;
-}
-function strictParse(raw) {
-  if (isRecord2(raw) && !validRecoveryFields(raw)) return null;
-  if (!isRecord2(raw) || raw.version !== 1) return null;
-  const cursor = raw.cursor;
-  const outbox = raw.outbox;
-  const locallyAuthored = raw.locallyAuthored;
-  const deferred = raw.deferred;
-  if (!Number.isSafeInteger(cursor) || cursor < 0 || !Array.isArray(outbox) || !Array.isArray(locallyAuthored) || !Array.isArray(deferred)) {
-    return null;
-  }
-  if (!locallyAuthored.every((value) => typeof value === "string")) {
-    return null;
-  }
-  const parsedDeferred = [];
-  for (const entry of deferred) {
-    const parsed = parseRemoteEvent(entry);
-    if (parsed === null) return null;
-    parsedDeferred.push(parsed);
-  }
-  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(outbox);
-  const pathOwners = parseStringMap(raw.pathOwners) ?? warnDegrade("pathOwners", {});
-  const baseHashes = parseStringMap(raw.baseHashes) ?? warnDegrade("baseHashes", {});
-  const baseContents = parseStringMap(raw.baseContents) ?? warnDegrade("baseContents", {});
-  const conflictArtifacts = parseStringMap(raw.conflictArtifacts) ?? warnDegrade("conflictArtifacts", {});
-  const quarantine = parseQuarantine(raw.quarantine) ?? warnDegrade("quarantine", []);
-  const quarantinedEnvelopes = parseEnvelopeMap(raw.quarantinedEnvelopes) ?? warnDegrade("quarantinedEnvelopes", {});
-  return {
-    version: 1,
-    cursor,
-    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
-    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
-    outbox: parsedOutbox,
-    locallyAuthored,
-    deferred: parsedDeferred,
-    // Merge the corrupt-envelope rows in so nothing is silently dropped.
-    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
-    pathOwners,
-    baseHashes,
-    baseContents,
-    conflictArtifacts,
-    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
-    quarantinedEnvelopes
-  };
-}
-function optionalConflictCopyFileIds(value) {
-  if (value === void 0) return {};
-  const parsed = parseStringMap(value);
-  return parsed === null ? {} : { conflictCopyFileIds: parsed };
-}
-function salvageState(raw) {
-  if (!isRecord2(raw) || !Array.isArray(raw.outbox)) return null;
-  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(raw.outbox);
-  const cursor = Number.isSafeInteger(raw.cursor) && raw.cursor >= 0 ? raw.cursor : 0;
-  const locallyAuthored = Array.isArray(raw.locallyAuthored) && raw.locallyAuthored.every((value) => typeof value === "string") ? raw.locallyAuthored : [];
-  const quarantine = parseQuarantine(raw.quarantine) ?? [];
-  return {
-    version: 1,
-    cursor,
-    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
-    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
-    outbox: parsedOutbox,
-    locallyAuthored,
-    deferred: salvageDeferred(raw.deferred),
-    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
-    pathOwners: parseStringMap(raw.pathOwners) ?? {},
-    baseHashes: parseStringMap(raw.baseHashes) ?? {},
-    baseContents: parseStringMap(raw.baseContents) ?? {},
-    conflictArtifacts: parseStringMap(raw.conflictArtifacts) ?? {},
-    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
-    quarantinedEnvelopes: parseEnvelopeMap(raw.quarantinedEnvelopes) ?? {}
-  };
-}
-function salvageDeferred(value) {
-  if (!Array.isArray(value)) return [];
-  const result = [];
-  for (const entry of value) {
-    const parsed = parseRemoteEvent(entry);
-    if (parsed === null) return [];
-    result.push(parsed);
-  }
-  return result;
-}
-function outboxAtRisk(raw) {
-  if (!isRecord2(raw)) return false;
-  const outbox = raw.outbox;
-  if (outbox === void 0 || Array.isArray(outbox)) return false;
-  return true;
-}
-function salvageHasOutboxEntriesMissingFrom(salvage, backupOutbox) {
-  if (salvage === null || salvage.outbox.length === 0) return false;
-  const backupIds = new Set(backupOutbox.map((entry) => entry.revisionId));
-  return salvage.outbox.some((entry) => !backupIds.has(entry.revisionId));
-}
-function quarantineForCorruptEnvelope(entry, index) {
-  const revisionId = isRecord2(entry) && typeof entry.revisionId === "string" ? entry.revisionId : `${CORRUPT_ENVELOPE_PREFIX}${index}`;
-  const fileId = isRecord2(entry) && typeof entry.fileId === "string" ? entry.fileId : "";
-  return { revisionId, fileId, reason: "corrupt-envelope" };
-}
-function warnDegrade(field, fallback) {
-  console.warn(
-    `Havemind: persisted "${field}" was malformed and was reset to its default; other sync state was preserved.`
-  );
-  return fallback;
-}
-function parseEnvelopeMap(value) {
-  if (value === void 0) return {};
-  if (!isRecord2(value)) return null;
-  const result = {};
-  for (const [key, entry] of Object.entries(value)) {
-    const parsed = parseEnvelope(entry);
-    if (parsed === null) return null;
-    result[key] = parsed;
-  }
-  return result;
-}
-function parseQuarantine(value) {
-  if (value === void 0) return [];
-  if (!Array.isArray(value)) return null;
-  const result = [];
-  for (const entry of value) {
-    if (!isRecord2(entry) || typeof entry.revisionId !== "string" || typeof entry.fileId !== "string" || typeof entry.reason !== "string") {
-      return null;
+    next.push(entry);
+    this.entries = next.length > this.maxEntries ? next.slice(next.length - this.maxEntries) : next;
+    for (const listener of this.listeners) {
+      listener();
     }
-    const parents = entry.parentRevisionIds;
-    result.push({
+  }
+  /** All recorded entries in insertion order (oldest first). */
+  snapshot() {
+    return [...this.entries];
+  }
+  /** Subscribe to changes; returns an unsubscribe disposer. */
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+};
+function remoteAppliedToActivityEntry(info, timestamp) {
+  return {
+    revisionId: info.revisionId,
+    fileId: info.fileId,
+    path: info.path,
+    kind: toRemoteActivityKind(info.operation),
+    // Attribute precisely when the payload names the author; only fall back to
+    // the neutral 'remote' marker when it genuinely does not.
+    author: info.authorMembershipId === void 0 ? { kind: "remote" } : { kind: "member", membershipId: info.authorMembershipId },
+    timestamp,
+    hasContent: info.operation !== "delete"
+  };
+}
+function remoteAppliedToActivityEntryOrNull(info, timestamp) {
+  if (info.origin === "bootstrap") {
+    return null;
+  }
+  return remoteAppliedToActivityEntry(info, timestamp);
+}
+function toRemoteActivityKind(operation) {
+  switch (operation) {
+    case "create":
+      return "create";
+    case "update":
+      return "edit";
+    case "rename":
+      return "rename";
+    case "delete":
+      return "delete";
+    default:
+      return "edit";
+  }
+}
+function activityEntriesToRecords(entries, roster) {
+  const byMembership = new Map(
+    roster.map((member) => [member.membershipId, member])
+  );
+  return entries.map((entry) => {
+    const author = resolveAuthor(entry.author, byMembership);
+    return {
       revisionId: entry.revisionId,
       fileId: entry.fileId,
-      reason: entry.reason,
-      ...Array.isArray(parents) && parents.every((id) => typeof id === "string") ? { parentRevisionIds: parents } : {}
+      path: entry.path,
+      kind: entry.kind,
+      actor: author,
+      timestamp: entry.timestamp,
+      content: entry.hasContent ? "" : null
+    };
+  });
+}
+function resolveAuthor(author, byMembership) {
+  if (author.kind === "initial-import") {
+    return { kind: "initial-import" };
+  }
+  if (author.kind === "member") {
+    const member = byMembership.get(author.membershipId);
+    return {
+      kind: "author",
+      actorId: author.membershipId,
+      displayName: member?.displayName ?? "Unknown member"
+    };
+  }
+  return { kind: "author", actorId: REMOTE_COLOR_ID, displayName: "Remote" };
+}
+
+// src/runtime/access-token.ts
+var EXPIRY_SKEW_MS = 3e4;
+var AccessTokenError = class extends Error {
+  constructor(message, options) {
+    super(message);
+    __publicField(this, "name", "AccessTokenError");
+    /**
+     * True when the server refused the credential (HTTP 401), a terminal state
+     * that must halt the sync loop until the user reconnects, never a retry. A
+     * missing token or a transient 5xx/network failure is not auth-denied.
+     */
+    __publicField(this, "authDenied");
+    this.authDenied = options?.authDenied ?? false;
+  }
+};
+var RefreshTokenAccessProvider = class {
+  constructor(options) {
+    __publicField(this, "options");
+    __publicField(this, "now");
+    __publicField(this, "cachedToken", null);
+    __publicField(this, "cachedExpiry", 0);
+    __publicField(this, "memoryPending", null);
+    __publicField(this, "inFlight", null);
+    this.options = options;
+    this.now = options.now ?? Date.now;
+  }
+  async getAccessToken() {
+    if (this.cachedToken !== null && this.now() < this.cachedExpiry - EXPIRY_SKEW_MS) {
+      return this.cachedToken;
+    }
+    return this.rotate();
+  }
+  /**
+   * Single-flight guard: concurrent callers share one in-flight rotation. The
+   * identical refresh token is never rotated twice in parallel, so a second
+   * caller can never present the already-rotated token and trip the server's
+   * reuse-burn. The guard clears once the rotation settles, so the next call may
+   * start a fresh rotation.
+   */
+  rotate() {
+    if (this.inFlight !== null) {
+      return this.inFlight;
+    }
+    const run = this.rotateOnce();
+    this.inFlight = run;
+    return run.finally(() => {
+      this.inFlight = null;
     });
   }
-  return result;
-}
-function parseStringMap(value) {
-  if (value === void 0) return {};
-  if (!isRecord2(value)) return null;
-  const result = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry !== "string") return null;
-    result[key] = entry;
-  }
-  return result;
-}
-function parseEnvelope(value) {
-  if (!isRecord2(value)) return null;
-  if (typeof value.operationId !== "string" || typeof value.revisionId !== "string" || typeof value.fileId !== "string" || typeof value.contentHash !== "string" || typeof value.idempotencyKey !== "string" || typeof value.payloadBase64 !== "string") {
-    return null;
-  }
-  return {
-    operationId: value.operationId,
-    revisionId: value.revisionId,
-    fileId: value.fileId,
-    contentHash: value.contentHash,
-    idempotencyKey: value.idempotencyKey,
-    payloadBase64: value.payloadBase64,
-    header: value.header,
-    // Preserve the enqueue time across a restart (SND-01); a non-number degrades
-    // to "unstamped" so `outboxAges` treats it as old rather than throwing.
-    ...typeof value.enqueuedAt === "number" ? { enqueuedAt: value.enqueuedAt } : {},
-    // Arch P1: carry the externalized marker so load-time reconciliation knows
-    // to rehydrate the payload from the store (an empty inline `payloadBase64` is
-    // otherwise indistinguishable from a genuinely 0-byte payload).
-    ...value.payloadExternalized === true ? { payloadExternalized: true } : {}
-  };
-}
-function parseRemoteEvent(value) {
-  if (!isRecord2(value) || !Number.isSafeInteger(value.serverSequence)) {
-    return null;
-  }
-  const revision = value.revision;
-  if (!isRecord2(revision) || typeof revision.revisionId !== "string" || typeof revision.fileId !== "string" || typeof revision.contentHash !== "string") {
-    return null;
-  }
-  return {
-    serverSequence: value.serverSequence,
-    revision: {
-      revisionId: revision.revisionId,
-      fileId: revision.fileId,
-      contentHash: revision.contentHash
+  async rotateOnce() {
+    const refreshToken = await this.options.getRefreshToken();
+    if (refreshToken === null) {
+      throw new AccessTokenError("No refresh token is stored.");
     }
+    const pending = await this.resolvePendingRotation(refreshToken);
+    const rotationId = pending.rotationId;
+    const successorRefreshToken = pending.successorRefreshToken;
+    const response = await this.options.requestUrl({
+      url: `${this.options.apiBaseUrl}/auth/refresh`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      throw: false,
+      body: JSON.stringify({
+        refreshToken,
+        rotationId,
+        successorRefreshToken
+      })
+    });
+    if (response.status < 200 || response.status >= 300) {
+      if (response.status === 401) {
+        await this.clearPendingRotation();
+        throw new AccessTokenError(
+          `Refresh failed with HTTP ${response.status}.`,
+          { authDenied: true }
+        );
+      }
+      throw new AccessTokenError(`Refresh failed with HTTP ${response.status}.`, {
+        authDenied: false
+      });
+    }
+    const body = response.json;
+    if (!isRecord(body) || typeof body.accessToken !== "string" || typeof body.accessExpiresAt !== "string") {
+      throw new AccessTokenError("Refresh response was malformed.");
+    }
+    await this.options.saveRefreshToken(successorRefreshToken);
+    await this.clearPendingRotation();
+    this.cachedToken = body.accessToken;
+    this.cachedExpiry = Date.parse(body.accessExpiresAt);
+    return body.accessToken;
+  }
+  /**
+   * Returns the in-flight pair to present: a persisted record that matches the
+   * current refresh token (a replay), or a freshly minted pair that is
+   * persisted before it is returned. A stored record whose `refreshToken` does
+   * not match the current token is never replayed, it is overwritten by the
+   * fresh pair.
+   */
+  async resolvePendingRotation(refreshToken) {
+    const stored = await this.loadPending();
+    if (stored !== null && stored.refreshToken === refreshToken) {
+      return stored;
+    }
+    const record2 = {
+      refreshToken,
+      rotationId: this.options.generateRotationId(),
+      successorRefreshToken: this.options.generateSuccessorToken()
+    };
+    this.memoryPending = record2;
+    await this.savePending(record2);
+    return record2;
+  }
+  /**
+   * Loads the persisted in-flight record. When production storage is wired but
+   * unreadable, fail closed: it may contain the exact retry pair from a prior
+   * process, and minting a new pair could burn the refresh-token family.
+   */
+  async loadPending() {
+    if (!this.options.loadPendingRotation) {
+      return this.memoryPending;
+    }
+    try {
+      return await this.options.loadPendingRotation();
+    } catch {
+      console.error("Havemind: pending-rotation load failed.");
+      throw new AccessTokenError("Could not read refresh rotation safely.");
+    }
+  }
+  /**
+   * Persists the freshly minted record durably before the refresh request. A
+   * failed write must stop here: sending an unrepeatable rotation would make a
+   * restart unable to recover its successor token.
+   */
+  async savePending(record2) {
+    if (!this.options.savePendingRotation) {
+      return;
+    }
+    try {
+      await this.options.savePendingRotation(record2);
+    } catch {
+      console.error("Havemind: pending-rotation save failed.");
+      throw new AccessTokenError("Could not persist refresh rotation safely.");
+    }
+  }
+  async clearPendingRotation() {
+    this.memoryPending = null;
+    if (!this.options.clearPendingRotation) {
+      return;
+    }
+    try {
+      await this.options.clearPendingRotation();
+    } catch {
+      console.error("Havemind: pending-rotation clear failed.");
+    }
+  }
+};
+
+// src/runtime/adapters/request-url.ts
+var import_obsidian = require("obsidian");
+
+// src/runtime/adapters/request-timeout.ts
+var REQUEST_TIMEOUT_MS = 6e4;
+var RequestTimeoutError = class extends Error {
+  constructor(ms) {
+    super(`Request timed out after ${ms}ms`);
+    __publicField(this, "name", "RequestTimeoutError");
+  }
+};
+async function withRequestTimeout(request, ms = REQUEST_TIMEOUT_MS) {
+  let timer;
+  const expiry = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new RequestTimeoutError(ms)), ms);
+  });
+  try {
+    return await Promise.race([request, expiry]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+}
+
+// src/runtime/adapters/request-url.ts
+function createRequestUrlFn() {
+  return async (options) => {
+    const response = await withRequestTimeout(
+      (0, import_obsidian.requestUrl)({
+        url: options.url,
+        method: options.method,
+        throw: false,
+        ...options.headers === void 0 ? {} : { headers: options.headers },
+        ...options.body === void 0 ? {} : { body: options.body }
+      })
+    );
+    return {
+      status: response.status,
+      arrayBuffer: response.arrayBuffer,
+      get json() {
+        try {
+          return response.json;
+        } catch {
+          return void 0;
+        }
+      }
+    };
   };
 }
-function isRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+
+// src/runtime/adapters/tokens.ts
+function generateBrandedToken(prefix) {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const base64url3 = btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+  return `${prefix}${base64url3}`;
+}
+function generateRefreshTokenValue() {
+  return generateBrandedToken("hm_rt_");
+}
+function generateRotationIdValue() {
+  return generateBrandedToken("hm_ri_");
+}
+async function sha256Hex(value) {
+  const data = new TextEncoder().encode(value);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// src/runtime/adapters/shared-access-provider.ts
+var providers = /* @__PURE__ */ new WeakMap();
+function buildAccessProvider(apiBaseUrl, secrets) {
+  return new RefreshTokenAccessProvider({
+    requestUrl: createRequestUrlFn(),
+    apiBaseUrl,
+    getRefreshToken: () => secrets.getRefreshToken(),
+    saveRefreshToken: (value) => secrets.saveRefreshToken(value),
+    generateRotationId: generateRotationIdValue,
+    generateSuccessorToken: generateRefreshTokenValue,
+    // Durable in-flight rotation persistence. A failed load or save is
+    // fail-closed: minting an unrecoverable rotation could burn the token family.
+    loadPendingRotation: () => secrets.getPendingRotation(),
+    savePendingRotation: (record2) => secrets.savePendingRotation(record2),
+    clearPendingRotation: () => secrets.clearPendingRotation()
+  });
+}
+function sharedAccessProvider(owner, apiBaseUrl, secrets) {
+  const registered = providers.get(owner);
+  if (registered !== void 0 && registered.apiBaseUrl === apiBaseUrl) {
+    return registered.provider;
+  }
+  return replaceSharedAccessProvider(owner, apiBaseUrl, secrets);
+}
+function replaceSharedAccessProvider(owner, apiBaseUrl, secrets) {
+  const provider = buildAccessProvider(apiBaseUrl, secrets);
+  providers.set(owner, { apiBaseUrl, provider });
+  return provider;
+}
+function forgetSharedAccessProvider(owner) {
+  providers.delete(owner);
+}
+
+// src/runtime/author-colors.ts
+var AUTHOR_COLORS = [
+  { token: "--havemind-author-1", light: "#1a73c2", dark: "#7cb6f0" },
+  { token: "--havemind-author-2", light: "#8a3fc0", dark: "#c99bf0" },
+  { token: "--havemind-author-3", light: "#0f8a6a", dark: "#5fd3ac" },
+  { token: "--havemind-author-4", light: "#c25a00", dark: "#f0a35f" },
+  { token: "--havemind-author-5", light: "#b03060", dark: "#ef92b6" },
+  { token: "--havemind-author-6", light: "#5a6ac0", dark: "#a3aef0" }
+];
+var AUTHOR_COLOR_TOKENS = AUTHOR_COLORS.map(
+  (color) => color.token
+);
+var INITIAL_IMPORT_COLOR_TOKEN = "--havemind-author-initial";
+function fnv1a(value) {
+  let hash2 = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash2 ^= value.charCodeAt(index);
+    hash2 = Math.imul(hash2, 16777619) >>> 0;
+  }
+  return hash2 >>> 0;
+}
+var FALLBACK_COLOR = {
+  token: "--havemind-author-1",
+  light: "#1a73c2",
+  dark: "#7cb6f0"
+};
+function authorColor(memberId) {
+  const index = fnv1a(memberId) % AUTHOR_COLORS.length;
+  return AUTHOR_COLORS[index] ?? FALLBACK_COLOR;
+}
+function authorColorToken(memberId) {
+  return authorColor(memberId).token;
+}
+
+// src/runtime/rejoin-roster.ts
+function buildRejoinRosterView(members) {
+  const rows = [...members].sort((left, right) => {
+    if (left.role !== right.role) {
+      return left.role === "owner" ? -1 : 1;
+    }
+    return left.displayName.localeCompare(right.displayName);
+  }).map(
+    (member) => ({
+      colorToken: authorColorToken(member.membershipId),
+      displayName: member.displayName,
+      membershipId: member.membershipId,
+      rejoinable: !member.self,
+      removable: !member.self,
+      role: member.role,
+      self: member.self
+    })
+  );
+  return { empty: rows.length === 0, rows };
+}
+
+// src/runtime/status.ts
+var LABELS = {
+  disconnected: "Disconnected",
+  syncing: "Syncing",
+  retrying: "Retrying\u2026",
+  synced: "Synced",
+  offline: "Offline",
+  conflict: "Conflict",
+  deferred: "Waiting to apply",
+  "reconnect-required": "Reconnect required",
+  "reset-required": "Reset required"
+};
+var RESET_REQUIRED_DETAIL = "The stored connection data is incomplete or unreadable. Reset the connection and pair this device again.";
+var NO_E2EE_NOTE = "Private Tailscale network only, no end-to-end encryption.";
+var PANE_NETWORK_NOTE = "Private Tailscale network \xB7 Encrypted in transit";
+var DEFERRED_DETAIL = "A change waits for an open note to settle before applying.";
+function connectionStatusFromCycle(status) {
+  switch (status) {
+    case "synced":
+      return "synced";
+    case "offline":
+      return "offline";
+    case "conflict":
+      return "conflict";
+    // A deferred apply wrote nothing and produced no conflict copy, so it gets
+    // its own waiting state rather than the conflict warning.
+    case "deferred":
+      return "deferred";
+    case "unauthenticated":
+      return "reconnect-required";
+  }
+}
+function formatStatusBar(input) {
+  const text = `Havemind: ${LABELS[input.status]}`;
+  const format = input.formatTimestamp ?? defaultFormatTimestamp;
+  const lastSync = input.lastSyncedAt === void 0 ? "Last sync: not yet." : `Last sync: ${format(input.lastSyncedAt)}.`;
+  return { text, tooltip: `${text}, ${lastSync} ${NO_E2EE_NOTE}` };
+}
+var MONTH_ABBREVIATIONS = "JanFebMarAprMayJunJulAugSepOctNovDec";
+function twoDigits(value) {
+  return value < 10 ? `0${value}` : String(value);
+}
+function defaultFormatTimestamp(timestamp, now = Date.now()) {
+  const at = new Date(timestamp);
+  const today = new Date(now);
+  const clock = `${twoDigits(at.getHours())}:${twoDigits(at.getMinutes())}`;
+  const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
+  if (sameDay) {
+    return clock;
+  }
+  const monthStart = at.getMonth() * 3;
+  const month = MONTH_ABBREVIATIONS.slice(monthStart, monthStart + 3);
+  return `${at.getDate()} ${month}, ${clock}`;
+}
+var PANEL_STYLES = {
+  disconnected: {
+    icon: "circle",
+    label: "Not connected",
+    colorToken: "--text-muted",
+    spin: false,
+    showForm: true
+  },
+  syncing: {
+    icon: "hexagon",
+    label: "Connected \xB7 syncing",
+    colorToken: "--text-accent",
+    spin: true,
+    showForm: false
+  },
+  // A pending retry is not progress: it keeps the warning colour and its own
+  // glyph so it is never mistaken for the accent-coloured Syncing state.
+  retrying: {
+    icon: "refresh-cw",
+    label: "Retrying\u2026",
+    colorToken: "--text-warning",
+    spin: true,
+    showForm: false
+  },
+  synced: {
+    icon: "check-circle",
+    label: "Connected \xB7 synced",
+    colorToken: "--text-success",
+    spin: false,
+    showForm: false
+  },
+  offline: {
+    icon: "cloud-off",
+    label: "Offline \xB7 queued",
+    colorToken: "--text-warning",
+    spin: false,
+    showForm: false
+  },
+  conflict: {
+    icon: "alert-triangle",
+    label: "Conflict, see Havemind Conflicts",
+    colorToken: "--text-warning",
+    spin: false,
+    showForm: false
+  },
+  // Nothing is wrong and nothing needs doing, so this is muted rather than a
+  // warning, and it never mentions the Conflicts folder, which stays empty.
+  deferred: {
+    icon: "clock",
+    label: "Waiting to apply",
+    colorToken: "--text-muted",
+    spin: false,
+    showForm: false
+  },
+  "reconnect-required": {
+    icon: "alert-triangle",
+    label: "Reconnect required",
+    colorToken: "--text-error",
+    spin: false,
+    showForm: true
+  },
+  // The paste form stays available alongside the Reset button: pairing this
+  // device afresh overwrites the broken record and is an equally valid way out.
+  "reset-required": {
+    icon: "alert-triangle",
+    label: "Not connected",
+    colorToken: "--text-error",
+    spin: false,
+    showForm: true
+  }
+};
+function buildConnectionPanel(input) {
+  const style = PANEL_STYLES[input.status];
+  const format = input.formatTimestamp ?? defaultFormatTimestamp;
+  const parts = [];
+  if (input.status === "synced" && input.lastSyncedAt !== void 0) {
+    parts.push(`Last sync: ${format(input.lastSyncedAt)}`);
+  }
+  if (input.status === "reconnect-required" || input.status === "offline" || // A pending retry states its reason too, so the panel explains what went
+  // wrong before the failures add up to Offline.
+  input.status === "retrying") {
+    parts.push(
+      input.errorMessage ?? (input.status === "reconnect-required" ? "The server refused the session." : "Could not sync, retrying.")
+    );
+  }
+  if (input.status === "deferred") {
+    parts.push(DEFERRED_DETAIL);
+  }
+  if (input.status === "reset-required") {
+    parts.push(input.errorMessage ?? RESET_REQUIRED_DETAIL);
+  }
+  parts.push(PANE_NETWORK_NOTE);
+  return {
+    status: input.status,
+    icon: style.icon,
+    label: style.label,
+    colorToken: style.colorToken,
+    spin: style.spin && input.reducedMotion !== true,
+    showForm: style.showForm,
+    detail: parts.join(" \xB7 "),
+    // The pane draws the address in its overflow menu rather than under the
+    // status word (design 1a): nobody needs their own server address daily, and
+    // in a 300px column it pushed the line that actually changes out of view.
+    ...input.serverName !== void 0 && input.serverName.length > 0 ? { serverName: input.serverName } : {}
+  };
 }
 
 // ../../packages/protocol/dist/appearance-scope.js
@@ -1352,7 +848,7 @@ var SECRET_STORE_SEGMENT = "data.json";
 function normalizeSeparators(path) {
   return path.replace(/\\/gu, "/");
 }
-function extensionOf(path) {
+function pathExtension(path) {
   const dot = path.lastIndexOf(".");
   const slash = path.lastIndexOf("/");
   if (dot <= slash + 1)
@@ -1372,21 +868,57 @@ function isSyncableConfigPath(path) {
   if (ALLOW_EXACT.has(normalized))
     return true;
   if (normalized.startsWith(SNIPPETS_PREFIX)) {
-    return segments.length === SNIPPETS_SEGMENT_COUNT && SNIPPET_EXTENSIONS.has(extensionOf(normalized));
+    return segments.length === SNIPPETS_SEGMENT_COUNT && SNIPPET_EXTENSIONS.has(pathExtension(normalized));
   }
   if (normalized.startsWith(THEMES_PREFIX)) {
-    return segments.length >= THEMES_MIN_SEGMENT_COUNT && THEME_EXTENSIONS.has(extensionOf(normalized));
+    return segments.length >= THEMES_MIN_SEGMENT_COUNT && THEME_EXTENSIONS.has(pathExtension(normalized));
   }
   return false;
 }
 
+// ../../packages/protocol/dist/base64.js
+var ENCODE_SLICE = 8192;
+var DECODE_SLICE = 4 * 8192;
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += ENCODE_SLICE) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + ENCODE_SLICE));
+  }
+  return btoa(binary);
+}
+function base64ToBytes(base643) {
+  const padding = base643.endsWith("==") ? 2 : base643.endsWith("=") ? 1 : 0;
+  const bytes = new Uint8Array(Math.floor((base643.length - padding) * 3 / 4));
+  let written = 0;
+  for (let offset = 0; offset < base643.length; offset += DECODE_SLICE) {
+    const binary = atob(base643.slice(offset, offset + DECODE_SLICE));
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[written + index] = binary.charCodeAt(index);
+    }
+    written += binary.length;
+  }
+  return bytes;
+}
+
 // ../../packages/protocol/dist/canonicalization.js
 var WINDOWS_DRIVE_PATH = /^[a-zA-Z]:/u;
+var CONFLICT_FOLDER = "Havemind Conflicts";
 var RESERVED_ROOTS = /* @__PURE__ */ new Set([
   ".obsidian",
   ".trash",
-  "havemind conflicts"
+  CONFLICT_FOLDER.toLowerCase()
 ]);
+var SYNCABLE_BINARY_EXTENSIONS = [
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "pdf"
+];
+var BINARY_EXTENSIONS = new Set(SYNCABLE_BINARY_EXTENSIONS);
+var CONFIG_TEXT_EXTENSIONS = /* @__PURE__ */ new Set(["css", "json"]);
 function canonicalizeMarkdown(content) {
   const withoutBom = content.charCodeAt(0) === 65279 ? content.slice(1) : content;
   const lf = withoutBom.replace(/\r\n?/gu, "\n");
@@ -1436,6 +968,17 @@ function canonicalizeVaultPath(path) {
     throw new Error("Vault path uses a reserved Havemind root.");
   }
   return normalized;
+}
+function syncContentKind(canonicalPath) {
+  const extension = pathExtension(canonicalPath);
+  if (isSyncableConfigPath(canonicalPath)) {
+    if (BINARY_EXTENSIONS.has(extension))
+      return "binary";
+    return CONFIG_TEXT_EXTENSIONS.has(extension) ? "markdown" : null;
+  }
+  const kind = extension === "md" ? "markdown" : BINARY_EXTENSIONS.has(extension) ? "binary" : null;
+  const hidden = canonicalPath.split("/").some((segment) => segment === "" || segment.startsWith("."));
+  return kind === null || hidden || reservedRoot(canonicalPath) ? null : kind;
 }
 
 // ../../node_modules/zod/v4/classic/external.js
@@ -15959,18 +15502,16 @@ var plaintextHashSchema = sha256HexSchema.transform((value) => value);
 function bytesToHex(bytes) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
-async function sha256Hex(input) {
+async function sha256Hex2(input) {
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
-  const digestInput = new Uint8Array(bytes.byteLength);
-  digestInput.set(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", digestInput);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
   return bytesToHex(new Uint8Array(digest));
 }
 async function hashBlob(bytes) {
-  return await sha256Hex(bytes);
+  return await sha256Hex2(bytes);
 }
 async function hashPlaintext(content) {
-  return await sha256Hex(canonicalizeMarkdown(content));
+  return await sha256Hex2(canonicalizeMarkdown(content));
 }
 
 // ../../packages/protocol/dist/version.js
@@ -16096,25 +15637,7 @@ var opaqueBlobReceiptSchema = external_exports.object({
    */
   parentRevisionIds: parentRevisionIdsSchema.optional()
 }).strict();
-var sourceRangePartSchema = external_exports.object({
-  type: external_exports.literal("source"),
-  parentRevisionId: identifierSchema,
-  start: external_exports.number().int().nonnegative().safe(),
-  end: external_exports.number().int().positive().safe()
-}).strict().refine((part) => part.start < part.end, {
-  message: "Source range must not be empty or inverted.",
-  path: ["end"]
-});
-var literalPartSchema = external_exports.object({
-  type: external_exports.literal("literal"),
-  text: external_exports.string().min(1).refine(usesLfLineEndings, {
-    message: "Literal text must use LF line endings."
-  })
-}).strict();
-var reconstructionRecipeSchema = external_exports.object({
-  version: external_exports.literal(1),
-  parts: external_exports.array(external_exports.discriminatedUnion("type", [sourceRangePartSchema, literalPartSchema]))
-}).strict();
+var legacyRecipeSchema = external_exports.unknown().optional();
 var canonicalPathSchema = external_exports.string().refine((path) => {
   try {
     return canonicalizeVaultPath(path) === path;
@@ -16161,7 +15684,7 @@ var contentRevisionPayloadSchema = external_exports.object({
   previousPath: canonicalPathSchema.optional(),
   content: normalizedMarkdownSchema,
   plaintextHash: plaintextHashSchema,
-  recipe: reconstructionRecipeSchema
+  recipe: legacyRecipeSchema
 }).strict().superRefine((payload, context) => {
   if (payload.operation === "rename") {
     if (payload.previousPath === void 0) {
@@ -16200,7 +15723,7 @@ var binaryRevisionPayloadSchema = external_exports.object({
   previousPath: canonicalPathSchema.optional(),
   contentBase64: base64ContentSchema,
   blobByteHash: sha256HexField,
-  recipe: external_exports.null()
+  recipe: legacyRecipeSchema
 }).strict().superRefine((payload, context) => {
   if (payload.operation === "rename") {
     if (payload.previousPath === void 0) {
@@ -16230,7 +15753,7 @@ var tombstoneRevisionPayloadSchema = external_exports.object({
   path: canonicalPathSchema,
   content: external_exports.null(),
   plaintextHash: external_exports.null(),
-  recipe: external_exports.null()
+  recipe: legacyRecipeSchema
 }).strict();
 var innerRevisionPayloadSchema = external_exports.union([
   contentRevisionPayloadSchema,
@@ -16240,14 +15763,6 @@ var innerRevisionPayloadSchema = external_exports.union([
 function validateRevisionPayloadAgainstHeader(headerInput, payloadInput) {
   const header = protectedRevisionHeaderSchema.parse(headerInput);
   const payload = innerRevisionPayloadSchema.parse(payloadInput);
-  const parents = new Set(header.parentRevisionIds);
-  if (payload.operation !== "delete" && payload.operation !== "restore" && payload.recipe !== null) {
-    for (const part of payload.recipe.parts) {
-      if (part.type === "source" && !parents.has(part.parentRevisionId)) {
-        throw new Error(`Recipe source ${part.parentRevisionId} is not a protected-header parent.`);
-      }
-    }
-  }
   const isRootOperation = payload.operation === "create" || payload.operation === "initial-import";
   if (isRootOperation && header.parentRevisionIds.length !== 0) {
     throw new Error(`${payload.operation} must not have a parent revision.`);
@@ -16275,7 +15790,6 @@ function editorTexts(workspace, path) {
 }
 
 // src/runtime/conflict-resolution.ts
-var CONFLICT_FOLDER = "Havemind Conflicts";
 var UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 var LEGACY_UUID_RE = new RegExp(`^${UUID}-${UUID}$`);
 var NEW_SUFFIX_RE = / \(conflict (.+) (\d{4}-\d{2}-\d{2} \d{4})\)$/;
@@ -16486,44 +16000,792 @@ function createObsidianConflictPort(vault, workspace) {
   };
 }
 
-// src/runtime/conflict-cache.ts
-var CachedConflictList = class {
-  constructor(scan) {
-    __publicField(this, "scan", scan);
-    __publicField(this, "cached", null);
+// src/runtime/adapters/config-apply.ts
+var CSS_CONFIG_PREFIXES = [
+  ".obsidian/snippets/",
+  ".obsidian/themes/"
+];
+var CSS_CONFIG_EXACT = [".obsidian/appearance.json"];
+function classifyConfigApplyEffect(path) {
+  const normalized = path.replace(/\\/gu, "/");
+  if (CSS_CONFIG_EXACT.includes(normalized)) return "css-reload";
+  if (CSS_CONFIG_PREFIXES.some((prefix) => normalized.startsWith(prefix))) {
+    return "css-reload";
   }
-  /** The current list, scanning only if the vault has moved since the last read. */
-  read() {
-    if (this.cached !== null) return this.cached;
-    const fresh = this.scan();
-    this.cached = fresh;
-    return fresh;
-  }
-  /** Drops the cached list; the next read rescans. */
-  invalidate() {
-    this.cached = null;
+  return "reload-notice";
+}
+var CONFIG_RELOAD_NOTICE = "Havemind: settings synced, reload Obsidian to apply them.";
+var CONFIG_APPLY_BATCH_MS = 250;
+function createConfigApplyReloader(options) {
+  const schedule = options.schedule ?? ((run, delayMs) => {
+    const timer = window.setTimeout(run, delayMs);
+    return () => window.clearTimeout(timer);
+  });
+  const warn = options.warn ?? ((message) => console.warn(message));
+  const batchMs = options.batchMs ?? CONFIG_APPLY_BATCH_MS;
+  let cssPending = false;
+  let noticePending = false;
+  let armed = false;
+  let disposed = false;
+  let cancellation = null;
+  const runGuarded = (label, effect) => {
+    try {
+      effect();
+    } catch {
+      warn(`Havemind: could not ${label} after a synced settings change.`);
+    }
+  };
+  const flush = () => {
+    if (disposed) return;
+    armed = false;
+    cancellation = null;
+    const css = cssPending;
+    const notice = noticePending;
+    cssPending = false;
+    noticePending = false;
+    if (css) runGuarded("refresh the custom CSS", options.triggerCssChange);
+    if (notice) {
+      runGuarded(
+        "show the reload notice",
+        () => options.notify(CONFIG_RELOAD_NOTICE)
+      );
+    }
+  };
+  return {
+    applied(path) {
+      if (disposed) return;
+      if (classifyConfigApplyEffect(path) === "css-reload") {
+        cssPending = true;
+      } else {
+        noticePending = true;
+      }
+      if (armed) return;
+      armed = true;
+      let fired = false;
+      const scheduled = schedule(() => {
+        fired = true;
+        cancellation = null;
+        flush();
+      }, batchMs);
+      if (typeof scheduled === "function") {
+        if (!fired && !disposed) {
+          cancellation = scheduled;
+        } else {
+          scheduled();
+        }
+      }
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      armed = false;
+      cssPending = false;
+      noticePending = false;
+      cancellation?.();
+      cancellation = null;
+    }
+  };
+}
+
+// src/runtime/revision-history-store.ts
+var MAX_HISTORY_SEGMENTS = 64;
+var FORMAT = 1;
+var KEY_PREFIX = "revision-history";
+function createRevisionHistoryStore(openRecords, scope) {
+  const metaKey = `${KEY_PREFIX}|${scope.vaultId}`;
+  const segmentKey = (index) => `${metaKey}|${index}`;
+  const readMeta = async (records) => {
+    const value = await records.getHistoryRecord(metaKey);
+    if (!isRecord(value) || value.format !== FORMAT) return null;
+    if (value.apiBaseUrl !== scope.apiBaseUrl || value.vaultId !== scope.vaultId) return null;
+    if (value.epoch !== null && typeof value.epoch !== "string") return null;
+    if (!Number.isSafeInteger(value.cursor) || !Number.isSafeInteger(value.segments)) return null;
+    return value;
+  };
+  const writeMeta = (records, epoch, cursor, segments) => records.putHistoryRecord(metaKey, {
+    format: FORMAT,
+    apiBaseUrl: scope.apiBaseUrl,
+    vaultId: scope.vaultId,
+    epoch,
+    cursor,
+    segments
+  });
+  return {
+    async load() {
+      const records = await openRecords();
+      if (records === null) return null;
+      const meta3 = await readMeta(records);
+      if (meta3 === null || meta3.segments < 0 || meta3.segments > MAX_HISTORY_SEGMENTS) return null;
+      const segments = await Promise.all(
+        Array.from({ length: meta3.segments }, (_, index) => records.getHistoryRecord(segmentKey(index)))
+      );
+      const events = [];
+      for (const segment of segments) {
+        if (!isRecord(segment) || segment.format !== FORMAT || segment.from !== events.length) return null;
+        if (!Array.isArray(segment.events)) return null;
+        events.push(...segment.events);
+      }
+      return events.length === meta3.cursor ? { epoch: meta3.epoch, cursor: meta3.cursor, events } : null;
+    },
+    async save(history, persistedCursor) {
+      const records = await openRecords();
+      if (records === null) return;
+      const meta3 = await readMeta(records);
+      if (meta3 !== null && persistedCursor > 0 && meta3.cursor === persistedCursor && meta3.epoch === history.epoch && meta3.segments < MAX_HISTORY_SEGMENTS) {
+        await records.putHistoryRecord(segmentKey(meta3.segments), {
+          format: FORMAT,
+          from: persistedCursor,
+          events: history.events.slice(persistedCursor)
+        });
+        await writeMeta(records, history.epoch, history.cursor, meta3.segments + 1);
+        return;
+      }
+      await records.deleteHistoryRecord(metaKey);
+      await records.putHistoryRecord(segmentKey(0), { format: FORMAT, from: 0, events: history.events.slice() });
+      await writeMeta(records, history.epoch, history.cursor, 1);
+      for (let index = 1; index < (meta3?.segments ?? 0); index += 1) {
+        await records.deleteHistoryRecord(segmentKey(index)).catch(() => void 0);
+      }
+    }
+  };
+}
+
+// src/storage/client-store.ts
+var CLIENT_STORE_NAMES = [
+  "activity",
+  "connection",
+  "cursors",
+  "deferred-applies",
+  "file-mappings",
+  "heads",
+  // P13: the accepted revision log, so a new connection pulls only the tail.
+  "history",
+  "inbox",
+  "outbox",
+  // Arch P1: out-of-band store for large outbox payload bytes, keyed by
+  // revisionId. Keeps a 25 MB attachment out of the per-plugin `data.json`,
+  // which is re-serialised on every cursor save.
+  "payloads",
+  "provenance"
+];
+var CLIENT_STORE_VERSION = 3;
+var CLIENT_DATABASE_PREFIX = "havemind-client-";
+var CLIENT_INSTANCE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+var ClientStoreError = class extends Error {
+  constructor(code, message, cause) {
+    super(message, cause === void 0 ? void 0 : { cause });
+    __publicField(this, "code", code);
+    __publicField(this, "name", "ClientStoreError");
   }
 };
-
-// src/runtime/send-queue-status.ts
-var DEFAULT_STALE_THRESHOLD_MS = 3e4;
-function buildSendQueueStatus(input) {
-  const threshold = input.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
-  const waitingCount = input.outbox.filter(
-    (entry) => input.now - entry.enqueuedAt >= threshold
-  ).length;
-  const failed = input.quarantine.map((entry) => ({
-    revisionId: entry.revisionId,
-    label: entry.path !== void 0 && entry.path.length > 0 ? entry.path : entry.fileId.length > 0 ? entry.fileId : "Unknown change",
-    reason: entry.reason
-  }));
-  return { waitingCount, failed };
+async function ensureClientInstanceId(repository, generateId = generateClientInstanceId) {
+  const existingId = await repository.readClientInstanceId();
+  if (existingId !== null) {
+    assertClientInstanceId(existingId);
+    return existingId;
+  }
+  const generatedId = generateId();
+  assertClientInstanceId(generatedId);
+  await repository.writeClientInstanceId(generatedId);
+  return generatedId;
 }
-function selectNewlyQuarantined(known, quarantine) {
-  const fresh = quarantine.filter((entry) => !known.has(entry.revisionId));
-  const next = new Set(known);
-  for (const entry of quarantine) next.add(entry.revisionId);
-  return { fresh, next };
+async function deleteClientDatabase(clientInstanceId, indexedDB) {
+  const factory = indexedDB ?? globalThis.indexedDB;
+  if (!factory || !isValidClientInstanceId(clientInstanceId)) return;
+  await new Promise((resolve) => {
+    try {
+      const request = factory.deleteDatabase(clientDatabaseName(clientInstanceId));
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+function isValidClientInstanceId(value) {
+  return value.length >= 16 && value.length <= 64 && CLIENT_INSTANCE_ID_PATTERN.test(value);
+}
+var IndexedDbClientStore = class {
+  constructor(options) {
+    __publicField(this, "databaseName");
+    __publicField(this, "database", null);
+    __publicField(this, "indexedDB");
+    __publicField(this, "openAttempt", 0);
+    __publicField(this, "storeState", "closed");
+    assertClientInstanceId(options.clientInstanceId);
+    const indexedDB = options.indexedDB ?? globalThis.indexedDB;
+    if (!indexedDB) {
+      throw new ClientStoreError(
+        "storage-unavailable",
+        "IndexedDB is unavailable in this Obsidian runtime."
+      );
+    }
+    this.databaseName = clientDatabaseName(options.clientInstanceId);
+    this.indexedDB = indexedDB;
+  }
+  get state() {
+    return this.storeState;
+  }
+  async open() {
+    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
+      return;
+    }
+    if (this.storeState === "opening") {
+      throw new ClientStoreError(
+        "transaction-failed",
+        "The IndexedDB connection is already opening."
+      );
+    }
+    const attempt = ++this.openAttempt;
+    this.storeState = "opening";
+    let request;
+    try {
+      request = this.indexedDB.open(
+        this.databaseName,
+        CLIENT_STORE_VERSION
+      );
+    } catch (error51) {
+      this.storeState = "closed";
+      throw normalizeClientStoreError(error51);
+    }
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const rejectOnce = (error51) => {
+        if (settled) return;
+        settled = true;
+        reject(error51);
+      };
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        for (const storeName of CLIENT_STORE_NAMES) {
+          if (!database.objectStoreNames.contains(storeName)) {
+            database.createObjectStore(storeName);
+          }
+        }
+      };
+      request.onblocked = () => {
+        if (attempt !== this.openAttempt) return;
+        this.storeState = "blocked";
+        rejectOnce(
+          new ClientStoreError(
+            "blocked-upgrade",
+            "IndexedDB upgrade is blocked by another open Havemind client."
+          )
+        );
+      };
+      request.onerror = () => {
+        if (attempt !== this.openAttempt) return;
+        this.storeState = "closed";
+        rejectOnce(normalizeClientStoreError(request.error));
+      };
+      request.onsuccess = () => {
+        const database = request.result;
+        if (settled || attempt !== this.openAttempt || this.storeState !== "opening") {
+          database.close();
+          rejectOnce(
+            new ClientStoreError(
+              "closed",
+              "The IndexedDB connection was closed while opening."
+            )
+          );
+          return;
+        }
+        settled = true;
+        this.database = database;
+        this.storeState = "ready";
+        database.onversionchange = () => {
+          database.close();
+          if (this.database === database) this.database = null;
+          this.storeState = "versionchange";
+        };
+        resolve();
+      };
+    });
+  }
+  close() {
+    this.openAttempt += 1;
+    this.database?.close();
+    this.database = null;
+    this.storeState = "closed";
+  }
+  /**
+   * Arch P1: store an outbox revision's base64 payload out-of-band, keyed by
+   * `revisionId`, so the large bytes stay out of the per-plugin `data.json`.
+   */
+  async putPayload(revisionId, payloadBase64) {
+    assertStorageKey(revisionId);
+    await this.runTransaction(
+      "payloads",
+      "readwrite",
+      (store) => store.put(payloadBase64, revisionId)
+    );
+  }
+  /** The stored payload for `revisionId`, or undefined when absent (torn state). */
+  async getPayload(revisionId) {
+    assertStorageKey(revisionId);
+    const value = await this.runTransaction(
+      "payloads",
+      "readonly",
+      (store) => store.get(revisionId)
+    );
+    return typeof value === "string" ? value : void 0;
+  }
+  /** Remove a stored payload; a no-op when absent. */
+  async deletePayload(revisionId) {
+    assertStorageKey(revisionId);
+    await this.runTransaction(
+      "payloads",
+      "readwrite",
+      (store) => store.delete(revisionId)
+    );
+  }
+  /** S1: every stored payload's `revisionId`. */
+  async listPayloadIds() {
+    const keys = await this.runTransaction(
+      "payloads",
+      "readonly",
+      (store) => store.getAllKeys()
+    );
+    return keys.filter((key) => typeof key === "string");
+  }
+  /** P13: one record of the persisted revision history, or undefined when absent. */
+  async getHistoryRecord(key) {
+    assertStorageKey(key);
+    return this.runTransaction(
+      "history",
+      "readonly",
+      (store) => store.get(key)
+    );
+  }
+  async putHistoryRecord(key, value) {
+    assertStorageKey(key);
+    await this.runTransaction(
+      "history",
+      "readwrite",
+      (store) => store.put(value, key)
+    );
+  }
+  /** Remove one history record; a no-op when absent. */
+  async deleteHistoryRecord(key) {
+    assertStorageKey(key);
+    await this.runTransaction(
+      "history",
+      "readwrite",
+      (store) => store.delete(key)
+    );
+  }
+  requireDatabase() {
+    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
+      return this.database;
+    }
+    if (this.storeState === "versionchange") {
+      throw new ClientStoreError(
+        "version-changed",
+        "The IndexedDB schema changed in another Havemind client."
+      );
+    }
+    throw new ClientStoreError(
+      "closed",
+      "The Havemind IndexedDB connection is not open."
+    );
+  }
+  async runTransaction(storeName, mode, createRequest) {
+    const isWrite = mode === "readwrite";
+    let transaction;
+    let request;
+    try {
+      transaction = this.requireDatabase().transaction(storeName, mode);
+      request = createRequest(transaction.objectStore(storeName));
+    } catch (error51) {
+      const normalized = normalizeClientStoreError(error51);
+      if (isWrite && normalized.code !== "closed" && normalized.code !== "version-changed") {
+        this.storeState = "write-failed";
+      }
+      throw normalized;
+    }
+    return new Promise((resolve, reject) => {
+      let requestResult;
+      let requestSucceeded = false;
+      let settled = false;
+      const fail = (error51) => {
+        if (settled) return;
+        settled = true;
+        if (isWrite) this.storeState = "write-failed";
+        reject(normalizeClientStoreError(error51));
+      };
+      request.onsuccess = () => {
+        requestResult = request.result;
+        requestSucceeded = true;
+      };
+      request.onerror = () => {
+        if (request.error) fail(request.error);
+      };
+      transaction.onerror = () => {
+        fail(transaction.error ?? request.error);
+      };
+      transaction.onabort = () => {
+        fail(transaction.error ?? request.error);
+      };
+      transaction.oncomplete = () => {
+        if (settled) return;
+        if (!requestSucceeded) {
+          fail(
+            new ClientStoreError(
+              "transaction-failed",
+              "IndexedDB completed without confirming the requested operation."
+            )
+          );
+          return;
+        }
+        settled = true;
+        if (isWrite) this.storeState = "ready";
+        resolve(requestResult);
+      };
+    });
+  }
+};
+function clientDatabaseName(clientInstanceId) {
+  return `${CLIENT_DATABASE_PREFIX}${clientInstanceId}`;
+}
+function assertClientInstanceId(value) {
+  if (!isValidClientInstanceId(value)) {
+    throw new ClientStoreError(
+      "invalid-client-instance-id",
+      "client_instance_id must be 16-64 lowercase alphanumeric or hyphen characters."
+    );
+  }
+}
+function assertStorageKey(value) {
+  if (value.length === 0 || value.length > 256) {
+    throw new ClientStoreError(
+      "transaction-failed",
+      "IndexedDB keys must contain between 1 and 256 characters."
+    );
+  }
+}
+function generateClientInstanceId() {
+  if (!globalThis.crypto?.randomUUID) {
+    throw new ClientStoreError(
+      "storage-unavailable",
+      "Secure random UUID generation is unavailable in this Obsidian runtime."
+    );
+  }
+  return globalThis.crypto.randomUUID();
+}
+function normalizeClientStoreError(error51) {
+  if (error51 instanceof ClientStoreError) return error51;
+  if (getErrorName(error51) === "QuotaExceededError") {
+    return new ClientStoreError(
+      "quota-exceeded",
+      "IndexedDB quota was exceeded; the operation was not durably queued.",
+      error51
+    );
+  }
+  return new ClientStoreError(
+    "transaction-failed",
+    "The IndexedDB operation failed.",
+    error51
+  );
+}
+function getErrorName(error51) {
+  if (typeof error51 === "object" && error51 !== null && "name" in error51 && typeof error51.name === "string") {
+    return error51.name;
+  }
+  return null;
+}
+
+// src/runtime/adapters/plugin-data-keys.ts
+var PERSIST_KEY = "syncState";
+var PERSIST_BAK_KEY = "syncState.bak";
+var PERSIST_STAGING_KEY = "syncState.staging";
+var PERSIST_CORRUPT_PREFIX = "syncStateCorrupt.";
+var PERSIST_PRODUCER_CORRUPT_PREFIX = "pushProducerCorrupt.";
+var CLIENT_INSTANCE_KEY = "clientInstanceId";
+var PUSH_PRODUCER_KEY = "pushProducer";
+var OWNER_CONNECTION_KEY = "ownerConnection";
+var OWNER_CONNECTION_CORRUPT_PREFIX = "ownerConnectionCorrupt.";
+var CORRUPT_SIDECAR_PREFIXES = [
+  PERSIST_CORRUPT_PREFIX,
+  PERSIST_PRODUCER_CORRUPT_PREFIX,
+  OWNER_CONNECTION_CORRUPT_PREFIX
+];
+function isCorruptSidecarKey(key) {
+  return CORRUPT_SIDECAR_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+var MAX_CORRUPT_SIDECARS = 3;
+function withCorruptSidecar(base, prefix, timestamp, raw) {
+  const key = `${prefix}${timestamp}`;
+  const next = key in base ? { ...base } : { ...base, [key]: raw };
+  const stamps = Object.keys(next).filter((candidate) => candidate.startsWith(prefix)).map((candidate) => ({ candidate, stamp: Number(candidate.slice(prefix.length)) })).sort((a, b) => b.stamp - a.stamp);
+  for (const { candidate } of stamps.slice(MAX_CORRUPT_SIDECARS)) {
+    delete next[candidate];
+  }
+  return next;
+}
+
+// src/runtime/adapters/plugin-data-ports.ts
+function createPersistPort(plugin) {
+  const mutex = getPluginDataMutex(plugin);
+  return {
+    async load() {
+      return (await mutex.load())[PERSIST_KEY] ?? null;
+    },
+    async loadBackup() {
+      return (await mutex.load())[PERSIST_BAK_KEY] ?? null;
+    },
+    async save(state) {
+      await mutex.update((base) => {
+        const next = { ...base };
+        const priorPrimary = next[PERSIST_KEY];
+        if (priorPrimary !== void 0) next[PERSIST_BAK_KEY] = priorPrimary;
+        next[PERSIST_KEY] = state;
+        delete next[PERSIST_STAGING_KEY];
+        return next;
+      });
+    },
+    async preserveCorrupt(raw, timestamp) {
+      await mutex.update(
+        (base) => withCorruptSidecar(base, PERSIST_CORRUPT_PREFIX, timestamp, raw)
+      );
+    }
+  };
+}
+async function preserveCorruptProducerState(plugin, raw, timestamp) {
+  await getPluginDataMutex(plugin).update(
+    (base) => withCorruptSidecar(base, PERSIST_PRODUCER_CORRUPT_PREFIX, timestamp, raw)
+  );
+}
+function createRawPersistPort(plugin) {
+  return createSerializedDataPort(getPluginDataMutex(plugin));
+}
+function createClientInstanceRepo(plugin) {
+  return {
+    async readClientInstanceId() {
+      const value = (await getPluginDataMutex(plugin).load())[CLIENT_INSTANCE_KEY];
+      return typeof value === "string" ? value : null;
+    },
+    async writeClientInstanceId(value) {
+      await getPluginDataMutex(plugin).update((base) => ({
+        ...base,
+        [CLIENT_INSTANCE_KEY]: value
+      }));
+    }
+  };
+}
+function createOutboxPayloadStore(plugin) {
+  const ensureStore = openClientStoreLazily(
+    plugin,
+    "Havemind: outbox payload store unavailable; payloads stay inline in data.json."
+  );
+  return {
+    async putPayload(revisionId, payloadBase64) {
+      const store = await ensureStore();
+      if (store === null) {
+        throw new Error("Havemind: outbox payload store is unavailable.");
+      }
+      await store.putPayload(revisionId, payloadBase64);
+    },
+    async getPayload(revisionId) {
+      const store = await ensureStore();
+      if (store === null) return void 0;
+      return store.getPayload(revisionId);
+    },
+    async deletePayload(revisionId) {
+      const store = await ensureStore();
+      if (store === null) return;
+      await store.deletePayload(revisionId);
+    },
+    async listPayloadIds() {
+      const store = await ensureStore();
+      return store === null ? [] : store.listPayloadIds();
+    }
+  };
+}
+function createPersistedRevisionHistoryStore(plugin, scope) {
+  return createRevisionHistoryStore(
+    openClientStoreLazily(
+      plugin,
+      "Havemind: revision history store unavailable; each connection reads the full history."
+    ),
+    scope
+  );
+}
+function openClientStoreLazily(plugin, unavailableWarning) {
+  let storePromise = null;
+  return () => {
+    if (storePromise === null) {
+      storePromise = (async () => {
+        try {
+          const clientInstanceId = await ensureClientInstanceId(
+            createClientInstanceRepo(plugin)
+          );
+          const store = new IndexedDbClientStore({ clientInstanceId });
+          await store.open();
+          return store;
+        } catch {
+          console.warn(unavailableWarning);
+          return null;
+        }
+      })();
+    }
+    return storePromise;
+  };
+}
+
+// src/runtime/adapters/scheduler-hooks.ts
+function createSchedulerHooks(plugin, target = window, visibility) {
+  return {
+    onFocus(run) {
+      target.addEventListener("focus", run);
+      return () => target.removeEventListener("focus", run);
+    },
+    onOnline(run) {
+      target.addEventListener("online", run);
+      return () => target.removeEventListener("online", run);
+    },
+    onVisible(run) {
+      const source = visibility ?? (typeof document === "undefined" ? void 0 : document);
+      if (source === void 0) {
+        return () => void 0;
+      }
+      const listener = () => {
+        if (source.visibilityState !== "hidden") run();
+      };
+      source.addEventListener("visibilitychange", listener);
+      return () => source.removeEventListener("visibilitychange", listener);
+    },
+    setInterval(run, ms) {
+      const id = window.setInterval(run, ms);
+      plugin.registerInterval(id);
+      return () => window.clearInterval(id);
+    }
+  };
+}
+function createBackoffScheduler() {
+  return (callback, delayMs) => {
+    const timer = window.setTimeout(callback, delayMs);
+    return () => window.clearTimeout(timer);
+  };
+}
+
+// src/runtime/adapters/vault-file-port.ts
+var import_obsidian2 = require("obsidian");
+
+// src/sync/config-adapter.ts
+var CONFIG_DIR = ".obsidian";
+var HAVEMIND_PLUGIN_DIR = ".obsidian/plugins/havemind-sync";
+function isUnderHavemindPlugin(folder) {
+  return folder === HAVEMIND_PLUGIN_DIR || folder.startsWith(`${HAVEMIND_PLUGIN_DIR}/`);
+}
+async function listSyncableConfigPaths(adapter, root = CONFIG_DIR) {
+  const found = [];
+  const pending = [root];
+  const visited = /* @__PURE__ */ new Set();
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    if (dir === void 0 || visited.has(dir)) continue;
+    visited.add(dir);
+    let listing;
+    try {
+      listing = await adapter.list(dir);
+    } catch {
+      continue;
+    }
+    for (const file2 of listing.files) {
+      if (isSyncableConfigPath(file2)) found.push(file2);
+    }
+    for (const folder of listing.folders) {
+      if (isUnderHavemindPlugin(folder)) continue;
+      pending.push(folder);
+    }
+  }
+  found.sort();
+  return found;
+}
+async function ensureConfigParentDirs(adapter, path) {
+  const separator = path.lastIndexOf("/");
+  if (separator === -1) return;
+  const segments = path.slice(0, separator).split("/");
+  let prefix = "";
+  for (const segment of segments) {
+    prefix = prefix === "" ? segment : `${prefix}/${segment}`;
+    try {
+      await adapter.mkdir(prefix);
+    } catch {
+    }
+  }
+}
+async function writeConfigText(adapter, path, content) {
+  await ensureConfigParentDirs(adapter, path);
+  await adapter.write(path, content);
+}
+async function writeConfigBinary(adapter, path, data) {
+  await ensureConfigParentDirs(adapter, path);
+  await adapter.writeBinary(path, data);
+}
+async function removeConfig(adapter, path) {
+  if (await adapter.exists(path)) await adapter.remove(path);
+}
+
+// src/sync/config-normalize.ts
+var GRAPH_SETTINGS_PATH = ".obsidian/graph.json";
+var GRAPH_VOLATILE_KEYS = /* @__PURE__ */ new Set([
+  "scale",
+  "close",
+  "collapse-filter",
+  "collapse-color-groups",
+  "collapse-display",
+  "collapse-forces"
+]);
+var JSON_INDENT = 2;
+function normalizeSeparators2(path) {
+  return path.replace(/\\/gu, "/");
+}
+function hasVolatileConfigFields(path) {
+  return normalizeSeparators2(path) === GRAPH_SETTINGS_PATH;
+}
+function parseConfigObject(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text.replace(/^\uFEFF/u, ""));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed;
+}
+function pickKeys(source, keep) {
+  const result = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (keep(key)) result[key] = value;
+  }
+  return result;
+}
+function normalizeConfigContent(path, text) {
+  if (!hasVolatileConfigFields(path)) return text;
+  const parsed = parseConfigObject(text);
+  if (parsed === null) return text;
+  return JSON.stringify(
+    pickKeys(parsed, (key) => !GRAPH_VOLATILE_KEYS.has(key)),
+    null,
+    JSON_INDENT
+  );
+}
+function mergeConfigContent(path, localText, remoteText) {
+  if (!hasVolatileConfigFields(path)) return remoteText;
+  const remote = parseConfigObject(remoteText);
+  if (remote === null) return remoteText;
+  const local = localText === null ? null : parseConfigObject(localText);
+  const localVolatile = local === null ? {} : pickKeys(local, (key) => GRAPH_VOLATILE_KEYS.has(key));
+  const remoteSemantic = pickKeys(
+    remote,
+    (key) => !GRAPH_VOLATILE_KEYS.has(key)
+  );
+  return `${JSON.stringify({ ...localVolatile, ...remoteSemantic }, null, JSON_INDENT)}
+`;
 }
 
 // ../../packages/sync-core/dist/diff3.js
@@ -16741,15 +17003,15 @@ var PayloadDecodeError = class extends Error {
     __publicField(this, "name", "PayloadDecodeError");
   }
 };
+var UTF8 = new TextDecoder("utf-8", { fatal: true });
 function decodeRevisionPayload(bytes) {
-  const text = typeof bytes === "string" ? bytes : new TextDecoder().decode(bytes);
   let json2;
   try {
-    json2 = JSON.parse(text);
+    json2 = JSON.parse(typeof bytes === "string" ? bytes : UTF8.decode(bytes));
   } catch (error51) {
-    throw new PayloadDecodeError("Revision payload is not valid JSON.", error51);
+    throw new PayloadDecodeError("Revision payload is not valid UTF-8 JSON.", error51);
   }
-  if (!isRecord3(json2)) {
+  if (!isRecord2(json2)) {
     throw new PayloadDecodeError("Revision payload must be a JSON object.");
   }
   if (json2.schemaVersion !== 1) {
@@ -16789,17 +17051,7 @@ function decodeBase64(base643) {
   if (!isCanonicalBase64(base643)) {
     throw new PayloadDecodeError("Binary revision content is not valid base64.");
   }
-  let binary;
-  try {
-    binary = atob(base643);
-  } catch (error51) {
-    throw new PayloadDecodeError("Binary revision content is not valid base64.", error51);
-  }
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
+  return base64ToBytes(base643);
 }
 function assertCanonicalPath(value, field) {
   if (typeof value !== "string") {
@@ -16816,7 +17068,7 @@ function assertCanonicalPath(value, field) {
   }
   return value;
 }
-function isRecord3(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -16855,6 +17107,9 @@ async function buildRevisionEnvelope(input) {
     semantics: REQUIRED_SEMANTICS
   };
   const payload = await buildInnerPayload(input, path);
+  if (parentRevisionIds.length >= 2) {
+    payload.recipe = legacyRecipe(payload.content);
+  }
   validateRevisionPayloadAgainstHeader(header, payload);
   const json2 = JSON.stringify(payload);
   const bytes = new TextEncoder().encode(json2);
@@ -16865,10 +17120,18 @@ async function buildRevisionEnvelope(input) {
   return {
     header,
     payloadBase64: bytesToBase64(bytes),
-    contentHash: await sha256Hex(bytes),
+    contentHash: await sha256Hex2(bytes),
     revisionId: input.revisionId,
     fileId: input.identity.fileId,
     idempotencyKey: input.idempotencyKey
+  };
+}
+function legacyRecipe(content) {
+  if (typeof content !== "string")
+    return null;
+  return {
+    version: 1,
+    parts: content === "" ? [] : [{ type: "literal", text: content }]
   };
 }
 async function buildInnerPayload(input, path) {
@@ -16878,12 +17141,11 @@ async function buildInnerPayload(input, path) {
       operation: "delete",
       path,
       content: null,
-      plaintextHash: null,
-      recipe: null
+      plaintextHash: null
     };
   }
   if (input.kind === "binary") {
-    const bytes = input.binaryContent ?? new Uint8Array(0);
+    const contentBase64 = input.binaryContentBase64 ?? "";
     const base2 = {
       schemaVersion: 1,
       operation: input.operation,
@@ -16896,9 +17158,8 @@ async function buildInnerPayload(input, path) {
       }
       base2.previousPath = canonicalizeVaultPath(input.previousPath);
     }
-    base2.contentBase64 = bytesToBase64(bytes);
-    base2.blobByteHash = await hashBlob(bytes);
-    base2.recipe = null;
+    base2.contentBase64 = contentBase64;
+    base2.blobByteHash = await hashBlob(base64ToBytes(contentBase64));
     return base2;
   }
   const content = canonicalizeMarkdown(input.content ?? "");
@@ -16915,1792 +17176,7 @@ async function buildInnerPayload(input, path) {
   }
   base.content = content;
   base.plaintextHash = await hashPlaintext(content);
-  base.recipe = buildLiteralRecipe(content);
   return base;
-}
-function buildLiteralRecipe(content) {
-  const parts = content.length === 0 ? [] : [{ type: "literal", text: content }];
-  return { version: 1, parts };
-}
-function bytesToBase64(bytes) {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-// src/runtime/conflict-sweep.ts
-async function sweepConflictCopies(deps) {
-  const merge2 = deps.merge ?? mergeText;
-  let resolved = 0;
-  for (const copy of listConflictCopies(deps.port)) {
-    if (copy.kind === "legacy" || copy.isBinary || !copy.targetKnown) continue;
-    const targetPath = copy.targetPath;
-    if (targetPath === null) continue;
-    try {
-      const fileId = deps.fileIdAtPath(targetPath);
-      if (fileId === null) continue;
-      if (deps.fileIdForCopy(copy.copyPath) !== fileId) continue;
-      const ancestor = await deps.ancestorFor(copy.copyPath, fileId, targetPath);
-      if (ancestor === null) continue;
-      const [mine, theirs] = await Promise.all([
-        deps.port.readText(targetPath),
-        deps.port.readText(copy.copyPath)
-      ]);
-      if (mine === null || theirs === null) continue;
-      const result = merge2(ancestor, mine, theirs);
-      if (result.status !== "merged") continue;
-      if (!await deps.port.replaceText(targetPath, mine, result.text)) continue;
-      await deps.port.deleteFile(copy.copyPath);
-      resolved += 1;
-    } catch {
-      continue;
-    }
-  }
-  if (resolved > 0) {
-    deps.notify(`Auto-resolved ${resolved} conflict(s)`);
-  }
-  return resolved;
-}
-
-// src/runtime/plugin-data-mutex.ts
-function isRecord4(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var PluginDataMutex = class {
-  constructor(access) {
-    __publicField(this, "access");
-    __publicField(this, "queue", Promise.resolve());
-    /**
-     * The blob as last read or written (P4). This plugin is the only writer of
-     * its data.json, so after the first read the disk is re-read only when
-     * Obsidian reports an external change ({@link invalidate}). Every load and
-     * update used to read the whole file again, about 93 times a sync cycle.
-     */
-    __publicField(this, "cache", null);
-    this.access = access;
-  }
-  /** The current blob (an empty record when absent/malformed). */
-  load() {
-    return this.enqueue(async () => ({ ...await this.current() }));
-  }
-  /**
-   * Atomically read-modify-write the whole blob: `mutator` receives the LATEST
-   * snapshot (read inside the critical section) and returns the blob to
-   * persist. Runs strictly after every previously-enqueued operation.
-   */
-  update(mutator) {
-    return this.enqueue(async () => {
-      const next = mutator({ ...await this.current() });
-      await this.access.saveData(next);
-      this.cache = next;
-    });
-  }
-  /** Forgets the cached blob; the next operation reads data.json again. */
-  invalidate() {
-    this.cache = null;
-  }
-  async current() {
-    if (this.cache === null) {
-      const data = await this.access.loadData();
-      this.cache = isRecord4(data) ? data : {};
-    }
-    return this.cache;
-  }
-  enqueue(task) {
-    const run = this.queue.then(task, task);
-    this.queue = run.then(
-      () => void 0,
-      () => void 0
-    );
-    return run;
-  }
-};
-function createSerializedDataPort(mutex) {
-  let lastLoaded = {};
-  return {
-    async load() {
-      lastLoaded = await mutex.load();
-      return lastLoaded;
-    },
-    async save(data) {
-      const loadedAtSave = lastLoaded;
-      await mutex.update((disk) => {
-        const next = { ...disk };
-        for (const key of Object.keys(data)) {
-          if (data[key] !== loadedAtSave[key]) {
-            next[key] = data[key];
-          }
-        }
-        return next;
-      });
-    }
-  };
-}
-var mutexes = /* @__PURE__ */ new WeakMap();
-function getPluginDataMutex(access) {
-  const existing = mutexes.get(access);
-  if (existing !== void 0) return existing;
-  const created = new PluginDataMutex(access);
-  mutexes.set(access, created);
-  return created;
-}
-
-// src/runtime/rerun-guard.ts
-var RerunGuard = class {
-  constructor(runOnce) {
-    __publicField(this, "runOnce");
-    __publicField(this, "running", false);
-    __publicField(this, "pending", false);
-    this.runOnce = runOnce;
-  }
-  /**
-   * Run the task. If it is already running, mark a re-run and return; the
-   * in-flight pass loops once more when it finishes. Resolves when no further
-   * re-run is pending.
-   */
-  async trigger() {
-    if (this.running) {
-      this.pending = true;
-      return;
-    }
-    this.running = true;
-    try {
-      do {
-        this.pending = false;
-        await this.runOnce();
-      } while (this.pending);
-    } finally {
-      this.running = false;
-    }
-  }
-};
-
-// src/runtime/activity-restore.ts
-async function restoreRevision(deps, revisionId) {
-  const revision = await deps.revisionContent(revisionId);
-  if (revision === null) return { outcome: "unavailable" };
-  const path = deps.currentPath(revision.fileId) ?? revision.path;
-  const file2 = deps.vault.getAbstractFileByPath(path);
-  if (file2 === null) {
-    await deps.vault.create(path, revision.content);
-    return { outcome: "restored", path };
-  }
-  if (await deps.vault.read(file2) === revision.content) {
-    return { outcome: "unchanged", path };
-  }
-  await deps.vault.modify(file2, revision.content);
-  return { outcome: "restored", path };
-}
-
-// src/runtime/last-edited.ts
-function newestAuthor(heads) {
-  let newest = null;
-  for (const head of heads) {
-    if (newest === null || head.serverSequence > newest.serverSequence) newest = head;
-  }
-  return newest?.revision.authorMembershipId ?? null;
-}
-function lastEditedLabel(membershipId, roster) {
-  if (membershipId === null) return "";
-  const member = roster.find((entry) => entry.membershipId === membershipId);
-  if (member === void 0) return "Last edited by another member";
-  return `Last edited by ${member.self ? "you" : member.displayName}`;
-}
-
-// src/runtime/activity-log.ts
-var DEFAULT_MAX_ENTRIES = 200;
-var REMOTE_COLOR_ID = "havemind-remote";
-var ActivityLog = class {
-  constructor(options = {}) {
-    __publicField(this, "entries", []);
-    __publicField(this, "listeners", /* @__PURE__ */ new Set());
-    __publicField(this, "maxEntries");
-    this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
-  }
-  /** Records (or replaces by revisionId) an entry and notifies subscribers. */
-  record(entry) {
-    const next = this.entries.filter(
-      (existing) => existing.revisionId !== entry.revisionId
-    );
-    next.push(entry);
-    this.entries = next.length > this.maxEntries ? next.slice(next.length - this.maxEntries) : next;
-    for (const listener of this.listeners) {
-      listener();
-    }
-  }
-  /** All recorded entries in insertion order (oldest first). */
-  snapshot() {
-    return [...this.entries];
-  }
-  /** Subscribe to changes; returns an unsubscribe disposer. */
-  subscribe(listener) {
-    this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
-  }
-};
-function remoteAppliedToActivityEntry(info, timestamp) {
-  return {
-    revisionId: info.revisionId,
-    fileId: info.fileId,
-    path: info.path,
-    kind: toRemoteActivityKind(info.operation),
-    // Attribute precisely when the payload names the author; only fall back to
-    // the neutral 'remote' marker when it genuinely does not.
-    author: info.authorMembershipId === void 0 ? { kind: "remote" } : { kind: "member", membershipId: info.authorMembershipId },
-    timestamp,
-    hasContent: info.operation !== "delete"
-  };
-}
-function remoteAppliedToActivityEntryOrNull(info, timestamp) {
-  if (info.origin === "bootstrap") {
-    return null;
-  }
-  return remoteAppliedToActivityEntry(info, timestamp);
-}
-function toRemoteActivityKind(operation) {
-  switch (operation) {
-    case "create":
-      return "create";
-    case "update":
-      return "edit";
-    case "rename":
-      return "rename";
-    case "delete":
-      return "delete";
-    default:
-      return "edit";
-  }
-}
-function activityEntriesToRecords(entries, roster) {
-  const byMembership = new Map(
-    roster.map((member) => [member.membershipId, member])
-  );
-  return entries.map((entry) => {
-    const author = resolveAuthor(entry.author, byMembership);
-    return {
-      revisionId: entry.revisionId,
-      fileId: entry.fileId,
-      path: entry.path,
-      kind: entry.kind,
-      actor: author,
-      timestamp: entry.timestamp,
-      content: entry.hasContent ? "" : null
-    };
-  });
-}
-function resolveAuthor(author, byMembership) {
-  if (author.kind === "initial-import") {
-    return { kind: "initial-import" };
-  }
-  if (author.kind === "member") {
-    const member = byMembership.get(author.membershipId);
-    return {
-      kind: "author",
-      actorId: author.membershipId,
-      displayName: member?.displayName ?? "Unknown member"
-    };
-  }
-  return { kind: "author", actorId: REMOTE_COLOR_ID, displayName: "Remote" };
-}
-
-// src/runtime/access-token.ts
-var EXPIRY_SKEW_MS = 3e4;
-var AccessTokenError = class extends Error {
-  constructor(message, options) {
-    super(message);
-    __publicField(this, "name", "AccessTokenError");
-    /**
-     * True when the server refused the credential (HTTP 401), a terminal state
-     * that must halt the sync loop until the user reconnects, never a retry. A
-     * missing token or a transient 5xx/network failure is not auth-denied.
-     */
-    __publicField(this, "authDenied");
-    this.authDenied = options?.authDenied ?? false;
-  }
-};
-var RefreshTokenAccessProvider = class {
-  constructor(options) {
-    __publicField(this, "options");
-    __publicField(this, "now");
-    __publicField(this, "cachedToken", null);
-    __publicField(this, "cachedExpiry", 0);
-    __publicField(this, "memoryPending", null);
-    __publicField(this, "inFlight", null);
-    this.options = options;
-    this.now = options.now ?? Date.now;
-  }
-  async getAccessToken() {
-    if (this.cachedToken !== null && this.now() < this.cachedExpiry - EXPIRY_SKEW_MS) {
-      return this.cachedToken;
-    }
-    return this.rotate();
-  }
-  /**
-   * Single-flight guard: concurrent callers share one in-flight rotation. The
-   * identical refresh token is never rotated twice in parallel, so a second
-   * caller can never present the already-rotated token and trip the server's
-   * reuse-burn. The guard clears once the rotation settles, so the next call may
-   * start a fresh rotation.
-   */
-  rotate() {
-    if (this.inFlight !== null) {
-      return this.inFlight;
-    }
-    const run = this.rotateOnce();
-    this.inFlight = run;
-    return run.finally(() => {
-      this.inFlight = null;
-    });
-  }
-  async rotateOnce() {
-    const refreshToken = await this.options.getRefreshToken();
-    if (refreshToken === null) {
-      throw new AccessTokenError("No refresh token is stored.");
-    }
-    const pending = await this.resolvePendingRotation(refreshToken);
-    const rotationId = pending.rotationId;
-    const successorRefreshToken = pending.successorRefreshToken;
-    const response = await this.options.requestUrl({
-      url: `${this.options.apiBaseUrl}/auth/refresh`,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      throw: false,
-      body: JSON.stringify({
-        refreshToken,
-        rotationId,
-        successorRefreshToken
-      })
-    });
-    if (response.status < 200 || response.status >= 300) {
-      if (response.status === 401) {
-        await this.clearPendingRotation();
-        throw new AccessTokenError(
-          `Refresh failed with HTTP ${response.status}.`,
-          { authDenied: true }
-        );
-      }
-      throw new AccessTokenError(`Refresh failed with HTTP ${response.status}.`, {
-        authDenied: false
-      });
-    }
-    const body = response.json;
-    if (!isRecord5(body) || typeof body.accessToken !== "string" || typeof body.accessExpiresAt !== "string") {
-      throw new AccessTokenError("Refresh response was malformed.");
-    }
-    await this.options.saveRefreshToken(successorRefreshToken);
-    await this.clearPendingRotation();
-    this.cachedToken = body.accessToken;
-    this.cachedExpiry = Date.parse(body.accessExpiresAt);
-    return body.accessToken;
-  }
-  /**
-   * Returns the in-flight pair to present: a persisted record that matches the
-   * current refresh token (a replay), or a freshly minted pair that is
-   * persisted before it is returned. A stored record whose `refreshToken` does
-   * not match the current token is never replayed, it is overwritten by the
-   * fresh pair.
-   */
-  async resolvePendingRotation(refreshToken) {
-    const stored = await this.loadPending();
-    if (stored !== null && stored.refreshToken === refreshToken) {
-      return stored;
-    }
-    const record2 = {
-      refreshToken,
-      rotationId: this.options.generateRotationId(),
-      successorRefreshToken: this.options.generateSuccessorToken()
-    };
-    this.memoryPending = record2;
-    await this.savePending(record2);
-    return record2;
-  }
-  /**
-   * Loads the persisted in-flight record. When production storage is wired but
-   * unreadable, fail closed: it may contain the exact retry pair from a prior
-   * process, and minting a new pair could burn the refresh-token family.
-   */
-  async loadPending() {
-    if (!this.options.loadPendingRotation) {
-      return this.memoryPending;
-    }
-    try {
-      return await this.options.loadPendingRotation();
-    } catch {
-      console.error("Havemind: pending-rotation load failed.");
-      throw new AccessTokenError("Could not read refresh rotation safely.");
-    }
-  }
-  /**
-   * Persists the freshly minted record durably before the refresh request. A
-   * failed write must stop here: sending an unrepeatable rotation would make a
-   * restart unable to recover its successor token.
-   */
-  async savePending(record2) {
-    if (!this.options.savePendingRotation) {
-      return;
-    }
-    try {
-      await this.options.savePendingRotation(record2);
-    } catch {
-      console.error("Havemind: pending-rotation save failed.");
-      throw new AccessTokenError("Could not persist refresh rotation safely.");
-    }
-  }
-  async clearPendingRotation() {
-    this.memoryPending = null;
-    if (!this.options.clearPendingRotation) {
-      return;
-    }
-    try {
-      await this.options.clearPendingRotation();
-    } catch {
-      console.error("Havemind: pending-rotation clear failed.");
-    }
-  }
-};
-function isRecord5(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// src/runtime/adapters/request-url.ts
-var import_obsidian = require("obsidian");
-
-// src/runtime/adapters/request-timeout.ts
-var REQUEST_TIMEOUT_MS = 6e4;
-var RequestTimeoutError = class extends Error {
-  constructor(ms) {
-    super(`Request timed out after ${ms}ms`);
-    __publicField(this, "name", "RequestTimeoutError");
-  }
-};
-async function withRequestTimeout(request, ms = REQUEST_TIMEOUT_MS) {
-  let timer;
-  const expiry = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(new RequestTimeoutError(ms)), ms);
-  });
-  try {
-    return await Promise.race([request, expiry]);
-  } finally {
-    if (timer !== void 0) clearTimeout(timer);
-  }
-}
-
-// src/runtime/adapters/request-url.ts
-function createRequestUrlFn() {
-  return async (options) => {
-    const response = await withRequestTimeout(
-      (0, import_obsidian.requestUrl)({
-        url: options.url,
-        method: options.method,
-        throw: false,
-        ...options.headers === void 0 ? {} : { headers: options.headers },
-        ...options.body === void 0 ? {} : { body: options.body }
-      })
-    );
-    return {
-      status: response.status,
-      text: response.text,
-      get json() {
-        try {
-          return response.json;
-        } catch {
-          return void 0;
-        }
-      }
-    };
-  };
-}
-
-// src/runtime/adapters/tokens.ts
-function generateBrandedToken(prefix) {
-  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(32));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  const base64url3 = btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
-  return `${prefix}${base64url3}`;
-}
-function generateRefreshTokenValue() {
-  return generateBrandedToken("hm_rt_");
-}
-function generateRotationIdValue() {
-  return generateBrandedToken("hm_ri_");
-}
-async function sha256Hex2(value) {
-  const data = new TextEncoder().encode(value);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-// src/runtime/adapters/shared-access-provider.ts
-var providers = /* @__PURE__ */ new WeakMap();
-function buildAccessProvider(apiBaseUrl, secrets) {
-  return new RefreshTokenAccessProvider({
-    requestUrl: createRequestUrlFn(),
-    apiBaseUrl,
-    getRefreshToken: () => secrets.getRefreshToken(),
-    saveRefreshToken: (value) => secrets.saveRefreshToken(value),
-    generateRotationId: generateRotationIdValue,
-    generateSuccessorToken: generateRefreshTokenValue,
-    // Durable in-flight rotation persistence. A failed load or save is
-    // fail-closed: minting an unrecoverable rotation could burn the token family.
-    loadPendingRotation: () => secrets.getPendingRotation(),
-    savePendingRotation: (record2) => secrets.savePendingRotation(record2),
-    clearPendingRotation: () => secrets.clearPendingRotation()
-  });
-}
-function sharedAccessProvider(owner, apiBaseUrl, secrets) {
-  const registered = providers.get(owner);
-  if (registered !== void 0 && registered.apiBaseUrl === apiBaseUrl) {
-    return registered.provider;
-  }
-  return replaceSharedAccessProvider(owner, apiBaseUrl, secrets);
-}
-function replaceSharedAccessProvider(owner, apiBaseUrl, secrets) {
-  const provider = buildAccessProvider(apiBaseUrl, secrets);
-  providers.set(owner, { apiBaseUrl, provider });
-  return provider;
-}
-function forgetSharedAccessProvider(owner) {
-  providers.delete(owner);
-}
-
-// src/runtime/member-roster.ts
-var REFRESH_TOKEN_HEADER = "x-havemind-refresh-token";
-var MemberRosterError = class extends Error {
-  constructor() {
-    super(...arguments);
-    __publicField(this, "name", "MemberRosterError");
-  }
-};
-function isRecord6(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function parseMember(value, selfMembershipId) {
-  if (!isRecord6(value) || typeof value.membershipId !== "string" || typeof value.displayName !== "string" || value.role !== "owner" && value.role !== "editor") {
-    throw new MemberRosterError("The member roster response was malformed.");
-  }
-  const self = value.membershipId === selfMembershipId;
-  return {
-    // The local user's own row reads "You", matching how this device already
-    // records its own membership (see `adoptSelfMembership`).
-    displayName: self ? "You" : value.displayName,
-    membershipId: value.membershipId,
-    role: value.role,
-    self
-  };
-}
-async function fetchMemberRoster(options) {
-  const refreshToken = await options.getRefreshToken();
-  if (refreshToken === null) {
-    throw new MemberRosterError(
-      "No refresh token is stored for this device; the roster cannot be read."
-    );
-  }
-  const query = options.vaultId === null ? "" : `?vault=${encodeURIComponent(options.vaultId)}`;
-  const response = await options.requestUrl({
-    url: `${options.apiBaseUrl}/members${query}`,
-    method: "GET",
-    headers: { [REFRESH_TOKEN_HEADER]: refreshToken },
-    throw: false
-  });
-  if (response.status < 200 || response.status >= 300) {
-    throw new MemberRosterError(
-      `The member roster request returned HTTP ${response.status}.`
-    );
-  }
-  const members = isRecord6(response.json) ? response.json.members : void 0;
-  if (!Array.isArray(members)) {
-    throw new MemberRosterError("The member roster response was malformed.");
-  }
-  return members.map((entry) => parseMember(entry, options.selfMembershipId));
-}
-var LegacyRosterServerError = class extends MemberRosterError {
-};
-async function fetchVaultMembers(options) {
-  const token = await options.getAccessToken();
-  const response = await options.requestUrl({
-    url: `${options.apiBaseUrl}/vaults/${encodeURIComponent(options.vaultId)}/members`,
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
-    throw: false
-  });
-  if (response.status < 200 || response.status >= 300) {
-    throw new MemberRosterError(
-      `The member roster request returned HTTP ${response.status}.`
-    );
-  }
-  const members = isRecord6(response.json) ? response.json.members : void 0;
-  if (!Array.isArray(members)) {
-    throw new MemberRosterError("The member roster response was malformed.");
-  }
-  if (members.some((entry) => isRecord6(entry) && entry.membershipId === void 0)) {
-    throw new LegacyRosterServerError("The server does not send membership ids yet.");
-  }
-  const parsed = members.map((entry) => parseMember(entry, options.selfMembershipId));
-  return [
-    ...parsed.filter((member) => member.role === "owner"),
-    ...parsed.filter((member) => member.role !== "owner")
-  ];
-}
-
-// src/runtime/roster.ts
-function upsertRosterMember(roster, member) {
-  return [
-    ...roster.filter((entry) => entry.membershipId !== member.membershipId),
-    member
-  ];
-}
-function removeRosterMember(roster, membershipId) {
-  return roster.filter((entry) => entry.membershipId !== membershipId);
-}
-var ROSTER_KEY = "approvedMembersRoster";
-function isRecord7(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function parseMember2(value) {
-  if (!isRecord7(value) || typeof value.membershipId !== "string" || typeof value.displayName !== "string" || value.role !== "owner" && value.role !== "editor" || typeof value.self !== "boolean") {
-    return null;
-  }
-  return {
-    membershipId: value.membershipId,
-    displayName: value.displayName,
-    role: value.role,
-    self: value.self
-  };
-}
-function parseRoster(raw) {
-  const source = isRecord7(raw) ? raw[ROSTER_KEY] : null;
-  if (!Array.isArray(source)) return [];
-  const members = [];
-  for (const entry of source) {
-    const parsed = parseMember2(entry);
-    if (parsed !== null) {
-      members.push(parsed);
-    }
-  }
-  return members;
-}
-var RosterStore = class {
-  constructor(options) {
-    __publicField(this, "persist");
-    this.persist = options.persist;
-  }
-  async readMembers() {
-    return parseRoster(await this.persist.load());
-  }
-  /** Upserts a member (idempotent by membershipId) and persists the roster. */
-  async recordMember(member) {
-    const data = await this.persist.load();
-    const base = isRecord7(data) ? data : {};
-    const next = upsertRosterMember(parseRoster(data), member);
-    await this.persist.save({ ...base, [ROSTER_KEY]: next });
-    return next;
-  }
-  /**
-   * Replaces the whole roster with the server-authoritative list and persists
-   * it. Unlike `recordMember` this DROPS members the server no longer lists, so
-   * a member removed on another device disappears here too. Only the roster key
-   * is rewritten; every other plugin-data key is preserved.
-   */
-  async replaceMembers(members) {
-    const data = await this.persist.load();
-    const base = isRecord7(data) ? data : {};
-    const next = [...members];
-    await this.persist.save({ ...base, [ROSTER_KEY]: next });
-    return next;
-  }
-  /**
-   * Removes a member (idempotent by membershipId) and persists the roster.
-   * Used when the owner permanently removes a member from the vault; the server
-   * revocation is append-only, and here the owner's local presence list simply
-   * drops the departed member.
-   */
-  async removeMember(membershipId) {
-    const data = await this.persist.load();
-    const base = isRecord7(data) ? data : {};
-    const next = removeRosterMember(parseRoster(data), membershipId);
-    await this.persist.save({ ...base, [ROSTER_KEY]: next });
-    return next;
-  }
-};
-
-// src/runtime/author-colors.ts
-var AUTHOR_COLORS = [
-  { token: "--havemind-author-1", light: "#1a73c2", dark: "#7cb6f0" },
-  { token: "--havemind-author-2", light: "#8a3fc0", dark: "#c99bf0" },
-  { token: "--havemind-author-3", light: "#0f8a6a", dark: "#5fd3ac" },
-  { token: "--havemind-author-4", light: "#c25a00", dark: "#f0a35f" },
-  { token: "--havemind-author-5", light: "#b03060", dark: "#ef92b6" },
-  { token: "--havemind-author-6", light: "#5a6ac0", dark: "#a3aef0" }
-];
-var AUTHOR_COLOR_TOKENS = AUTHOR_COLORS.map(
-  (color) => color.token
-);
-var INITIAL_IMPORT_COLOR_TOKEN = "--havemind-author-initial";
-function fnv1a(value) {
-  let hash2 = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash2 ^= value.charCodeAt(index);
-    hash2 = Math.imul(hash2, 16777619) >>> 0;
-  }
-  return hash2 >>> 0;
-}
-var FALLBACK_COLOR = {
-  token: "--havemind-author-1",
-  light: "#1a73c2",
-  dark: "#7cb6f0"
-};
-function authorColor(memberId) {
-  const index = fnv1a(memberId) % AUTHOR_COLORS.length;
-  return AUTHOR_COLORS[index] ?? FALLBACK_COLOR;
-}
-function authorColorToken(memberId) {
-  return authorColor(memberId).token;
-}
-
-// src/runtime/rejoin-roster.ts
-function buildRejoinRosterView(members) {
-  const rows = [...members].sort((left, right) => {
-    if (left.role !== right.role) {
-      return left.role === "owner" ? -1 : 1;
-    }
-    return left.displayName.localeCompare(right.displayName);
-  }).map(
-    (member) => ({
-      colorToken: authorColorToken(member.membershipId),
-      displayName: member.displayName,
-      membershipId: member.membershipId,
-      rejoinable: !member.self,
-      removable: !member.self,
-      role: member.role,
-      self: member.self
-    })
-  );
-  return { empty: rows.length === 0, rows };
-}
-
-// src/runtime/rejoin.ts
-var REJOIN_POLL_INTERVAL_MS = 3e4;
-var RejoinRequestError = class extends Error {
-  constructor(message, status) {
-    super(message);
-    __publicField(this, "name", "RejoinRequestError");
-    __publicField(this, "status");
-    this.status = status;
-  }
-};
-async function requestRejoinGrant(options) {
-  const token = await options.getAccessToken();
-  const response = await options.requestUrl({
-    url: `${options.apiBaseUrl}/owner/rejoin-grants`,
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    throw: false,
-    body: JSON.stringify({ membershipId: options.membershipId })
-  });
-  if (response.status < 200 || response.status >= 300) {
-    throw new RejoinRequestError(
-      `Rejoin grant request failed with HTTP ${response.status}.`,
-      response.status
-    );
-  }
-  const body = response.json;
-  const boundDeviceId = isRecord8(body) && typeof body.boundDeviceId === "string" ? body.boundDeviceId : "";
-  return {
-    boundDeviceId,
-    membershipId: options.membershipId,
-    status: "waiting"
-  };
-}
-var RejoinController = class {
-  constructor(options) {
-    __publicField(this, "options");
-    __publicField(this, "state", "terminal-auth");
-    this.options = options;
-  }
-  /**
-   * Attempts a single redemption. Idempotent while in-flight: a concurrent call
-   * during `rejoining`, or a call after success, is a no-op that returns the
-   * current state rather than firing a second request.
-   */
-  async attempt() {
-    if (this.state === "rejoining" || this.state === "syncing") {
-      return this.state;
-    }
-    this.state = "rejoining";
-    const refreshToken = this.options.generateRefreshToken();
-    let response;
-    try {
-      response = await this.options.requestUrl({
-        url: `${this.options.apiBaseUrl}/auth/rejoin`,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        throw: false,
-        body: JSON.stringify({
-          deviceId: this.options.deviceId,
-          initialRefreshTokenHash: this.options.hashRefreshToken(refreshToken),
-          membershipId: this.options.membershipId,
-          rejoinSecret: this.options.rejoinSecret
-        })
-      });
-    } catch {
-      this.state = "terminal-auth";
-      return this.state;
-    }
-    if (response.status < 200 || response.status >= 300) {
-      this.state = "terminal-auth";
-      return this.state;
-    }
-    const body = response.json;
-    if (!isRecord8(body) || typeof body.membershipId !== "string" || typeof body.vaultId !== "string") {
-      this.state = "rejoin-failed";
-      return this.state;
-    }
-    try {
-      await this.options.saveRefreshToken(refreshToken);
-    } catch {
-      this.state = "rejoin-failed";
-      return this.state;
-    }
-    this.state = "syncing";
-    return {
-      membershipId: body.membershipId,
-      status: "syncing",
-      vaultId: body.vaultId
-    };
-  }
-};
-function isRecord8(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// src/runtime/status.ts
-var LABELS = {
-  disconnected: "Disconnected",
-  syncing: "Syncing",
-  retrying: "Retrying\u2026",
-  synced: "Synced",
-  offline: "Offline",
-  conflict: "Conflict",
-  deferred: "Waiting to apply",
-  "reconnect-required": "Reconnect required",
-  "reset-required": "Reset required"
-};
-var RESET_REQUIRED_DETAIL = "The stored connection data is incomplete or unreadable. Reset the connection and pair this device again.";
-var NO_E2EE_NOTE = "Private Tailscale network only, no end-to-end encryption.";
-var PANE_NETWORK_NOTE = "Private Tailscale network \xB7 Encrypted in transit";
-var DEFERRED_DETAIL = "A change waits for an open note to settle before applying.";
-function connectionStatusFromCycle(status) {
-  switch (status) {
-    case "synced":
-      return "synced";
-    case "offline":
-      return "offline";
-    case "conflict":
-      return "conflict";
-    // A deferred apply wrote nothing and produced no conflict copy, so it gets
-    // its own waiting state rather than the conflict warning.
-    case "deferred":
-      return "deferred";
-    case "unauthenticated":
-      return "reconnect-required";
-  }
-}
-function formatStatusBar(input) {
-  const text = `Havemind: ${LABELS[input.status]}`;
-  const format = input.formatTimestamp ?? defaultFormatTimestamp;
-  const lastSync = input.lastSyncedAt === void 0 ? "Last sync: not yet." : `Last sync: ${format(input.lastSyncedAt)}.`;
-  return { text, tooltip: `${text}, ${lastSync} ${NO_E2EE_NOTE}` };
-}
-var MONTH_ABBREVIATIONS = "JanFebMarAprMayJunJulAugSepOctNovDec";
-function twoDigits(value) {
-  return value < 10 ? `0${value}` : String(value);
-}
-function defaultFormatTimestamp(timestamp, now = Date.now()) {
-  const at = new Date(timestamp);
-  const today = new Date(now);
-  const clock = `${twoDigits(at.getHours())}:${twoDigits(at.getMinutes())}`;
-  const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
-  if (sameDay) {
-    return clock;
-  }
-  const monthStart = at.getMonth() * 3;
-  const month = MONTH_ABBREVIATIONS.slice(monthStart, monthStart + 3);
-  return `${at.getDate()} ${month}, ${clock}`;
-}
-var PANEL_STYLES = {
-  disconnected: {
-    icon: "circle",
-    label: "Not connected",
-    colorToken: "--text-muted",
-    spin: false,
-    showForm: true
-  },
-  syncing: {
-    icon: "hexagon",
-    label: "Connected \xB7 syncing",
-    colorToken: "--text-accent",
-    spin: true,
-    showForm: false
-  },
-  // A pending retry is not progress: it keeps the warning colour and its own
-  // glyph so it is never mistaken for the accent-coloured Syncing state.
-  retrying: {
-    icon: "refresh-cw",
-    label: "Retrying\u2026",
-    colorToken: "--text-warning",
-    spin: true,
-    showForm: false
-  },
-  synced: {
-    icon: "check-circle",
-    label: "Connected \xB7 synced",
-    colorToken: "--text-success",
-    spin: false,
-    showForm: false
-  },
-  offline: {
-    icon: "cloud-off",
-    label: "Offline \xB7 queued",
-    colorToken: "--text-warning",
-    spin: false,
-    showForm: false
-  },
-  conflict: {
-    icon: "alert-triangle",
-    label: "Conflict, see Havemind Conflicts",
-    colorToken: "--text-warning",
-    spin: false,
-    showForm: false
-  },
-  // Nothing is wrong and nothing needs doing, so this is muted rather than a
-  // warning, and it never mentions the Conflicts folder, which stays empty.
-  deferred: {
-    icon: "clock",
-    label: "Waiting to apply",
-    colorToken: "--text-muted",
-    spin: false,
-    showForm: false
-  },
-  "reconnect-required": {
-    icon: "alert-triangle",
-    label: "Reconnect required",
-    colorToken: "--text-error",
-    spin: false,
-    showForm: true
-  },
-  // The paste form stays available alongside the Reset button: pairing this
-  // device afresh overwrites the broken record and is an equally valid way out.
-  "reset-required": {
-    icon: "alert-triangle",
-    label: "Not connected",
-    colorToken: "--text-error",
-    spin: false,
-    showForm: true
-  }
-};
-function buildConnectionPanel(input) {
-  const style = PANEL_STYLES[input.status];
-  const format = input.formatTimestamp ?? defaultFormatTimestamp;
-  const parts = [];
-  if (input.status === "synced" && input.lastSyncedAt !== void 0) {
-    parts.push(`Last sync: ${format(input.lastSyncedAt)}`);
-  }
-  if (input.status === "reconnect-required" || input.status === "offline" || // A pending retry states its reason too, so the panel explains what went
-  // wrong before the failures add up to Offline.
-  input.status === "retrying") {
-    parts.push(
-      input.errorMessage ?? (input.status === "reconnect-required" ? "The server refused the session." : "Could not sync, retrying.")
-    );
-  }
-  if (input.status === "deferred") {
-    parts.push(DEFERRED_DETAIL);
-  }
-  if (input.status === "reset-required") {
-    parts.push(input.errorMessage ?? RESET_REQUIRED_DETAIL);
-  }
-  parts.push(PANE_NETWORK_NOTE);
-  return {
-    status: input.status,
-    icon: style.icon,
-    label: style.label,
-    colorToken: style.colorToken,
-    spin: style.spin && input.reducedMotion !== true,
-    showForm: style.showForm,
-    detail: parts.join(" \xB7 "),
-    // The pane draws the address in its overflow menu rather than under the
-    // status word (design 1a): nobody needs their own server address daily, and
-    // in a 300px column it pushed the line that actually changes out of view.
-    ...input.serverName !== void 0 && input.serverName.length > 0 ? { serverName: input.serverName } : {}
-  };
-}
-
-// src/runtime/adapters/config-apply.ts
-var CSS_CONFIG_PREFIXES = [
-  ".obsidian/snippets/",
-  ".obsidian/themes/"
-];
-var CSS_CONFIG_EXACT = [".obsidian/appearance.json"];
-function classifyConfigApplyEffect(path) {
-  const normalized = path.replace(/\\/gu, "/");
-  if (CSS_CONFIG_EXACT.includes(normalized)) return "css-reload";
-  if (CSS_CONFIG_PREFIXES.some((prefix) => normalized.startsWith(prefix))) {
-    return "css-reload";
-  }
-  return "reload-notice";
-}
-var CONFIG_RELOAD_NOTICE = "Havemind: settings synced, reload Obsidian to apply them.";
-var CONFIG_APPLY_BATCH_MS = 250;
-function createConfigApplyReloader(options) {
-  const schedule = options.schedule ?? ((run, delayMs) => {
-    const timer = window.setTimeout(run, delayMs);
-    return () => window.clearTimeout(timer);
-  });
-  const warn = options.warn ?? ((message) => console.warn(message));
-  const batchMs = options.batchMs ?? CONFIG_APPLY_BATCH_MS;
-  let cssPending = false;
-  let noticePending = false;
-  let armed = false;
-  let disposed = false;
-  let cancellation = null;
-  const runGuarded = (label, effect) => {
-    try {
-      effect();
-    } catch {
-      warn(`Havemind: could not ${label} after a synced settings change.`);
-    }
-  };
-  const flush = () => {
-    if (disposed) return;
-    armed = false;
-    cancellation = null;
-    const css = cssPending;
-    const notice = noticePending;
-    cssPending = false;
-    noticePending = false;
-    if (css) runGuarded("refresh the custom CSS", options.triggerCssChange);
-    if (notice) {
-      runGuarded(
-        "show the reload notice",
-        () => options.notify(CONFIG_RELOAD_NOTICE)
-      );
-    }
-  };
-  return {
-    applied(path) {
-      if (disposed) return;
-      if (classifyConfigApplyEffect(path) === "css-reload") {
-        cssPending = true;
-      } else {
-        noticePending = true;
-      }
-      if (armed) return;
-      armed = true;
-      let fired = false;
-      const scheduled = schedule(() => {
-        fired = true;
-        cancellation = null;
-        flush();
-      }, batchMs);
-      if (typeof scheduled === "function") {
-        if (!fired && !disposed) {
-          cancellation = scheduled;
-        } else {
-          scheduled();
-        }
-      }
-    },
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      armed = false;
-      cssPending = false;
-      noticePending = false;
-      cancellation?.();
-      cancellation = null;
-    }
-  };
-}
-
-// src/runtime/revision-history-store.ts
-var MAX_HISTORY_SEGMENTS = 64;
-var FORMAT = 1;
-var KEY_PREFIX = "revision-history";
-function createRevisionHistoryStore(openRecords, scope) {
-  const metaKey = `${KEY_PREFIX}|${scope.vaultId}`;
-  const segmentKey = (index) => `${metaKey}|${index}`;
-  const readMeta = async (records) => {
-    const value = await records.getHistoryRecord(metaKey);
-    if (!isRecord9(value) || value.format !== FORMAT) return null;
-    if (value.apiBaseUrl !== scope.apiBaseUrl || value.vaultId !== scope.vaultId) return null;
-    if (value.epoch !== null && typeof value.epoch !== "string") return null;
-    if (!Number.isSafeInteger(value.cursor) || !Number.isSafeInteger(value.segments)) return null;
-    return value;
-  };
-  const writeMeta = (records, epoch, cursor, segments) => records.putHistoryRecord(metaKey, {
-    format: FORMAT,
-    apiBaseUrl: scope.apiBaseUrl,
-    vaultId: scope.vaultId,
-    epoch,
-    cursor,
-    segments
-  });
-  return {
-    async load() {
-      const records = await openRecords();
-      if (records === null) return null;
-      const meta3 = await readMeta(records);
-      if (meta3 === null || meta3.segments < 0 || meta3.segments > MAX_HISTORY_SEGMENTS) return null;
-      const segments = await Promise.all(
-        Array.from({ length: meta3.segments }, (_, index) => records.getHistoryRecord(segmentKey(index)))
-      );
-      const events = [];
-      for (const segment of segments) {
-        if (!isRecord9(segment) || segment.format !== FORMAT || segment.from !== events.length) return null;
-        if (!Array.isArray(segment.events)) return null;
-        events.push(...segment.events);
-      }
-      return events.length === meta3.cursor ? { epoch: meta3.epoch, cursor: meta3.cursor, events } : null;
-    },
-    async save(history, persistedCursor) {
-      const records = await openRecords();
-      if (records === null) return;
-      const meta3 = await readMeta(records);
-      if (meta3 !== null && persistedCursor > 0 && meta3.cursor === persistedCursor && meta3.epoch === history.epoch && meta3.segments < MAX_HISTORY_SEGMENTS) {
-        await records.putHistoryRecord(segmentKey(meta3.segments), {
-          format: FORMAT,
-          from: persistedCursor,
-          events: history.events.slice(persistedCursor)
-        });
-        await writeMeta(records, history.epoch, history.cursor, meta3.segments + 1);
-        return;
-      }
-      await records.deleteHistoryRecord(metaKey);
-      await records.putHistoryRecord(segmentKey(0), { format: FORMAT, from: 0, events: history.events.slice() });
-      await writeMeta(records, history.epoch, history.cursor, 1);
-      for (let index = 1; index < (meta3?.segments ?? 0); index += 1) {
-        await records.deleteHistoryRecord(segmentKey(index)).catch(() => void 0);
-      }
-    }
-  };
-}
-function isRecord9(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// src/storage/client-store.ts
-var CLIENT_STORE_NAMES = [
-  "activity",
-  "connection",
-  "cursors",
-  "deferred-applies",
-  "file-mappings",
-  "heads",
-  // P13: the accepted revision log, so a new connection pulls only the tail.
-  "history",
-  "inbox",
-  "outbox",
-  // Arch P1: out-of-band store for large outbox payload bytes, keyed by
-  // revisionId. Keeps a 25 MB attachment out of the per-plugin `data.json`,
-  // which is re-serialised on every cursor save.
-  "payloads",
-  "provenance"
-];
-var CLIENT_STORE_VERSION = 3;
-var CLIENT_DATABASE_PREFIX = "havemind-client-";
-var CLIENT_INSTANCE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-var ClientStoreError = class extends Error {
-  constructor(code, message, cause) {
-    super(message, cause === void 0 ? void 0 : { cause });
-    __publicField(this, "code", code);
-    __publicField(this, "name", "ClientStoreError");
-  }
-};
-async function ensureClientInstanceId(repository, generateId = generateClientInstanceId) {
-  const existingId = await repository.readClientInstanceId();
-  if (existingId !== null) {
-    assertClientInstanceId(existingId);
-    return existingId;
-  }
-  const generatedId = generateId();
-  assertClientInstanceId(generatedId);
-  await repository.writeClientInstanceId(generatedId);
-  return generatedId;
-}
-function isValidClientInstanceId(value) {
-  return value.length >= 16 && value.length <= 64 && CLIENT_INSTANCE_ID_PATTERN.test(value);
-}
-var IndexedDbClientStore = class {
-  constructor(options) {
-    __publicField(this, "databaseName");
-    __publicField(this, "database", null);
-    __publicField(this, "indexedDB");
-    __publicField(this, "openAttempt", 0);
-    __publicField(this, "storeState", "closed");
-    assertClientInstanceId(options.clientInstanceId);
-    const indexedDB = options.indexedDB ?? globalThis.indexedDB;
-    if (!indexedDB) {
-      throw new ClientStoreError(
-        "storage-unavailable",
-        "IndexedDB is unavailable in this Obsidian runtime."
-      );
-    }
-    this.databaseName = `${CLIENT_DATABASE_PREFIX}${options.clientInstanceId}`;
-    this.indexedDB = indexedDB;
-  }
-  get state() {
-    return this.storeState;
-  }
-  async open() {
-    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
-      return;
-    }
-    if (this.storeState === "opening") {
-      throw new ClientStoreError(
-        "transaction-failed",
-        "The IndexedDB connection is already opening."
-      );
-    }
-    const attempt = ++this.openAttempt;
-    this.storeState = "opening";
-    let request;
-    try {
-      request = this.indexedDB.open(
-        this.databaseName,
-        CLIENT_STORE_VERSION
-      );
-    } catch (error51) {
-      this.storeState = "closed";
-      throw normalizeClientStoreError(error51);
-    }
-    await new Promise((resolve, reject) => {
-      let settled = false;
-      const rejectOnce = (error51) => {
-        if (settled) return;
-        settled = true;
-        reject(error51);
-      };
-      request.onupgradeneeded = () => {
-        const database = request.result;
-        for (const storeName of CLIENT_STORE_NAMES) {
-          if (!database.objectStoreNames.contains(storeName)) {
-            database.createObjectStore(storeName);
-          }
-        }
-      };
-      request.onblocked = () => {
-        if (attempt !== this.openAttempt) return;
-        this.storeState = "blocked";
-        rejectOnce(
-          new ClientStoreError(
-            "blocked-upgrade",
-            "IndexedDB upgrade is blocked by another open Havemind client."
-          )
-        );
-      };
-      request.onerror = () => {
-        if (attempt !== this.openAttempt) return;
-        this.storeState = "closed";
-        rejectOnce(normalizeClientStoreError(request.error));
-      };
-      request.onsuccess = () => {
-        const database = request.result;
-        if (settled || attempt !== this.openAttempt || this.storeState !== "opening") {
-          database.close();
-          rejectOnce(
-            new ClientStoreError(
-              "closed",
-              "The IndexedDB connection was closed while opening."
-            )
-          );
-          return;
-        }
-        settled = true;
-        this.database = database;
-        this.storeState = "ready";
-        database.onversionchange = () => {
-          database.close();
-          if (this.database === database) this.database = null;
-          this.storeState = "versionchange";
-        };
-        resolve();
-      };
-    });
-  }
-  close() {
-    this.openAttempt += 1;
-    this.database?.close();
-    this.database = null;
-    this.storeState = "closed";
-  }
-  /**
-   * Arch P1: store an outbox revision's base64 payload out-of-band, keyed by
-   * `revisionId`, so the large bytes stay out of the per-plugin `data.json`.
-   */
-  async putPayload(revisionId, payloadBase64) {
-    assertStorageKey(revisionId);
-    await this.runTransaction(
-      "payloads",
-      "readwrite",
-      (store) => store.put(payloadBase64, revisionId)
-    );
-  }
-  /** The stored payload for `revisionId`, or undefined when absent (torn state). */
-  async getPayload(revisionId) {
-    assertStorageKey(revisionId);
-    const value = await this.runTransaction(
-      "payloads",
-      "readonly",
-      (store) => store.get(revisionId)
-    );
-    return typeof value === "string" ? value : void 0;
-  }
-  /** Remove a stored payload; a no-op when absent. */
-  async deletePayload(revisionId) {
-    assertStorageKey(revisionId);
-    await this.runTransaction(
-      "payloads",
-      "readwrite",
-      (store) => store.delete(revisionId)
-    );
-  }
-  /** P13: one record of the persisted revision history, or undefined when absent. */
-  async getHistoryRecord(key) {
-    assertStorageKey(key);
-    return this.runTransaction(
-      "history",
-      "readonly",
-      (store) => store.get(key)
-    );
-  }
-  async putHistoryRecord(key, value) {
-    assertStorageKey(key);
-    await this.runTransaction(
-      "history",
-      "readwrite",
-      (store) => store.put(value, key)
-    );
-  }
-  /** Remove one history record; a no-op when absent. */
-  async deleteHistoryRecord(key) {
-    assertStorageKey(key);
-    await this.runTransaction(
-      "history",
-      "readwrite",
-      (store) => store.delete(key)
-    );
-  }
-  requireDatabase() {
-    if (this.database && (this.storeState === "ready" || this.storeState === "write-failed")) {
-      return this.database;
-    }
-    if (this.storeState === "versionchange") {
-      throw new ClientStoreError(
-        "version-changed",
-        "The IndexedDB schema changed in another Havemind client."
-      );
-    }
-    throw new ClientStoreError(
-      "closed",
-      "The Havemind IndexedDB connection is not open."
-    );
-  }
-  async runTransaction(storeName, mode, createRequest) {
-    const isWrite = mode === "readwrite";
-    let transaction;
-    let request;
-    try {
-      transaction = this.requireDatabase().transaction(storeName, mode);
-      request = createRequest(transaction.objectStore(storeName));
-    } catch (error51) {
-      const normalized = normalizeClientStoreError(error51);
-      if (isWrite && normalized.code !== "closed" && normalized.code !== "version-changed") {
-        this.storeState = "write-failed";
-      }
-      throw normalized;
-    }
-    return new Promise((resolve, reject) => {
-      let requestResult;
-      let requestSucceeded = false;
-      let settled = false;
-      const fail = (error51) => {
-        if (settled) return;
-        settled = true;
-        if (isWrite) this.storeState = "write-failed";
-        reject(normalizeClientStoreError(error51));
-      };
-      request.onsuccess = () => {
-        requestResult = request.result;
-        requestSucceeded = true;
-      };
-      request.onerror = () => {
-        if (request.error) fail(request.error);
-      };
-      transaction.onerror = () => {
-        fail(transaction.error ?? request.error);
-      };
-      transaction.onabort = () => {
-        fail(transaction.error ?? request.error);
-      };
-      transaction.oncomplete = () => {
-        if (settled) return;
-        if (!requestSucceeded) {
-          fail(
-            new ClientStoreError(
-              "transaction-failed",
-              "IndexedDB completed without confirming the requested operation."
-            )
-          );
-          return;
-        }
-        settled = true;
-        if (isWrite) this.storeState = "ready";
-        resolve(requestResult);
-      };
-    });
-  }
-};
-function assertClientInstanceId(value) {
-  if (!isValidClientInstanceId(value)) {
-    throw new ClientStoreError(
-      "invalid-client-instance-id",
-      "client_instance_id must be 16-64 lowercase alphanumeric or hyphen characters."
-    );
-  }
-}
-function assertStorageKey(value) {
-  if (value.length === 0 || value.length > 256) {
-    throw new ClientStoreError(
-      "transaction-failed",
-      "IndexedDB keys must contain between 1 and 256 characters."
-    );
-  }
-}
-function generateClientInstanceId() {
-  if (!globalThis.crypto?.randomUUID) {
-    throw new ClientStoreError(
-      "storage-unavailable",
-      "Secure random UUID generation is unavailable in this Obsidian runtime."
-    );
-  }
-  return globalThis.crypto.randomUUID();
-}
-function normalizeClientStoreError(error51) {
-  if (error51 instanceof ClientStoreError) return error51;
-  if (getErrorName(error51) === "QuotaExceededError") {
-    return new ClientStoreError(
-      "quota-exceeded",
-      "IndexedDB quota was exceeded; the operation was not durably queued.",
-      error51
-    );
-  }
-  return new ClientStoreError(
-    "transaction-failed",
-    "The IndexedDB operation failed.",
-    error51
-  );
-}
-function getErrorName(error51) {
-  if (typeof error51 === "object" && error51 !== null && "name" in error51 && typeof error51.name === "string") {
-    return error51.name;
-  }
-  return null;
-}
-
-// src/runtime/adapters/plugin-data-keys.ts
-var PERSIST_KEY = "syncState";
-var PERSIST_BAK_KEY = "syncState.bak";
-var PERSIST_STAGING_KEY = "syncState.staging";
-var PERSIST_CORRUPT_PREFIX = "syncStateCorrupt.";
-var PERSIST_PRODUCER_CORRUPT_PREFIX = "pushProducerCorrupt.";
-var CLIENT_INSTANCE_KEY = "clientInstanceId";
-var PUSH_PRODUCER_KEY = "pushProducer";
-var OWNER_CONNECTION_KEY = "ownerConnection";
-var OWNER_CONNECTION_CORRUPT_PREFIX = "ownerConnectionCorrupt.";
-var CORRUPT_SIDECAR_PREFIXES = [
-  PERSIST_CORRUPT_PREFIX,
-  PERSIST_PRODUCER_CORRUPT_PREFIX,
-  OWNER_CONNECTION_CORRUPT_PREFIX
-];
-function isCorruptSidecarKey(key) {
-  return CORRUPT_SIDECAR_PREFIXES.some((prefix) => key.startsWith(prefix));
-}
-var MAX_CORRUPT_SIDECARS = 3;
-function withCorruptSidecar(base, prefix, timestamp, raw) {
-  const key = `${prefix}${timestamp}`;
-  const next = key in base ? { ...base } : { ...base, [key]: raw };
-  const stamps = Object.keys(next).filter((candidate) => candidate.startsWith(prefix)).map((candidate) => ({ candidate, stamp: Number(candidate.slice(prefix.length)) })).sort((a, b) => b.stamp - a.stamp);
-  for (const { candidate } of stamps.slice(MAX_CORRUPT_SIDECARS)) {
-    delete next[candidate];
-  }
-  return next;
-}
-
-// src/runtime/adapters/plugin-data-ports.ts
-function createPersistPort(plugin) {
-  const mutex = getPluginDataMutex(plugin);
-  return {
-    async load() {
-      return (await mutex.load())[PERSIST_KEY] ?? null;
-    },
-    async loadBackup() {
-      return (await mutex.load())[PERSIST_BAK_KEY] ?? null;
-    },
-    async save(state) {
-      await mutex.update((base) => {
-        const next = { ...base };
-        const priorPrimary = next[PERSIST_KEY];
-        if (priorPrimary !== void 0) next[PERSIST_BAK_KEY] = priorPrimary;
-        next[PERSIST_KEY] = state;
-        delete next[PERSIST_STAGING_KEY];
-        return next;
-      });
-    },
-    async preserveCorrupt(raw, timestamp) {
-      await mutex.update(
-        (base) => withCorruptSidecar(base, PERSIST_CORRUPT_PREFIX, timestamp, raw)
-      );
-    }
-  };
-}
-async function preserveCorruptProducerState(plugin, raw, timestamp) {
-  await getPluginDataMutex(plugin).update(
-    (base) => withCorruptSidecar(base, PERSIST_PRODUCER_CORRUPT_PREFIX, timestamp, raw)
-  );
-}
-function createRawPersistPort(plugin) {
-  return createSerializedDataPort(getPluginDataMutex(plugin));
-}
-function createClientInstanceRepo(plugin) {
-  return {
-    async readClientInstanceId() {
-      const value = (await getPluginDataMutex(plugin).load())[CLIENT_INSTANCE_KEY];
-      return typeof value === "string" ? value : null;
-    },
-    async writeClientInstanceId(value) {
-      await getPluginDataMutex(plugin).update((base) => ({
-        ...base,
-        [CLIENT_INSTANCE_KEY]: value
-      }));
-    }
-  };
-}
-function createOutboxPayloadStore(plugin) {
-  const ensureStore = openClientStoreLazily(
-    plugin,
-    "Havemind: outbox payload store unavailable; payloads stay inline in data.json."
-  );
-  return {
-    async putPayload(revisionId, payloadBase64) {
-      const store = await ensureStore();
-      if (store === null) {
-        throw new Error("Havemind: outbox payload store is unavailable.");
-      }
-      await store.putPayload(revisionId, payloadBase64);
-    },
-    async getPayload(revisionId) {
-      const store = await ensureStore();
-      if (store === null) return void 0;
-      return store.getPayload(revisionId);
-    },
-    async deletePayload(revisionId) {
-      const store = await ensureStore();
-      if (store === null) return;
-      await store.deletePayload(revisionId);
-    }
-  };
-}
-function createPersistedRevisionHistoryStore(plugin, scope) {
-  return createRevisionHistoryStore(
-    openClientStoreLazily(
-      plugin,
-      "Havemind: revision history store unavailable; each connection reads the full history."
-    ),
-    scope
-  );
-}
-function openClientStoreLazily(plugin, unavailableWarning) {
-  let storePromise = null;
-  return () => {
-    if (storePromise === null) {
-      storePromise = (async () => {
-        try {
-          const clientInstanceId = await ensureClientInstanceId(
-            createClientInstanceRepo(plugin)
-          );
-          const store = new IndexedDbClientStore({ clientInstanceId });
-          await store.open();
-          return store;
-        } catch {
-          console.warn(unavailableWarning);
-          return null;
-        }
-      })();
-    }
-    return storePromise;
-  };
-}
-
-// src/runtime/adapters/scheduler-hooks.ts
-function createSchedulerHooks(plugin, target = window, visibility) {
-  return {
-    onFocus(run) {
-      target.addEventListener("focus", run);
-      return () => target.removeEventListener("focus", run);
-    },
-    onOnline(run) {
-      target.addEventListener("online", run);
-      return () => target.removeEventListener("online", run);
-    },
-    onVisible(run) {
-      const source = visibility ?? (typeof document === "undefined" ? void 0 : document);
-      if (source === void 0) {
-        return () => void 0;
-      }
-      const listener = () => {
-        if (source.visibilityState !== "hidden") run();
-      };
-      source.addEventListener("visibilitychange", listener);
-      return () => source.removeEventListener("visibilitychange", listener);
-    },
-    setInterval(run, ms) {
-      const id = window.setInterval(run, ms);
-      plugin.registerInterval(id);
-      return () => window.clearInterval(id);
-    }
-  };
-}
-function createBackoffScheduler() {
-  return (callback, delayMs) => {
-    const timer = window.setTimeout(callback, delayMs);
-    return () => window.clearTimeout(timer);
-  };
-}
-
-// src/runtime/adapters/vault-file-port.ts
-var import_obsidian2 = require("obsidian");
-
-// src/sync/config-adapter.ts
-var CONFIG_DIR = ".obsidian";
-var HAVEMIND_PLUGIN_DIR = ".obsidian/plugins/havemind-sync";
-function isUnderHavemindPlugin(folder) {
-  return folder === HAVEMIND_PLUGIN_DIR || folder.startsWith(`${HAVEMIND_PLUGIN_DIR}/`);
-}
-async function listSyncableConfigPaths(adapter, root = CONFIG_DIR) {
-  const found = [];
-  const pending = [root];
-  const visited = /* @__PURE__ */ new Set();
-  while (pending.length > 0) {
-    const dir = pending.pop();
-    if (dir === void 0 || visited.has(dir)) continue;
-    visited.add(dir);
-    let listing;
-    try {
-      listing = await adapter.list(dir);
-    } catch {
-      continue;
-    }
-    for (const file2 of listing.files) {
-      if (isSyncableConfigPath(file2)) found.push(file2);
-    }
-    for (const folder of listing.folders) {
-      if (isUnderHavemindPlugin(folder)) continue;
-      pending.push(folder);
-    }
-  }
-  found.sort();
-  return found;
-}
-async function ensureConfigParentDirs(adapter, path) {
-  const separator = path.lastIndexOf("/");
-  if (separator === -1) return;
-  const segments = path.slice(0, separator).split("/");
-  let prefix = "";
-  for (const segment of segments) {
-    prefix = prefix === "" ? segment : `${prefix}/${segment}`;
-    try {
-      await adapter.mkdir(prefix);
-    } catch {
-    }
-  }
-}
-async function writeConfigText(adapter, path, content) {
-  await ensureConfigParentDirs(adapter, path);
-  await adapter.write(path, content);
-}
-async function writeConfigBinary(adapter, path, data) {
-  await ensureConfigParentDirs(adapter, path);
-  await adapter.writeBinary(path, data);
-}
-async function removeConfig(adapter, path) {
-  if (await adapter.exists(path)) await adapter.remove(path);
-}
-
-// src/sync/config-normalize.ts
-var GRAPH_SETTINGS_PATH = ".obsidian/graph.json";
-var GRAPH_VOLATILE_KEYS = /* @__PURE__ */ new Set([
-  "scale",
-  "close",
-  "collapse-filter",
-  "collapse-color-groups",
-  "collapse-display",
-  "collapse-forces"
-]);
-var JSON_INDENT = 2;
-function normalizeSeparators2(path) {
-  return path.replace(/\\/gu, "/");
-}
-function hasVolatileConfigFields(path) {
-  return normalizeSeparators2(path) === GRAPH_SETTINGS_PATH;
-}
-function parseConfigObject(text) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text.replace(/^\uFEFF/u, ""));
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return null;
-  }
-  return parsed;
-}
-function pickKeys(source, keep) {
-  const result = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (keep(key)) result[key] = value;
-  }
-  return result;
-}
-function normalizeConfigContent(path, text) {
-  if (!hasVolatileConfigFields(path)) return text;
-  const parsed = parseConfigObject(text);
-  if (parsed === null) return text;
-  return JSON.stringify(
-    pickKeys(parsed, (key) => !GRAPH_VOLATILE_KEYS.has(key)),
-    null,
-    JSON_INDENT
-  );
-}
-function mergeConfigContent(path, localText, remoteText) {
-  if (!hasVolatileConfigFields(path)) return remoteText;
-  const remote = parseConfigObject(remoteText);
-  if (remote === null) return remoteText;
-  const local = localText === null ? null : parseConfigObject(localText);
-  const localVolatile = local === null ? {} : pickKeys(local, (key) => GRAPH_VOLATILE_KEYS.has(key));
-  const remoteSemantic = pickKeys(
-    remote,
-    (key) => !GRAPH_VOLATILE_KEYS.has(key)
-  );
-  return `${JSON.stringify({ ...localVolatile, ...remoteSemantic }, null, JSON_INDENT)}
-`;
 }
 
 // src/runtime/revision-history.ts
@@ -18856,7 +17332,7 @@ var RevisionHistory = class {
       return cached2;
     }
     const queued = await this.options.state.getEnvelope(id);
-    const payload = queued === void 0 ? await this.options.resolveRevision(event) : decodeRevisionPayload(Uint8Array.from(atob(queued.payloadBase64), (char) => char.charCodeAt(0)));
+    const payload = queued === void 0 ? await this.options.resolveRevision(event) : decodeRevisionPayload(base64ToBytes(queued.payloadBase64));
     if (payload.kind === "binary") return payload;
     this.payloads.set(id, payload);
     if (this.payloads.size > MAX_CACHED_PAYLOADS) {
@@ -18872,7 +17348,7 @@ function sameEvent(left, right) {
   return a.revisionId === b.revisionId && a.fileId === b.fileId && a.contentHash === b.contentHash && JSON.stringify(a.parentRevisionIds ?? []) === JSON.stringify(b.parentRevisionIds ?? []);
 }
 function parseStoredHistory(value) {
-  if (!isRecord10(value) || !Array.isArray(value.events) || !Number.isSafeInteger(value.cursor)) return null;
+  if (!isRecord(value) || !Array.isArray(value.events) || !Number.isSafeInteger(value.cursor)) return null;
   const epoch = value.epoch;
   if (epoch !== null && typeof epoch !== "string") return null;
   if (value.events.length !== value.cursor) return null;
@@ -18885,7 +17361,7 @@ function parseStoredHistory(value) {
   return { epoch, cursor: events.length, events };
 }
 function parseStoredEvent(raw) {
-  if (!isRecord10(raw) || !Number.isSafeInteger(raw.serverSequence) || !isRecord10(raw.revision)) return null;
+  if (!isRecord(raw) || !Number.isSafeInteger(raw.serverSequence) || !isRecord(raw.revision)) return null;
   const { revisionId, fileId, contentHash, parentRevisionIds, authorMembershipId } = raw.revision;
   if (typeof revisionId !== "string" || typeof fileId !== "string" || typeof contentHash !== "string") return null;
   if (parentRevisionIds !== void 0 && !(Array.isArray(parentRevisionIds) && parentRevisionIds.every((id) => typeof id === "string"))) return null;
@@ -18900,9 +17376,6 @@ function parseStoredEvent(raw) {
       ...authorMembershipId === void 0 ? {} : { authorMembershipId }
     }
   };
-}
-function isRecord10(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function ancestors(graph, start) {
   const result = /* @__PURE__ */ new Set();
@@ -18933,20 +17406,7 @@ var ApplyDeferredError = class extends Error {
 };
 
 // src/obsidian/vault-adapter.ts
-var RESERVED_TOP_LEVEL_DIRECTORIES = new Set(
-  [CONFLICT_FOLDER].map((name) => name.toLowerCase())
-);
-var SYNCABLE_BINARY_EXTENSIONS = [
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "svg",
-  "pdf"
-];
 var MAX_BINARY_FILE_BYTES = 25 * 1024 * 1024;
-var BASE64_CHUNK_BYTES = 8192;
 var LocalVaultError = class extends Error {
   constructor(code, message) {
     super(message);
@@ -18954,12 +17414,13 @@ var LocalVaultError = class extends Error {
     __publicField(this, "name", "LocalVaultError");
   }
 };
+var RACY_STAT_MS = 2e3;
 function normalizeWirePath(path) {
   return path.replace(/\\/gu, "/").normalize("NFC");
 }
 function classifyVaultPath(path) {
   const canonicalPath = normalizeWirePath(path);
-  const kind = eligibleKind(canonicalPath);
+  const kind = syncContentKind(canonicalPath);
   if (kind === null) {
     return { eligible: false };
   }
@@ -18969,47 +17430,6 @@ function classifyVaultPath(path) {
     eligible: true,
     kind
   };
-}
-function pathExtension(canonicalPath) {
-  const dot = canonicalPath.lastIndexOf(".");
-  const slash = canonicalPath.lastIndexOf("/");
-  if (dot <= slash + 1) return "";
-  return canonicalPath.slice(dot + 1).toLowerCase();
-}
-var SYNCABLE_BINARY_EXTENSION_SET = new Set(
-  SYNCABLE_BINARY_EXTENSIONS
-);
-var CONFIG_TEXT_EXTENSIONS = /* @__PURE__ */ new Set([
-  "md",
-  "json",
-  "css",
-  "js",
-  "txt"
-]);
-function configContentKind(canonicalPath) {
-  const extension = pathExtension(canonicalPath);
-  if (SYNCABLE_BINARY_EXTENSION_SET.has(extension)) return "binary";
-  if (CONFIG_TEXT_EXTENSIONS.has(extension)) return "markdown";
-  return null;
-}
-function eligibleKind(canonicalPath) {
-  if (isSyncableConfigPath(canonicalPath)) {
-    return configContentKind(canonicalPath);
-  }
-  const extension = pathExtension(canonicalPath);
-  const kind = extension === "md" ? "markdown" : SYNCABLE_BINARY_EXTENSION_SET.has(extension) ? "binary" : null;
-  if (kind === null) {
-    return null;
-  }
-  const segments = canonicalPath.split("/");
-  if (segments.some((segment) => segment === "" || segment.startsWith("."))) {
-    return null;
-  }
-  const [top] = segments;
-  if (top === void 0 || RESERVED_TOP_LEVEL_DIRECTORIES.has(top.toLowerCase())) {
-    return null;
-  }
-  return kind;
 }
 var VaultChangeObserver = class {
   constructor(options) {
@@ -19095,7 +17515,8 @@ var VaultChangeObserver = class {
    * path first, falling back to the original (FINDING 3). Returns `null` when the
    * file resolves at neither path (a genuine miss, never push a phantom '') or
    * when a binary file is over {@link MAX_BINARY_FILE_BYTES} (excluded, not an
-   * error).
+   * error). A binary file's `content` is encoded when it is first read, so a
+   * caller that finds the file unchanged never pays for a 33 MB string.
    */
   async readContentForKind(canonicalPath, originalPath, kind) {
     const readPath = await this.resolveReadPath(canonicalPath, originalPath);
@@ -19103,7 +17524,9 @@ var VaultChangeObserver = class {
     if (kind === "binary") {
       const bytes = await this.options.vault.readBinary(readPath);
       if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return null;
-      return { content: bytesToBase642(bytes), contentHash: await hashBlob(bytes) };
+      return { get content() {
+        return bytesToBase64(bytes);
+      }, contentHash: await hashBlob(bytes) };
     }
     const content = normalizeContent(
       normalizeConfigContent(canonicalPath, await this.options.vault.readText(readPath))
@@ -19158,10 +17581,10 @@ var VaultChangeObserver = class {
       classified.kind
     );
     if (read === null) return null;
-    const { content, contentHash } = read;
+    const { contentHash } = read;
     if (!force && contentHash === mapping.contentHash) return null;
     const operation = this.buildOperation({
-      content,
+      content: read.content,
       contentHash,
       contentKind: classified.kind,
       fileId: mapping.fileId,
@@ -19302,15 +17725,6 @@ function pathUnderFolder(path, folderPrefix) {
   const prefix = `${folderPrefix}/`;
   return path.startsWith(prefix) ? path.slice(folderPrefix.length) : null;
 }
-function bytesToBase642(bytes) {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_BYTES) {
-    binary += String.fromCharCode(
-      ...bytes.subarray(offset, offset + BASE64_CHUNK_BYTES)
-    );
-  }
-  return btoa(binary);
-}
 async function sha256Hex3(text) {
   const data = new TextEncoder().encode(text);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
@@ -19404,12 +17818,7 @@ var VaultApplyAdapter = class {
   async openBuffers(fileId) {
     return this.files.openBufferStates(fileId);
   }
-  /**
-   * The per-file lock key: the file's canonical collision key, so remote apply
-   * and the local producer (which keys on the same collision key) share ONE
-   * critical section per file. Falls back to the raw path for a non-syncable
-   * path (never reached in practice, apply only sees syncable revisions).
-   */
+  /** Lock key: the canonical collision key, shared with the local producer's lock. */
   lockKey(path) {
     const classified = classifyVaultPath(path);
     return classified.eligible ? classified.collisionKey : path;
@@ -19458,55 +17867,47 @@ var VaultApplyAdapter = class {
     });
   }
   async applyDecoded(event, decoded, fileId, origin) {
-    if (decoded.operation === "delete") {
-      if (this.files.fileIdAtPath(decoded.path) === fileId) {
-        if (!resolvesLastWriterWins(decoded.path)) {
-          const onDisk2 = decoded.kind === "binary" ? await this.files.readBinaryByPath(decoded.path) : await this.files.readByPath(decoded.path);
-          if (onDisk2 !== null) {
-            const base = this.files.baseHashFor(fileId);
-            const onDiskHash = typeof onDisk2 === "string" ? await this.hashContent(onDisk2) : await hashBlob(onDisk2);
-            if ((base === null || onDiskHash !== base) && await this.cleanCausalHash(fileId, event, onDiskHash) === null) {
-              await this.writeConflict(event, decoded);
-              return "conflict";
-            }
-          }
-        }
-        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        await this.files.deleteByPath(decoded.path);
-        await this.files.forgetPath(decoded.path);
-        await this.files.forgetBaseHash(fileId);
-        await this.files.forgetBaseContent(fileId);
-        this.onRemoteApplied?.({
-          revisionId: event.revision.revisionId,
-          fileId,
-          path: decoded.path,
-          operation: decoded.operation,
-          origin,
-          ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
-        });
-      }
-      return "applied";
-    }
-    if (decoded.kind === "binary") {
-      return this.applyRemoteBinary(event, decoded, fileId, origin);
-    }
-    const text = decoded.content ?? "";
     const lastWriterWins = resolvesLastWriterWins(decoded.path);
+    if (decoded.operation === "delete") {
+      if (this.files.fileIdAtPath(decoded.path) !== fileId) return "applied";
+      const target = classifyVaultPath(decoded.path);
+      const onDisk2 = lastWriterWins ? null : await this.read(target.eligible ? target.kind : "markdown", decoded.path);
+      if (onDisk2 !== null && await this.holdsLocalEdit(fileId, event, onDisk2)) {
+        return this.writeConflict(event, decoded);
+      }
+      await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
+      await this.files.deleteByPath(decoded.path);
+      await this.files.forgetPath(decoded.path);
+      await this.files.forgetBaseHash(fileId);
+      await this.files.forgetBaseContent(fileId);
+      return this.reportApplied(event, decoded, origin);
+    }
+    const incoming = incomingContent(decoded);
+    const text = typeof incoming === "string" ? incoming : null;
+    const incomingHash = await this.hash(incoming);
+    const adopt = async () => {
+      await this.producerSync?.onRemoteWrite({
+        fileId,
+        path: decoded.path,
+        contentHash: incomingHash,
+        contentKind: decoded.kind ?? "markdown",
+        revisionId: event.revision.revisionId
+      });
+    };
+    const converge = async () => {
+      await this.files.recordApplied(fileId, decoded.path, incomingHash, text);
+      await adopt();
+      return "noop";
+    };
     if (decoded.operation === "rename" && decoded.previousPath !== null && this.files.fileIdAtPath(decoded.previousPath) === fileId) {
-      const previousOnDisk = await this.files.readByPath(decoded.previousPath);
-      if (previousOnDisk !== null && !lastWriterWins) {
-        const base = this.files.baseHashFor(fileId);
-        const previousHash = await this.hashContent(previousOnDisk);
-        if ((base === null || previousHash !== base) && await this.cleanCausalHash(fileId, event, previousHash) === null) {
-          await this.writeConflict(event, decoded);
-          return "conflict";
-        }
+      const previousOnDisk = await this.read(decoded.kind, decoded.previousPath);
+      if (previousOnDisk !== null && !lastWriterWins && await this.holdsLocalEdit(fileId, event, previousOnDisk)) {
+        return this.writeConflict(event, decoded);
       }
       if (!lastWriterWins) {
-        const destinationOnDisk = await this.files.readByPath(decoded.path);
-        if (destinationOnDisk !== null && !contentMatches(destinationOnDisk, text)) {
-          await this.writeConflict(event, decoded);
-          return "conflict";
+        const destinationOnDisk = await this.read(decoded.kind, decoded.path);
+        if (destinationOnDisk !== null && !contentMatches(destinationOnDisk, incoming)) {
+          return this.writeConflict(event, decoded);
         }
       }
       await this.producerSync?.onRemoteDelete({
@@ -19514,139 +17915,82 @@ var VaultApplyAdapter = class {
         path: decoded.previousPath
       });
     }
-    const onDisk = await this.files.readByPath(decoded.path);
+    const onDisk = await this.read(decoded.kind, decoded.path);
+    const converged = onDisk !== null && contentMatches(onDisk, incoming);
     const owner = this.files.fileIdAtPath(decoded.path);
     if (owner !== null && owner !== fileId) {
-      if (onDisk !== null && contentMatches(onDisk, text)) {
-        if (this.history !== void 0 && owner < fileId && (await this.history.heads(owner)).length > 0) return "noop";
-        const contentHash2 = await this.hashContent(text);
-        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-        await this.files.forgetBaseHash(owner);
-        await this.files.forgetBaseContent(owner);
-        await this.files.recordApplied(fileId, decoded.path, contentHash2, text);
-        await this.producerSync?.onRemoteWrite({
-          fileId,
-          path: decoded.path,
-          content: text,
-          contentHash: contentHash2,
-          contentKind: "markdown",
-          revisionId: event.revision.revisionId
-        });
-        return "noop";
-      }
-      if (!lastWriterWins) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
+      if (converged && this.history !== void 0 && owner < fileId && (await this.history.heads(owner)).length > 0) return "noop";
+      if (!converged && !lastWriterWins) return this.writeConflict(event, decoded);
       await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
       await this.files.forgetBaseHash(owner);
-      await this.files.forgetBaseContent(owner);
+      if (!converged || decoded.kind !== "binary") await this.files.forgetBaseContent(owner);
+      if (converged) return converge();
     }
-    const cleanCausalHash = onDisk === null ? null : await this.cleanCausalHash(
+    const onDiskHash = onDisk === null ? null : await this.hash(onDisk);
+    const cleanCausalHash = onDiskHash === null ? null : await this.cleanCausalHash(
       fileId,
       event,
-      await this.hashContent(onDisk)
+      onDiskHash
     );
-    if (onDisk !== null) {
-      if (contentMatches(onDisk, text)) {
-        const contentHash2 = await this.hashContent(text);
-        await this.files.recordApplied(fileId, decoded.path, contentHash2, text);
-        await this.producerSync?.onRemoteWrite({
-          fileId,
-          path: decoded.path,
-          content: text,
-          contentHash: contentHash2,
-          contentKind: "markdown",
-          revisionId: event.revision.revisionId
-        });
-        return "noop";
-      }
-      const base = this.files.baseHashFor(fileId);
-      const onDiskHash = await this.hashContent(onDisk);
-      const diverged = base === null || onDiskHash !== base;
-      if (cleanCausalHash === null && (diverged || !await this.isCausalFastForward(fileId, event))) {
-        const merged = await this.tryMergeApply(
-          event,
-          decoded,
-          fileId,
-          onDisk,
-          text,
-          base,
-          origin
-        );
-        if (merged !== null) {
-          return merged;
-        }
-        if (!lastWriterWins) {
-          await this.writeConflict(event, decoded);
-          return "conflict";
-        }
-      }
+    if (converged) return converge();
+    const base = this.files.baseHashFor(fileId);
+    if (onDisk !== null && (cleanCausalHash === null || decoded.kind === "binary") && (cleanCausalHash === null && onDiskHash !== base || !await this.isCausalFastForward(fileId, event))) {
+      const merged = await this.tryMergeApply(event, decoded, onDisk, base, origin);
+      if (merged !== null) return merged;
+      if (!lastWriterWins) return this.writeConflict(event, decoded);
     }
-    const contentHash = await this.hashContent(text);
-    await this.producerSync?.onRemoteWrite({
-      fileId,
-      path: decoded.path,
-      content: text,
-      contentHash,
-      contentKind: "markdown",
-      revisionId: event.revision.revisionId
-    });
-    const preWriteOnDisk = await this.files.readByPath(decoded.path);
-    if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, text)) {
+    await adopt();
+    const preWriteOnDisk = await this.read(decoded.kind, decoded.path);
+    if (preWriteOnDisk !== null && !lastWriterWins && !contentMatches(preWriteOnDisk, incoming)) {
       const preWriteBase = this.files.baseHashFor(fileId);
-      const preWriteHash = await this.hashContent(preWriteOnDisk);
-      if ((preWriteBase === null || preWriteHash !== preWriteBase) && preWriteHash !== cleanCausalHash) {
+      const preWriteHash = await this.hash(preWriteOnDisk);
+      if (preWriteHash !== preWriteBase && preWriteHash !== cleanCausalHash) {
         await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        const merged = await this.tryMergeApply(
-          event,
-          decoded,
-          fileId,
-          preWriteOnDisk,
-          text,
-          preWriteBase,
-          origin
-        );
-        if (merged !== null) {
-          return merged;
-        }
-        await this.writeConflict(event, decoded);
-        return "conflict";
+        const merged = await this.tryMergeApply(event, decoded, preWriteOnDisk, preWriteBase, origin);
+        return merged ?? this.writeConflict(event, decoded);
       }
     }
     try {
-      await this.files.writeByPath(decoded.path, text, lastWriterWins ? void 0 : preWriteOnDisk);
+      await (typeof incoming === "string" ? this.files.writeByPath(decoded.path, incoming, lastWriterWins ? void 0 : preWriteOnDisk) : this.files.writeBinaryByPath(decoded.path, incoming));
     } catch (error51) {
-      if (error51 instanceof ParentFolderOccupiedError && !lastWriterWins) {
-        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-      throw error51;
+      if (!(error51 instanceof ParentFolderOccupiedError) || lastWriterWins) throw error51;
+      await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
+      return this.writeConflict(event, decoded);
     }
-    await this.files.recordApplied(fileId, decoded.path, contentHash, text);
+    await this.files.recordApplied(fileId, decoded.path, incomingHash, text);
+    return this.reportApplied(event, decoded, origin);
+  }
+  /** Reads `path` as note text, or as an attachment's RAW bytes (F9). */
+  read(kind, path) {
+    return kind === "binary" ? this.files.readBinaryByPath(path) : this.files.readByPath(path);
+  }
+  /** Note text via the runtime's SHA-256 helper; attachment bytes via `hashBlob`. */
+  hash(content) {
+    return typeof content === "string" ? this.hashContent(content) : hashBlob(content);
+  }
+  /**
+   * Whether `onDisk` may hold a local edit the incoming revision never saw: it
+   * differs from the recorded base (a null base cannot prove the file clean)
+   * and is not the version that revision was built on (`cleanCausalHash`).
+   */
+  async holdsLocalEdit(fileId, event, onDisk) {
+    const base = this.files.baseHashFor(fileId);
+    const onDiskHash = await this.hash(onDisk);
+    return onDiskHash !== base && await this.cleanCausalHash(fileId, event, onDiskHash) === null;
+  }
+  /** Reports a revision this adapter genuinely wrote or deleted on disk (FIX 1). */
+  reportApplied(event, decoded, origin) {
+    const { revisionId, fileId, authorMembershipId } = event.revision;
     this.onRemoteApplied?.({
-      revisionId: event.revision.revisionId,
+      revisionId,
       fileId,
       path: decoded.path,
       operation: decoded.operation,
       origin,
-      ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
+      ...authorMembershipId === void 0 ? {} : { authorMembershipId }
     });
     return "applied";
   }
-  /**
-   * Attempts a line-level three-way merge (MRG-01) of a diverged markdown file
-   * before any conflict copy. Returns `'applied'` when it merged and wrote the
-   * combined content in place, or `null` when no merge is possible (no shared
-   * base, the ancestor text is not locally persisted, the stored ancestor no
-   * longer matches the base hash, or the changes overlap), the caller then
-   * writes a conflict copy.
-   *
-   * Keep the ancestor while branches are concurrent. A merged file is not an
-   * accepted remote revision: publish it explicitly, with its resolved parents,
-   * before changing the disk. The observer then deduplicates the reflected write.
-   */
   /**
    * The common ancestor text of this device's head for `fileId` and
    * `revisionId`, from the revision history, when it is a markdown note at
@@ -19663,7 +18007,19 @@ var VaultApplyAdapter = class {
     if (payload.kind === "binary" || payload.operation === "delete" || payload.path !== path) return null;
     return payload.content;
   }
-  async tryMergeApply(event, decoded, fileId, onDisk, incoming, base, origin) {
+  /**
+   * Attempts a line-level three-way merge (MRG-01) of a diverged markdown file
+   * before any conflict copy. Returns `'applied'` if it merged and wrote in
+   * place, or `null` when no merge is possible (an attachment (F9), no shared
+   * base, ancestor missing or not matching the base hash, overlapping changes):
+   * the caller then writes a conflict copy. Keep the ancestor while branches are
+   * concurrent. A merged file is not an accepted remote revision: publish it
+   * (with its resolved parents) BEFORE changing the disk, so the observer
+   * dedupes the reflected write.
+   */
+  async tryMergeApply(event, decoded, onDisk, base, origin) {
+    if (typeof onDisk !== "string") return null;
+    const fileId = event.revision.fileId;
     let ancestor;
     if (this.history !== void 0) {
       ancestor = await this.mergeAncestor(fileId, event.revision.revisionId, decoded.path);
@@ -19673,7 +18029,7 @@ var VaultApplyAdapter = class {
       if (ancestor === null || await this.hashContent(ancestor) !== base) return null;
     }
     if (ancestor === null) return null;
-    const result = mergeText(ancestor, onDisk, incoming);
+    const result = mergeText(ancestor, onDisk, decoded.content ?? "");
     if (result.status !== "merged") {
       return null;
     }
@@ -19696,15 +18052,7 @@ var VaultApplyAdapter = class {
     }
     await this.files.writeByPath(decoded.path, merged, onDisk);
     await this.files.recordPathOwner(fileId, decoded.path);
-    this.onRemoteApplied?.({
-      revisionId: event.revision.revisionId,
-      fileId,
-      path: decoded.path,
-      operation: decoded.operation,
-      origin,
-      ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
-    });
-    return "applied";
+    return this.reportApplied(event, decoded, origin);
   }
   /** Server acceptance alone never proves that an offline peer saw our version. */
   async cleanCausalHash(fileId, event, diskHash) {
@@ -19715,19 +18063,12 @@ var VaultApplyAdapter = class {
     return null;
   }
   /**
-   * Causal apply-vs-conflict decision (rule 3): true when the incoming
-   * revision is either provably a fast-forward from this device's current
-   * head for `fileId`, or when causality simply cannot be evaluated because
-   * the incoming revision carries no `parentRevisionIds` at all (a transport
-   * that does not yet surface causal parentage, see `RemoteRevision`).
-   *
-   * When `parentRevisionIds` IS present, this only returns true if a
-   * `producerSync` is wired with `localHeadFor`, that lookup resolves to a
-   * known (non-null) local head, AND the incoming revision's parents include
-   * it, i.e. the peer built its revision directly on top of (or through)
-   * what we last knew. Any missing piece there means causality cannot be
-   * established, so this fails SAFE (false) rather than risk a silent
-   * overwrite of a concurrent peer edit.
+   * Causal apply-vs-conflict decision (rule 3): true when the revision provably
+   * fast-forwards this device's head for `fileId`, or carries no
+   * `parentRevisionIds` (causality cannot be evaluated, see `RemoteRevision`).
+   * With parents present, true only if `producerSync.localHeadFor` yields a head
+   * AND the revision descends from it; any missing piece fails SAFE (false)
+   * rather than risk silently overwriting a concurrent peer edit.
    */
   async isCausalFastForward(fileId, event) {
     const parents = event.revision.parentRevisionIds;
@@ -19745,163 +18086,15 @@ var VaultApplyAdapter = class {
     return parents.includes(localHead) || this.history !== void 0 && ancestors(await this.history.graph(fileId), event.revision.revisionId).has(localHead);
   }
   /**
-   * Applies a whole-file binary revision (F9). Structurally mirrors the markdown
-   * `applyRemote` above but operates on RAW bytes: comparison and base hashing
-   * use `hashBlob`/byte-equality (never `canonicalizeMarkdown`), writes go
-   * through the byte vault API, and any conflict artifact keeps the original
-   * file extension. Every data-safety invariant is preserved, diverged on-disk
-   * bytes become a conflict artifact, never an overwrite (rule 3); the base
-   * advances only on a clean apply or convergence, never on a divergence.
-   */
-  async applyRemoteBinary(event, decoded, fileId, origin) {
-    const bytes = decoded.binaryContent ?? new Uint8Array(0);
-    const incomingHash = await hashBlob(bytes);
-    const incomingBase64 = bytesToBase642(bytes);
-    const lastWriterWins = resolvesLastWriterWins(decoded.path);
-    if (decoded.operation === "rename" && decoded.previousPath !== null && this.files.fileIdAtPath(decoded.previousPath) === fileId) {
-      const previousOnDisk = await this.files.readBinaryByPath(decoded.previousPath);
-      if (previousOnDisk !== null && !lastWriterWins) {
-        const base = this.files.baseHashFor(fileId);
-        const previousHash = await hashBlob(previousOnDisk);
-        if ((base === null || previousHash !== base) && await this.cleanCausalHash(fileId, event, previousHash) === null) {
-          await this.writeConflict(event, decoded);
-          return "conflict";
-        }
-      }
-      const destination = await this.files.readBinaryByPath(decoded.path);
-      if (!lastWriterWins && destination !== null && !bytesEqual(destination, bytes)) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-      await this.producerSync?.onRemoteDelete({
-        fileId,
-        path: decoded.previousPath
-      });
-    }
-    const onDisk = await this.files.readBinaryByPath(decoded.path);
-    const owner = this.files.fileIdAtPath(decoded.path);
-    if (owner !== null && owner !== fileId) {
-      if (onDisk !== null && bytesEqual(onDisk, bytes)) {
-        if (this.history !== void 0 && owner < fileId && (await this.history.heads(owner)).length > 0) return "noop";
-        await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-        await this.files.forgetBaseHash(owner);
-        await this.files.recordApplied(fileId, decoded.path, incomingHash, null);
-        await this.producerSync?.onRemoteWrite({
-          fileId,
-          path: decoded.path,
-          content: incomingBase64,
-          contentHash: incomingHash,
-          contentKind: "binary",
-          revisionId: event.revision.revisionId
-        });
-        return "noop";
-      }
-      if (!lastWriterWins) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-      await this.producerSync?.onRemoteDelete({ fileId: owner, path: decoded.path });
-      await this.files.forgetBaseHash(owner);
-      await this.files.forgetBaseContent(owner);
-    }
-    const cleanCausalHash = onDisk === null ? null : await this.cleanCausalHash(
-      fileId,
-      event,
-      await hashBlob(onDisk)
-    );
-    if (onDisk !== null) {
-      if (bytesEqual(onDisk, bytes)) {
-        await this.files.recordApplied(fileId, decoded.path, incomingHash, null);
-        await this.producerSync?.onRemoteWrite({
-          fileId,
-          path: decoded.path,
-          content: incomingBase64,
-          contentHash: incomingHash,
-          contentKind: "binary",
-          revisionId: event.revision.revisionId
-        });
-        return "noop";
-      }
-      const base = this.files.baseHashFor(fileId);
-      const onDiskHash = await hashBlob(onDisk);
-      if (!lastWriterWins && cleanCausalHash === null && (base === null || onDiskHash !== base)) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-      if (!lastWriterWins && !await this.isCausalFastForward(fileId, event)) {
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-    }
-    await this.producerSync?.onRemoteWrite({
-      fileId,
-      path: decoded.path,
-      content: incomingBase64,
-      contentHash: incomingHash,
-      contentKind: "binary",
-      revisionId: event.revision.revisionId
-    });
-    const preWriteOnDisk = await this.files.readBinaryByPath(decoded.path);
-    if (preWriteOnDisk !== null && !lastWriterWins && !bytesEqual(preWriteOnDisk, bytes)) {
-      const preWriteBase = this.files.baseHashFor(fileId);
-      const preWriteHash = await hashBlob(preWriteOnDisk);
-      if ((preWriteBase === null || preWriteHash !== preWriteBase) && preWriteHash !== cleanCausalHash) {
-        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-    }
-    try {
-      await this.files.writeBinaryByPath(decoded.path, bytes);
-    } catch (error51) {
-      if (error51 instanceof ParentFolderOccupiedError && !lastWriterWins) {
-        await this.producerSync?.onRemoteDelete({ fileId, path: decoded.path });
-        await this.writeConflict(event, decoded);
-        return "conflict";
-      }
-      throw error51;
-    }
-    await this.files.recordApplied(fileId, decoded.path, incomingHash, null);
-    this.onRemoteApplied?.({
-      revisionId: event.revision.revisionId,
-      fileId,
-      path: decoded.path,
-      operation: decoded.operation,
-      origin,
-      ...event.revision.authorMembershipId === void 0 ? {} : { authorMembershipId: event.revision.authorMembershipId }
-    });
-    return "applied";
-  }
-  /**
-   * The runner's separate open-BUFFER divergence path: the incoming revision is
-   * preserved as a conflict copy without touching the live file. Unreachable for
-   * an allowlisted `.obsidian/` settings file, which is why it needs no
-   * last-writer-wins branch, Obsidian never opens a hidden config file as an
-   * editor buffer, so `openBuffers` can never report one for a config fileId.
-   */
-  async recordConflict(event) {
-    const decoded = await this.resolveRevision(event);
-    await this.writeConflict(event, decoded);
-  }
-  /**
-   * Writes the incoming revision to a readable conflict copy (MRG-02) under the
-   * reserved folder, preserving both sides. Idempotent per revision: a
-   * re-delivered revision reuses the path already recorded for it, so a retry can
-   * never spawn a fresh timestamped duplicate (the conflict-cascade guard).
-   * Markdown and binary are handled uniformly via the decoded payload's kind.
+   * Writes the revision to a readable conflict copy (MRG-02). Idempotent per
+   * revision: a re-delivery reuses its recorded path, so a retry never spawns a
+   * fresh timestamped duplicate (the conflict-cascade guard).
    */
   async writeConflict(event, decoded) {
-    const isBinary = decoded.kind === "binary";
     const existing = this.files.conflictArtifactPathFor(event.revision.revisionId);
     const target = existing ?? await this.buildConflictPath(event, decoded);
-    if (isBinary) {
-      await this.files.writeBinaryConflictArtifact(
-        target,
-        decoded.binaryContent ?? new Uint8Array(0)
-      );
-    } else {
-      await this.files.writeConflictArtifact(target, decoded.content ?? "");
-    }
+    const content = incomingContent(decoded);
+    await (typeof content === "string" ? this.files.writeConflictArtifact(target, content) : this.files.writeBinaryConflictArtifact(target, content));
     if (existing === null) {
       await this.files.recordConflictArtifactPath(
         event.revision.revisionId,
@@ -19910,11 +18103,11 @@ var VaultApplyAdapter = class {
       );
       this.onConflictWritten?.();
     }
+    return "conflict";
   }
   /**
-   * Builds the readable conflict-copy path per the fixed naming contract:
-   * `<basename> (conflict <author> <YYYY-MM-DD HHmm>).<ext>` inside the reserved
-   * folder. Binary copies keep the source extension; markdown copies use `md`.
+   * Builds the conflict-copy path per the fixed naming contract, inside the
+   * reserved folder: `<basename> (conflict <author> <YYYY-MM-DD HHmm>).<ext>`.
    * A name collision appends ` 2`, ` 3`, … to the note basename.
    */
   async buildConflictPath(event, decoded) {
@@ -19946,15 +18139,18 @@ function formatConflictTimestamp(date5) {
   const pad = (value) => String(value).padStart(2, "0");
   return `${date5.getFullYear()}-${pad(date5.getMonth() + 1)}-${pad(date5.getDate())} ${pad(date5.getHours())}${pad(date5.getMinutes())}`;
 }
-function bytesEqual(a, b) {
-  if (a.byteLength !== b.byteLength) return false;
-  for (let index = 0; index < a.byteLength; index += 1) {
-    if (a[index] !== b[index]) return false;
-  }
-  return true;
+function incomingContent(decoded) {
+  return decoded.kind === "binary" ? decoded.binaryContent ?? new Uint8Array(0) : decoded.content ?? "";
 }
 function contentMatches(onDisk, incoming) {
-  return canonicalizeMarkdown(onDisk) === canonicalizeMarkdown(incoming);
+  if (typeof onDisk === "string") {
+    return typeof incoming === "string" && canonicalizeMarkdown(onDisk) === canonicalizeMarkdown(incoming);
+  }
+  if (typeof incoming === "string" || onDisk.byteLength !== incoming.byteLength) return false;
+  for (let index = 0; index < onDisk.byteLength; index += 1) {
+    if (onDisk[index] !== incoming[index]) return false;
+  }
+  return true;
 }
 
 // src/runtime/adapters/vault-file-port.ts
@@ -19986,6 +18182,9 @@ async function resolveConflictTarget(vault, path) {
   return resolvedFolder === "" ? filename : `${resolvedFolder}/${filename}`;
 }
 function toArrayBuffer(bytes) {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes.buffer;
+  }
   return bytes.buffer.slice(
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength
@@ -20019,11 +18218,7 @@ function createVaultFilePort(options) {
       if (texts.length === 0) return [];
       const file2 = vault.getAbstractFileByPath(path);
       const disk = file2 === null ? null : canonicalizeMarkdown(await vault.read(file2));
-      return Promise.all(texts.map(async (content) => ({
-        baseHash: disk === null ? null : await hashPlaintext(disk),
-        currentHash: await hashPlaintext(content),
-        unsaved: content !== disk
-      })));
+      return texts.map((content) => ({ unsaved: content !== disk }));
     },
     fileIdAtPath(path) {
       return state.fileIdAtPath(path);
@@ -20253,17 +18448,12 @@ var ObsidianOnboardingSecrets = class {
   }
 };
 
-// src/runtime/adapters/shared.ts
-function isRecord11(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 // src/runtime/adapters/owner-connection.ts
 function parseOwnerConnection(raw) {
   if (raw === null || raw === void 0) {
     return { status: "absent" };
   }
-  if (!isRecord11(raw) || !isCanonicalHttpsOrigin(raw.apiBaseUrl) || typeof raw.vaultId !== "string") {
+  if (!isRecord(raw) || !isCanonicalHttpsOrigin(raw.apiBaseUrl) || typeof raw.vaultId !== "string") {
     return { status: "corrupt", raw };
   }
   return {
@@ -20340,8 +18530,9 @@ async function resetHavemindConnectionState(plugin, now = () => Date.now()) {
   if (result.status === "corrupt") {
     await preserveCorruptOwnerConnection(plugin, result.raw, now());
   }
+  let clientInstanceId = null;
   try {
-    const clientInstanceId = await ensureClientInstanceId(
+    clientInstanceId = await ensureClientInstanceId(
       createClientInstanceRepo(plugin)
     );
     const secrets = new ObsidianOnboardingSecrets({
@@ -20359,6 +18550,7 @@ async function resetHavemindConnectionState(plugin, now = () => Date.now()) {
       "Havemind: could not clear the stored connection secrets during reset."
     );
   }
+  if (clientInstanceId !== null) await deleteClientDatabase(clientInstanceId);
   await getPluginDataMutex(plugin).update((base) => {
     const next = {};
     for (const [key, value] of Object.entries(base)) {
@@ -20438,7 +18630,7 @@ function registerVaultChangeListeners(vault, handlers) {
 // src/runtime/adapters/producer-state.ts
 var EMPTY_PRODUCER_STATE = { mappings: [], heads: {} };
 function isValidProducerMapping(entry) {
-  return isRecord11(entry) && typeof entry.collisionKey === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
+  return isRecord(entry) && typeof entry.collisionKey === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
 }
 function buildProducerMapping(entry) {
   return {
@@ -20453,8 +18645,14 @@ function buildProducerMapping(entry) {
     // markdown by omission, keeping legacy mappings unchanged.
     ...entry.contentKind === "binary" || entry.contentKind === "markdown" ? { contentKind: entry.contentKind } : {},
     fileId: entry.fileId,
-    path: entry.path
+    path: entry.path,
+    // P7: the startup scan's stat; a malformed one is dropped, which only
+    // means the file is read at the next start.
+    ...isFileStat(entry.stat) ? { stat: { mtime: entry.stat.mtime, size: entry.stat.size } } : {}
   };
+}
+function isFileStat(value) {
+  return isRecord(value) && Number.isFinite(value.mtime) && Number.isFinite(value.size);
 }
 function parseProducerStateResult(raw) {
   if (raw === null || raw === void 0) {
@@ -20464,7 +18662,7 @@ function parseProducerStateResult(raw) {
       quarantinedMappings: []
     };
   }
-  if (!isRecord11(raw) || !Array.isArray(raw.mappings) || !isRecord11(raw.heads)) {
+  if (!isRecord(raw) || !Array.isArray(raw.mappings) || !isRecord(raw.heads)) {
     console.warn(
       "Havemind: producer state was present but structurally corrupt; its raw bytes were preserved to a sidecar and an empty state was used for this session."
     );
@@ -20576,7 +18774,7 @@ async function pairOwnerDevice(options) {
     throw new OwnerPairError(`Owner pairing returned HTTP ${response.status}.`);
   }
   const json2 = response.json;
-  if (!isRecord12(json2) || typeof json2.vaultId !== "string" || typeof json2.deviceId !== "string") {
+  if (!isRecord(json2) || typeof json2.vaultId !== "string" || typeof json2.deviceId !== "string") {
     throw new OwnerPairError("Owner pairing response was malformed.");
   }
   return {
@@ -20584,9 +18782,6 @@ async function pairOwnerDevice(options) {
     deviceId: json2.deviceId,
     ...typeof json2.membershipId === "string" ? { memberId: json2.membershipId } : {}
   };
-}
-function isRecord12(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/runtime/connection.ts
@@ -20630,8 +18825,8 @@ function buildConnectionResolvers(options) {
           `Blob fetch for ${event.revision.contentHash} returned HTTP ${response.status}.`
         );
       }
-      const body = response.text ?? "";
-      const actualHash = await sha256Hex(body);
+      const body = new Uint8Array(response.arrayBuffer ?? new ArrayBuffer(0));
+      const actualHash = await sha256Hex2(body);
       if (actualHash !== event.revision.contentHash) {
         throw new BlobIntegrityError(event.revision.contentHash, actualHash);
       }
@@ -20793,7 +18988,7 @@ var OnboardingController = class {
       return this.state;
     }
     const durable = parseDurableState(stored);
-    if (isRecord13(stored) && stored.phase !== durable.phase) {
+    if (isRecord(stored) && stored.phase !== durable.phase) {
       await this.connect(durable);
       return this.state;
     }
@@ -20984,7 +19179,7 @@ var OnboardingController = class {
 };
 function parseDiscoveryResponse(response, expectedUrl, expectedOrigin) {
   const body = parseSuccessfulResponse(response, expectedUrl);
-  if (!hasExactKeys(body, [
+  if (!hasKeys(body, [
     "apiBaseUrl",
     "authMethods",
     "capabilities",
@@ -20993,7 +19188,7 @@ function parseDiscoveryResponse(response, expectedUrl, expectedOrigin) {
     "service"
   ]) || body.service !== "havemind" || !isCanonicalDisplayText(body.name, 80) || !Array.isArray(body.authMethods) || body.authMethods.length !== 1 || body.authMethods[0] !== "opaque-token" || !Array.isArray(body.capabilities) || body.capabilities.length > 64 || body.capabilities.some(
     (capability) => typeof capability !== "string" || !CAPABILITY_PATTERN.test(capability)
-  ) || !isRecord13(body.protocol) || !hasExactKeys(body.protocol, ["major", "maxMinor", "minMinor"]) || !isNonnegativeInteger(body.protocol.major) || !isNonnegativeInteger(body.protocol.minMinor) || !isNonnegativeInteger(body.protocol.maxMinor) || body.protocol.minMinor > body.protocol.maxMinor || typeof body.apiBaseUrl !== "string") {
+  ) || !isRecord(body.protocol) || !hasKeys(body.protocol, ["major", "maxMinor", "minMinor"]) || !isNonnegativeInteger(body.protocol.major) || !isNonnegativeInteger(body.protocol.minMinor) || !isNonnegativeInteger(body.protocol.maxMinor) || body.protocol.minMinor > body.protocol.maxMinor || typeof body.apiBaseUrl !== "string") {
     throw new OnboardingError("invalid-response");
   }
   const apiBaseUrl = parseCanonicalApiBaseUrl(
@@ -21013,7 +19208,7 @@ function parseDiscoveryResponse(response, expectedUrl, expectedOrigin) {
 }
 function parseInvitationReviewResponse(response, expectedUrl) {
   const body = parseSuccessfulResponse(response, expectedUrl);
-  if (!hasExactKeys(body, [
+  if (!hasKeys(body, [
     "expiresAt",
     "intendedMemberDisplayName",
     "inviterDisplayName",
@@ -21035,7 +19230,7 @@ function parseInvitationReviewResponse(response, expectedUrl) {
 }
 function parsePendingRedemptionResponse(response, expectedUrl) {
   const body = parseSuccessfulResponse(response, expectedUrl);
-  if (!hasExactKeys(body, [
+  if (!hasKeys(body, [
     "pendingCredential",
     "pendingDeviceId",
     "status",
@@ -21051,13 +19246,9 @@ function parsePendingRedemptionResponse(response, expectedUrl) {
 }
 function parseApprovalResponse(response, expectedUrl) {
   const body = parseSuccessfulResponse(response, expectedUrl);
-  if (hasExactKeys(body, ["status"]) && body.status === "pending") {
-    return { status: "pending" };
-  }
-  if (hasExactKeys(body, ["status"]) && body.status === "rejected") {
-    return { status: "rejected" };
-  }
-  if (!hasExactKeys(body, ["bootstrapCursor", "deviceId", "membershipId", "status"]) || body.status !== "approved" || !isCanonicalUuid(body.deviceId) || !isCanonicalUuid(body.membershipId) || !isCursor(body.bootstrapCursor)) {
+  if (body.status === "pending") return { status: "pending" };
+  if (body.status === "rejected") return { status: "rejected" };
+  if (body.status !== "approved" || !isCanonicalUuid(body.deviceId) || !isCanonicalUuid(body.membershipId)) {
     throw new OnboardingError("invalid-response");
   }
   return {
@@ -21067,11 +19258,11 @@ function parseApprovalResponse(response, expectedUrl) {
   };
 }
 function parseSuccessfulResponse(response, expectedUrl) {
-  if (!isRecord13(response) || response.finalUrl !== expectedUrl) {
+  if (!isRecord(response) || response.finalUrl !== expectedUrl) {
     throw new OnboardingError("redirect-refused");
   }
   if (response.status !== 200) throw new OnboardingError("remote-failed");
-  if (!isRecord13(response.body)) {
+  if (!isRecord(response.body)) {
     throw new OnboardingError("invalid-response");
   }
   return response.body;
@@ -21101,7 +19292,7 @@ function negotiateProtocol(server) {
   return { major: CLIENT_PROTOCOL.major, minor: maximum };
 }
 function parseDurableState(value) {
-  if (!isRecord13(value) || typeof value.phase !== "string") {
+  if (!isRecord(value) || typeof value.phase !== "string") {
     throw new OnboardingError("invalid-state");
   }
   const phase = value.phase;
@@ -21175,7 +19366,7 @@ function parseDurableState(value) {
   return structuredClone(value);
 }
 function validateStoredConnectionMetadata(value) {
-  if (typeof value.serverOrigin !== "string" || !isCanonicalHttpsOrigin2(value.serverOrigin) || typeof value.apiBaseUrl !== "string" || !isApiBaseForOrigin(value.apiBaseUrl, value.serverOrigin) || !isCanonicalDisplayText(value.serverName, 80) || !isCanonicalDisplayText(value.vaultName, 120) || !isCanonicalDisplayText(value.inviterDisplayName, 80) || !isCanonicalDisplayText(value.intendedMemberDisplayName, 80) || !isCanonicalUuid(value.vaultId) || !isCanonicalUuid(value.memberId) || !isCanonicalIsoTimestamp(value.expiresAt) || !isRecord13(value.protocolVersion) || !hasExactKeys(value.protocolVersion, ["major", "minor"]) || value.protocolVersion.major !== 1 || value.protocolVersion.minor !== 0) {
+  if (typeof value.serverOrigin !== "string" || !isCanonicalHttpsOrigin2(value.serverOrigin) || typeof value.apiBaseUrl !== "string" || !isApiBaseForOrigin(value.apiBaseUrl, value.serverOrigin) || !isCanonicalDisplayText(value.serverName, 80) || !isCanonicalDisplayText(value.vaultName, 120) || !isCanonicalDisplayText(value.inviterDisplayName, 80) || !isCanonicalDisplayText(value.intendedMemberDisplayName, 80) || !isCanonicalUuid(value.vaultId) || !isCanonicalUuid(value.memberId) || !isCanonicalIsoTimestamp(value.expiresAt) || !isRecord(value.protocolVersion) || !hasExactKeys(value.protocolVersion, ["major", "minor"]) || value.protocolVersion.major !== 1 || value.protocolVersion.minor !== 0) {
     throw new OnboardingError("invalid-state");
   }
 }
@@ -21265,13 +19456,13 @@ function isApiBaseForOrigin(value, origin) {
 function isNonnegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
+function hasKeys(value, requiredKeys) {
+  return isRecord(value) && requiredKeys.every((key) => Object.hasOwn(value, key));
+}
 function hasExactKeys(value, expectedKeys) {
-  if (!isRecord13(value)) return false;
+  if (!isRecord(value)) return false;
   const keys = Object.keys(value);
   return keys.length === expectedKeys.length && expectedKeys.every((key) => Object.hasOwn(value, key));
-}
-function isRecord13(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function parseInviteEnvelopeSafely(value) {
   try {
@@ -21388,20 +19579,17 @@ var PluginDataOnboardingStore = class {
   async mutate(next) {
     this.cache = next;
     const data = await this.persist.load();
-    const base = isRecord14(data) ? data : {};
+    const base = isRecord(data) ? data : {};
     await this.persist.save({ ...base, [ONBOARDING_KEY]: next });
   }
 };
 function parsePersisted(raw) {
-  const container = isRecord14(raw) ? raw[ONBOARDING_KEY] : null;
-  if (!isRecord14(container)) {
+  const container = isRecord(raw) ? raw[ONBOARDING_KEY] : null;
+  if (!isRecord(container)) {
     return { state: null };
   }
-  const state = isRecord14(container.state) ? container.state : null;
+  const state = isRecord(container.state) ? container.state : null;
   return { state };
-}
-function isRecord14(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/runtime/adapters/onboarding-wiring.ts
@@ -21453,6 +19641,82 @@ var HAVEMIND_STATUS_DISCONNECTED = formatStatusBar({
 var HAVEMIND_STATUS_RESET_REQUIRED = formatStatusBar({
   status: "reset-required"
 });
+
+// src/runtime/member-roster.ts
+var REFRESH_TOKEN_HEADER = "x-havemind-refresh-token";
+var MemberRosterError = class extends Error {
+  constructor() {
+    super(...arguments);
+    __publicField(this, "name", "MemberRosterError");
+  }
+};
+function parseMember(value, selfMembershipId) {
+  if (!isRecord(value) || typeof value.membershipId !== "string" || typeof value.displayName !== "string" || value.role !== "owner" && value.role !== "editor") {
+    throw new MemberRosterError("The member roster response was malformed.");
+  }
+  const self = value.membershipId === selfMembershipId;
+  return {
+    // The local user's own row reads "You", matching how this device already
+    // records its own membership (see `adoptSelfMembership`).
+    displayName: self ? "You" : value.displayName,
+    membershipId: value.membershipId,
+    role: value.role,
+    self
+  };
+}
+async function fetchMemberRoster(options) {
+  const refreshToken = await options.getRefreshToken();
+  if (refreshToken === null) {
+    throw new MemberRosterError(
+      "No refresh token is stored for this device; the roster cannot be read."
+    );
+  }
+  const query = options.vaultId === null ? "" : `?vault=${encodeURIComponent(options.vaultId)}`;
+  const response = await options.requestUrl({
+    url: `${options.apiBaseUrl}/members${query}`,
+    method: "GET",
+    headers: { [REFRESH_TOKEN_HEADER]: refreshToken },
+    throw: false
+  });
+  if (response.status < 200 || response.status >= 300) {
+    throw new MemberRosterError(
+      `The member roster request returned HTTP ${response.status}.`
+    );
+  }
+  const members = isRecord(response.json) ? response.json.members : void 0;
+  if (!Array.isArray(members)) {
+    throw new MemberRosterError("The member roster response was malformed.");
+  }
+  return members.map((entry) => parseMember(entry, options.selfMembershipId));
+}
+var LegacyRosterServerError = class extends MemberRosterError {
+};
+async function fetchVaultMembers(options) {
+  const token = await options.getAccessToken();
+  const response = await options.requestUrl({
+    url: `${options.apiBaseUrl}/vaults/${encodeURIComponent(options.vaultId)}/members`,
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+    throw: false
+  });
+  if (response.status < 200 || response.status >= 300) {
+    throw new MemberRosterError(
+      `The member roster request returned HTTP ${response.status}.`
+    );
+  }
+  const members = isRecord(response.json) ? response.json.members : void 0;
+  if (!Array.isArray(members)) {
+    throw new MemberRosterError("The member roster response was malformed.");
+  }
+  if (members.some((entry) => isRecord(entry) && entry.membershipId === void 0)) {
+    throw new LegacyRosterServerError("The server does not send membership ids yet.");
+  }
+  const parsed = members.map((entry) => parseMember(entry, options.selfMembershipId));
+  return [
+    ...parsed.filter((member) => member.role === "owner"),
+    ...parsed.filter((member) => member.role !== "owner")
+  ];
+}
 
 // src/runtime/remote-apply-coordinator.ts
 function createRemoteApplyProducerSync(getProducer) {
@@ -21543,14 +19807,6 @@ async function pollConfigOnce(deps) {
 
 // src/sync/outbox-repository.ts
 var MAX_BINARY_PAYLOAD_BYTES = 36 * 1024 * 1024;
-function decodeBase64ToBytes(base643) {
-  const binary = atob(base643);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
 var OPERATION_BY_KIND = {
   create: "create",
   update: "update",
@@ -21572,8 +19828,27 @@ var OutboxLocalChangeRepository = class {
       path: m.path,
       collisionKey: m.collisionKey,
       contentHash: m.contentHash,
-      ...m.contentKind === void 0 ? {} : { contentKind: m.contentKind }
+      ...m.contentKind === void 0 ? {} : { contentKind: m.contentKind },
+      ...m.stat === void 0 ? {} : { stat: m.stat }
     })) });
+  }
+  /**
+   * P7: records the startup scan's file stats in one save, only on mappings
+   * whose hash is still the one the scan verified against the disk.
+   */
+  async recordStats(entries) {
+    await this.mutations.runExclusive("state", async () => {
+      const state = await this.options.store.load();
+      const byFile = new Map(entries.map((entry) => [entry.fileId, entry]));
+      let changed = false;
+      const mappings = state.mappings.map((mapping) => {
+        const entry = byFile.get(mapping.fileId);
+        if (entry === void 0 || entry.contentHash !== mapping.contentHash) return mapping;
+        changed = true;
+        return { ...mapping, stat: entry.stat };
+      });
+      if (changed) await this.saveState({ ...state, mappings });
+    });
   }
   async recover() {
     await this.mutations.runExclusive("state", () => this.recoverLocked());
@@ -21793,7 +20068,7 @@ var OutboxLocalChangeRepository = class {
           ...isBinary ? {
             kind: "binary",
             content: null,
-            binaryContent: decodeBase64ToBytes(operation.content ?? ""),
+            binaryContentBase64: operation.content ?? "",
             maxPayloadBytes: MAX_BINARY_PAYLOAD_BYTES
           } : {
             content: operation.content,
@@ -22013,7 +20288,18 @@ async function reconcileVaultState(options) {
     }
   }
   const unmatchedVault = [];
+  const now = options.now ?? Date.now;
+  const statsToRecord = [];
+  const canRecord = vault.stat !== void 0 && repository.recordStats !== void 0;
   for (const [collisionKey, { readPath, kind }] of eligible) {
+    const known = mappingsByCollision.get(collisionKey);
+    const statAt = now();
+    const stat = canRecord && known !== void 0 ? await vault.stat?.(readPath) ?? null : null;
+    if (stat !== null && known?.stat?.mtime === stat.mtime && known.stat.size === stat.size) {
+      mappingsByCollision.delete(collisionKey);
+      unchanged += 1;
+      continue;
+    }
     const read = await readEligibleContent(vault, readPath, kind);
     if (read === "too-large") {
       binaryExcluded += 1;
@@ -22029,12 +20315,16 @@ async function reconcileVaultState(options) {
     mappingsByCollision.delete(collisionKey);
     if (mapping.contentHash === contentHash) {
       unchanged += 1;
+      if (stat !== null && stat.mtime + RACY_STAT_MS <= statAt) {
+        statsToRecord.push({ fileId: mapping.fileId, contentHash, stat });
+      }
     } else if (await observeResilient(readPath, recordSkip, () => observer.observeModify(readPath))) {
       updated += 1;
     } else {
       skipped += 1;
     }
   }
+  if (statsToRecord.length > 0) await repository.recordStats?.(statsToRecord);
   const unmatchedMappings = [...mappingsByCollision.values()];
   const {
     created,
@@ -22287,11 +20577,1106 @@ var ModifyDebouncer = class {
   }
 };
 
+// src/runtime/producer-recovery.ts
+function validRecovery(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value;
+  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string" && s.length > 0);
+  if (typeof row.id !== "string" || !row.id || !["apply", "resolution"].includes(String(row.kind)) || !strings(row.fileIds) || !strings(row.discardRevisionIds) || typeof row.state !== "object" || row.state === null) return false;
+  if (row.applyState !== void 0) {
+    if (typeof row.applyState !== "object" || row.applyState === null) return false;
+    const saved = row.applyState;
+    if (!["pathOwners", "baseHashes", "baseContents"].every((key) => typeof saved[key] === "object" && saved[key] !== null && !Array.isArray(saved[key]) && Object.values(saved[key]).every((value2) => typeof value2 === "string"))) return false;
+  }
+  const state = row.state;
+  if (!Array.isArray(state.mappings) || typeof state.heads !== "object" || state.heads === null || Array.isArray(state.heads)) return false;
+  return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
+    if (typeof m !== "object" || m === null) return false;
+    const item = m;
+    return ["fileId", "path", "collisionKey", "contentHash"].every((key) => typeof item[key] === "string") && (row.kind !== "resolution" || item.contentKind === "binary" || typeof item.content === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
+  });
+}
+
+// src/runtime/sync-state.ts
+var PAYLOAD_MISSING_REASON = "payload-missing";
+var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
+var QUARANTINED_ENVELOPE_BUDGET_BYTES = 5 * 1024 * 1024;
+var FAILED_TO_QUEUE_PREFIX = "failed-to-queue:";
+function failedToQueueRevisionId(path) {
+  return `${FAILED_TO_QUEUE_PREFIX}${path}`;
+}
+function parseFailedToQueuePath(revisionId) {
+  if (!revisionId.startsWith(FAILED_TO_QUEUE_PREFIX)) return null;
+  const path = revisionId.slice(FAILED_TO_QUEUE_PREFIX.length);
+  return path.length === 0 ? null : path;
+}
+function emptyState() {
+  return {
+    version: 1,
+    cursor: 0,
+    outbox: [],
+    locallyAuthored: [],
+    deferred: [],
+    quarantine: [],
+    pathOwners: {},
+    baseHashes: {},
+    baseContents: {},
+    conflictArtifacts: {},
+    quarantinedEnvelopes: {}
+  };
+}
+function parentIdsFromHeader(header) {
+  if (!isRecord(header)) return [];
+  const ids = header.parentRevisionIds;
+  if (!Array.isArray(ids)) return [];
+  return ids.filter((id) => typeof id === "string");
+}
+function base64ByteLength(base643) {
+  const length = base643.length;
+  if (length === 0) return 0;
+  let padding = 0;
+  if (base643.endsWith("==")) padding = 2;
+  else if (base643.endsWith("=")) padding = 1;
+  return Math.floor(length * 3 / 4) - padding;
+}
+var DurableSyncState = class {
+  constructor(options) {
+    __publicField(this, "persist");
+    __publicField(this, "maxLocallyAuthored");
+    __publicField(this, "now");
+    __publicField(this, "envelopeBudgetBytes");
+    __publicField(this, "parkReasons", /* @__PURE__ */ new Map());
+    /** Optional payload store (arch P1); without it payloads stay in `data.json`. */
+    __publicField(this, "payloadStore");
+    __publicField(this, "keepBaseContents");
+    /**
+     * The outbox/stash `revisionId`s whose payload lives in the payload store (the
+     * disk form strips their inline bytes). One absent keeps its bytes inline, so
+     * bytes the store does not hold are never stripped.
+     */
+    __publicField(this, "externalized", /* @__PURE__ */ new Set());
+    __publicField(this, "cache", null);
+    /**
+     * Set when a load could not fully recover the local queue (GAP-1, see
+     * {@link hydrate}); the raw bytes are then in a sidecar. A purely OBSERVABLE
+     * signal ({@link isRecoveryRequired}), never a save lock: the instance resumes
+     * from a clean, writable state and rewrites the primary, so a restart never
+     * re-locks. The UI can tell the user the queue needs recovery instead of
+     * letting them assume it drained.
+     */
+    __publicField(this, "recoveryRequired", false);
+    /**
+     * De-dupes concurrent cold-cache loads: otherwise the later `persist.load()`
+     * re-parses the blob and clobbers a cache mutation the first caller made in
+     * the meantime (an enqueued revision, an advanced cursor), a silent dropped
+     * push at connect (rule 3). Callers share this one in-flight load.
+     */
+    __publicField(this, "loadPromise", null);
+    /**
+     * Serializes every read-modify-write section on the shared cache. On a WARM
+     * cache two overlapping `ensureLoaded` + `mutate` sections capture the SAME
+     * snapshot and the later one drops the earlier write. That once lost a file's
+     * base CONTENT but kept its HASH, so the merge lost its ancestor and spawned a
+     * SPURIOUS conflict copy (rule 3). The in-memory analogue of `PluginDataMutex`
+     * (disk save only). Reads stay off the queue: `mutate` swaps the whole cache in
+     * one synchronous assignment, so a read always sees a consistent snapshot.
+     */
+    __publicField(this, "mutationTail", Promise.resolve());
+    this.persist = options.persist;
+    this.maxLocallyAuthored = options.maxLocallyAuthored ?? DEFAULT_MAX_LOCALLY_AUTHORED;
+    this.now = options.now ?? (() => Date.now());
+    this.envelopeBudgetBytes = options.quarantinedEnvelopeBudgetBytes ?? QUARANTINED_ENVELOPE_BUDGET_BYTES;
+    this.payloadStore = options.payloadStore;
+    this.keepBaseContents = options.keepBaseContents ?? true;
+  }
+  /** `state` without base contents when they are not kept (A2). */
+  trimmed(state) {
+    return this.keepBaseContents || Object.keys(state.baseContents).length === 0 ? state : { ...state, baseContents: {} };
+  }
+  /** Whether the last load could not fully recover the queue (GAP-1); a signal only. */
+  isRecoveryRequired() {
+    return this.recoveryRequired;
+  }
+  async pendingProducerRecoveries() {
+    return (await this.ensureLoaded()).producerRecovery ?? [];
+  }
+  async startProducerRecovery(record2, replacement) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if ((state.producerRecovery ?? []).some((r) => r.fileIds.some((id) => record2.fileIds.includes(id)))) {
+        throw new Error("Producer recovery must finish before another transaction.");
+      }
+      const ids = new Set(record2.discardRevisionIds);
+      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
+      if (originals.length !== ids.size || this.hasUncoveredChildren(state, ids)) return false;
+      if (replacement !== void 0 && (ids.has(replacement.revisionId) || parentIdsFromHeader(replacement.header).some((id) => ids.has(id)))) return false;
+      await this.mutate({
+        ...state,
+        outbox: [...state.outbox.filter((e) => !ids.has(e.revisionId)), ...replacement === void 0 ? [] : [{ ...replacement, enqueuedAt: this.now() }]],
+        producerRecovery: [...state.producerRecovery ?? [], record2.kind === "apply" ? {
+          ...record2,
+          applyState: {
+            pathOwners: Object.fromEntries(Object.entries(state.pathOwners).filter(([, id]) => record2.fileIds.includes(id))),
+            baseHashes: Object.fromEntries(Object.entries(state.baseHashes).filter(([id]) => record2.fileIds.includes(id))),
+            baseContents: Object.fromEntries(Object.entries(state.baseContents).filter(([id]) => record2.fileIds.includes(id)))
+          }
+        } : record2],
+        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: originals.map((e) => ({ ...e, payloadExternalized: false })) } }
+      });
+      return true;
+    });
+  }
+  hasUncoveredChildren(state, ids) {
+    return [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((e) => !ids.has(e.revisionId) && parentIdsFromHeader(e.header).some((id) => ids.has(id)));
+  }
+  async recoverProducerQueue(id) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const record2 = state.producerRecovery?.find((r) => r.id === id);
+      if (record2 === void 0) return;
+      if (record2.kind === "resolution") {
+        const pathOwners = { ...state.pathOwners };
+        const baseHashes = { ...state.baseHashes };
+        const baseContents = { ...state.baseContents };
+        for (const fileId of record2.fileIds) {
+          const mapping = record2.state.mappings.find((m) => m.fileId === fileId);
+          for (const [path, owner] of Object.entries(pathOwners)) {
+            if (owner === fileId && path !== mapping?.path) delete pathOwners[path];
+          }
+          if (mapping === void 0) {
+            delete baseHashes[fileId];
+            delete baseContents[fileId];
+          } else {
+            pathOwners[mapping.path] = fileId;
+            baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
+            if (mapping.contentKind !== "binary" && mapping.content !== void 0 && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
+          }
+        }
+        await this.mutate({ ...state, pathOwners, baseHashes, baseContents });
+        return;
+      }
+      const ids = new Set(record2.discardRevisionIds);
+      if (this.hasUncoveredChildren(state, ids)) throw new Error("Recovery would orphan pending work.");
+      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
+      const undo = record2.applyState;
+      await this.mutate({
+        ...state,
+        ...undo === void 0 ? {} : {
+          pathOwners: { ...Object.fromEntries(Object.entries(state.pathOwners).filter(([, fileId]) => !record2.fileIds.includes(fileId))), ...undo.pathOwners },
+          baseHashes: { ...Object.fromEntries(Object.entries(state.baseHashes).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseHashes },
+          baseContents: { ...Object.fromEntries(Object.entries(state.baseContents).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseContents }
+        },
+        outbox: state.outbox.filter((e) => !ids.has(e.revisionId)),
+        ...originals.length === 0 ? {} : { reconciliationBackups: {
+          ...state.reconciliationBackups,
+          [id]: [...state.reconciliationBackups?.[id] ?? [], ...originals.map((e) => ({ ...e, payloadExternalized: false }))]
+        } }
+      });
+    });
+  }
+  async completeProducerRecovery(id) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({ ...state, producerRecovery: (state.producerRecovery ?? []).filter((r) => r.id !== id) });
+    });
+  }
+  async enqueueAutomaticMerge(envelope) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const record2 = state.producerRecovery?.find((r) => r.kind === "apply" && r.fileIds.includes(envelope.fileId));
+      if (record2 === void 0) throw new Error("Automatic merge requires a durable apply transaction.");
+      await this.mutate({
+        ...state,
+        outbox: [...state.outbox, { ...envelope, enqueuedAt: this.now() }],
+        producerRecovery: state.producerRecovery?.map((r) => r.id === record2.id ? { ...r, discardRevisionIds: [...r.discardRevisionIds, envelope.revisionId] } : r) ?? []
+      });
+    });
+  }
+  async loadCursor() {
+    return (await this.ensureLoaded()).cursor;
+  }
+  async saveCursor(sequence) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({ ...state, cursor: sequence });
+    });
+  }
+  async listOutbox() {
+    const state = await this.ensureLoaded();
+    return state.outbox.map((envelope) => {
+      const parentRevisionIds = parentIdsFromHeader(envelope.header);
+      return {
+        revisionId: envelope.revisionId,
+        fileId: envelope.fileId,
+        contentHash: envelope.contentHash,
+        payloadBytes: base64ByteLength(envelope.payloadBase64),
+        // Omitted when empty, so a root create carries no dependency.
+        ...parentRevisionIds.length > 0 ? { parentRevisionIds } : {}
+      };
+    });
+  }
+  /**
+   * Two peers can independently publish byte-identical merges of the same heads.
+   * The server accepts one and rejects the other with HEAD_SET_CHANGED. After
+   * applying the accepted merge, discard only a redundant leaf in our queue.
+   * Never claim the rejected ID was accepted, and never orphan a queued child.
+   */
+  async retireEquivalentMerges(event) {
+    const remoteParents = event.revision.parentRevisionIds ?? [];
+    if (remoteParents.length < 2) return;
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const dependentParents = new Set([...state.outbox, ...Object.values(state.quarantinedEnvelopes)].flatMap((entry) => parentIdsFromHeader(entry.header)));
+      const retired = state.outbox.filter((entry) => {
+        const parents = parentIdsFromHeader(entry.header);
+        return entry.fileId === event.revision.fileId && entry.contentHash === event.revision.contentHash && parents.length >= 2 && parents.every((id) => remoteParents.includes(id)) && !dependentParents.has(entry.revisionId);
+      });
+      if (retired.length === 0) return;
+      const ids = new Set(retired.map((entry) => entry.revisionId));
+      await this.mutate({
+        ...state,
+        outbox: state.outbox.filter((entry) => !ids.has(entry.revisionId)),
+        reconciliationBackups: {
+          ...state.reconciliationBackups,
+          [event.revision.revisionId]: [
+            ...state.reconciliationBackups?.[event.revision.revisionId] ?? [],
+            ...retired.map((entry) => ({ ...entry, payloadExternalized: false }))
+          ]
+        }
+      });
+    });
+  }
+  async recordPushReceipt(receipt) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const outbox = state.outbox.filter(
+        (envelope) => envelope.revisionId !== receipt.revisionId
+      );
+      await this.mutate({
+        ...state,
+        outbox,
+        locallyAuthored: this.rememberAuthored(
+          state.locallyAuthored,
+          receipt.revisionId
+        )
+      });
+      await this.dropPayload(receipt.revisionId);
+    });
+  }
+  async quarantineOutboxItem(revisionId, reason) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const failed = state.outbox.find(
+        (envelope) => envelope.revisionId === revisionId
+      );
+      const outbox = state.outbox.filter(
+        (envelope) => envelope.revisionId !== revisionId
+      );
+      const entry = {
+        revisionId,
+        fileId: failed?.fileId ?? "",
+        reason,
+        ...failed === void 0 ? {} : { parentRevisionIds: parentIdsFromHeader(failed.header) }
+      };
+      const quarantine = [
+        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
+        entry
+      ];
+      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
+      if (failed !== void 0) {
+        quarantinedEnvelopes[revisionId] = failed;
+      }
+      const budgeted = this.evictStashesOverBudget(quarantinedEnvelopes);
+      for (const evictedId of Object.keys(quarantinedEnvelopes)) {
+        if (!(evictedId in budgeted)) {
+          await this.dropPayload(evictedId);
+        }
+      }
+      await this.mutate({
+        ...state,
+        outbox,
+        quarantine,
+        quarantinedEnvelopes: budgeted
+      });
+    });
+  }
+  /**
+   * A copy of `envelopes` trimmed to the byte budget (MAJOR 4) by evicting the
+   * OLDEST first (key order is insertion order); one larger than the whole budget
+   * goes too, and its row survives with Retry re-committing from disk.
+   */
+  evictStashesOverBudget(envelopes) {
+    const entries = Object.entries(envelopes);
+    let total = entries.reduce(
+      (sum, [, env]) => sum + base64ByteLength(env.payloadBase64),
+      0
+    );
+    if (total <= this.envelopeBudgetBytes) return envelopes;
+    const trimmed = { ...envelopes };
+    for (const [key, env] of entries) {
+      if (total <= this.envelopeBudgetBytes) break;
+      total -= base64ByteLength(env.payloadBase64);
+      delete trimmed[key];
+    }
+    return trimmed;
+  }
+  /**
+   * Record a durable "failed to queue" entry (SND-02): a local change whose
+   * commit-path enqueue permanently failed, so it has no envelope to retry. It
+   * reuses the SND-01 quarantine, keyed by a path-derived synthetic revisionId
+   * (see {@link failedToQueueRevisionId}) so repeats coalesce into one row. Retry
+   * differs from a rejected send: with no stashed envelope `requeueQuarantined`
+   * is inert, so the caller re-triggers the commit from disk (MAJOR 2, see
+   * {@link parseFailedToQueuePath}); disk is the truth.
+   */
+  async recordFailedToQueue(path) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const revisionId = failedToQueueRevisionId(path);
+      const entry = {
+        revisionId,
+        fileId: path,
+        reason: "failed-to-queue"
+      };
+      const quarantine = [
+        ...state.quarantine.filter((item) => item.revisionId !== revisionId),
+        entry
+      ];
+      await this.mutate({ ...state, quarantine });
+    });
+  }
+  /**
+   * The parents of a quarantined revision, or undefined when `revisionId` is
+   * not quarantined or its parents were never recorded (a legacy row whose
+   * stash was evicted). The producer walks past a quarantined head with this.
+   */
+  async quarantinedParents(revisionId) {
+    const state = await this.ensureLoaded();
+    const row = state.quarantine.find((item) => item.revisionId === revisionId);
+    if (row === void 0) return void 0;
+    if (row.parentRevisionIds !== void 0) return row.parentRevisionIds;
+    const stashed = state.quarantinedEnvelopes[revisionId];
+    return stashed === void 0 ? void 0 : parentIdsFromHeader(stashed.header);
+  }
+  /** Includes unsent authored revisions: tells local work from a history replay. */
+  async hasAuthoredRevision(revisionId) {
+    const state = await this.ensureLoaded();
+    return state.locallyAuthored.includes(revisionId) || state.outbox.some((entry) => entry.revisionId === revisionId);
+  }
+  async isLocallyAuthored(revisionId) {
+    const state = await this.ensureLoaded();
+    return state.locallyAuthored.includes(revisionId);
+  }
+  /**
+   * The fileId that owns `path`, or null. Lets the vault adapter update synced
+   * files in place and route a foreign file at the path to a conflict.
+   */
+  fileIdAtPath(path) {
+    return this.cache?.pathOwners[path] ?? null;
+  }
+  /**
+   * Records an applied revision: `fileId` owns `path`, with base `hash` and,
+   * for markdown, base `content`. One write instead of three (P1), and never a
+   * half-recorded base after a crash between them.
+   */
+  async recordApplied(fileId, path, hash2, content) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        pathOwners: { ...state.pathOwners, [path]: fileId },
+        baseHashes: { ...state.baseHashes, [fileId]: hash2 },
+        ...content === null ? {} : { baseContents: { ...state.baseContents, [fileId]: content } }
+      });
+    });
+  }
+  async recordPathOwner(fileId, path) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        pathOwners: { ...state.pathOwners, [path]: fileId }
+      });
+    });
+  }
+  async forgetPath(path) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(path in state.pathOwners)) return;
+      const pathOwners = { ...state.pathOwners };
+      delete pathOwners[path];
+      await this.mutate({ ...state, pathOwners });
+    });
+  }
+  baseHashFor(fileId) {
+    return this.cache?.baseHashes[fileId] ?? null;
+  }
+  async recordBaseHash(fileId, hash2) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        baseHashes: { ...state.baseHashes, [fileId]: hash2 }
+      });
+    });
+  }
+  async forgetBaseHash(fileId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(fileId in state.baseHashes)) return;
+      const baseHashes = { ...state.baseHashes };
+      delete baseHashes[fileId];
+      await this.mutate({ ...state, baseHashes });
+    });
+  }
+  baseContentFor(fileId) {
+    return this.cache?.baseContents[fileId] ?? null;
+  }
+  async recordBaseContent(fileId, content) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        baseContents: { ...state.baseContents, [fileId]: content }
+      });
+    });
+  }
+  async forgetBaseContent(fileId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!(fileId in state.baseContents)) return;
+      const baseContents = { ...state.baseContents };
+      delete baseContents[fileId];
+      await this.mutate({ ...state, baseContents });
+    });
+  }
+  conflictArtifactPathFor(revisionId) {
+    return this.cache?.conflictArtifacts[revisionId] ?? null;
+  }
+  async recordConflictArtifactPath(revisionId, path, fileId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        conflictArtifacts: { ...state.conflictArtifacts, [revisionId]: path },
+        ...fileId === void 0 ? {} : {
+          conflictCopyFileIds: {
+            ...state.conflictCopyFileIds,
+            [path]: fileId
+          }
+        }
+      });
+    });
+  }
+  revisionForConflictCopy(path) {
+    for (const [revisionId, copyPath] of Object.entries(this.cache?.conflictArtifacts ?? {})) {
+      if (copyPath === path) return revisionId;
+    }
+    return null;
+  }
+  fileIdForConflictCopy(path) {
+    return this.cache?.conflictCopyFileIds?.[path] ?? null;
+  }
+  async enqueue(envelope) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const stamped = envelope.enqueuedAt === void 0 ? { ...envelope, enqueuedAt: this.now() } : envelope;
+      if (await this.safePutPayload(stamped.revisionId, stamped.payloadBase64)) {
+        this.externalized.add(stamped.revisionId);
+      } else {
+        this.externalized.delete(stamped.revisionId);
+      }
+      const outbox = [
+        ...state.outbox.filter(
+          (entry) => entry.revisionId !== envelope.revisionId
+        ),
+        stamped
+      ];
+      await this.mutate({ ...state, outbox });
+    });
+  }
+  /** Outbox items with enqueue time (SND-01); a missing one reads as 0, "very old". */
+  outboxAges() {
+    return (this.cache?.outbox ?? []).map((envelope) => ({
+      revisionId: envelope.revisionId,
+      enqueuedAt: envelope.enqueuedAt ?? 0
+    }));
+  }
+  quarantineSnapshot() {
+    return this.cache?.quarantine ?? [];
+  }
+  pathForFileId(fileId) {
+    const owners = this.cache?.pathOwners ?? {};
+    for (const [path, owner] of Object.entries(owners)) {
+      if (owner === fileId) return path;
+    }
+    return null;
+  }
+  /**
+   * Retry a quarantined send (SND-01): re-enqueue its stashed envelope. False
+   * when nothing is stashed (already requeued or discarded, or evicted under the
+   * budget, MAJOR 4): the row stays so the caller can re-commit from disk, and a
+   * double click cannot double-enqueue.
+   */
+  async requeueQuarantined(revisionId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const stashed = state.quarantinedEnvelopes[revisionId];
+      if (stashed === void 0) return false;
+      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
+      delete quarantinedEnvelopes[revisionId];
+      const outbox = [
+        ...state.outbox.filter((entry) => entry.revisionId !== revisionId),
+        { ...stashed, enqueuedAt: this.now() }
+      ];
+      const quarantine = state.quarantine.filter(
+        (item) => item.revisionId !== revisionId
+      );
+      await this.mutate({ ...state, outbox, quarantine, quarantinedEnvelopes });
+      return true;
+    });
+  }
+  /** Permanently drop a quarantined send (SND-01) and its stash. Idempotent. */
+  async discardQuarantined(revisionId) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      if (!state.quarantine.some((item) => item.revisionId === revisionId) && state.quarantinedEnvelopes[revisionId] === void 0) {
+        return;
+      }
+      const quarantinedEnvelopes = { ...state.quarantinedEnvelopes };
+      delete quarantinedEnvelopes[revisionId];
+      const quarantine = state.quarantine.filter(
+        (item) => item.revisionId !== revisionId
+      );
+      await this.mutate({ ...state, quarantine, quarantinedEnvelopes });
+      await this.dropPayload(revisionId);
+    });
+  }
+  async getEnvelope(revisionId) {
+    await this.ensureLoaded();
+    return this.peekEnvelope(revisionId);
+  }
+  peekEnvelope(revisionId) {
+    const found = this.cache?.outbox.find(
+      (envelope) => envelope.revisionId === revisionId
+    );
+    if (found === void 0) return void 0;
+    return {
+      header: found.header,
+      idempotencyKey: found.idempotencyKey,
+      payloadBase64: found.payloadBase64
+    };
+  }
+  /**
+   * Incoming changes this device could not apply, set aside so the rest of the
+   * vault keeps syncing (B2). Persisted in the `deferred` field; the failure
+   * reason is kept for this session only.
+   */
+  async listParkedRemote() {
+    return (await this.ensureLoaded()).deferred;
+  }
+  async parkRemote(event, reason) {
+    this.parkReasons.set(event.revision.revisionId, reason);
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const others = state.deferred.filter(
+        (item) => item.revision.revisionId !== event.revision.revisionId
+      );
+      await this.mutate({ ...state, deferred: [...others, event] });
+    });
+  }
+  async unparkRemote(revisionId) {
+    this.parkReasons.delete(revisionId);
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({
+        ...state,
+        deferred: state.deferred.filter((item) => item.revision.revisionId !== revisionId)
+      });
+    });
+  }
+  parkedSnapshot() {
+    return (this.cache?.deferred ?? []).map((event) => ({
+      revisionId: event.revision.revisionId,
+      fileId: event.revision.fileId,
+      reason: this.parkReasons.get(event.revision.revisionId) ?? "This device could not apply this change."
+    }));
+  }
+  rememberAuthored(existing, revisionId) {
+    if (existing.includes(revisionId)) return existing;
+    const next = [...existing, revisionId];
+    return next.length > this.maxLocallyAuthored ? next.slice(next.length - this.maxLocallyAuthored) : next;
+  }
+  async ensureLoaded() {
+    if (this.cache !== null && this.loadPromise === null) return this.cache;
+    if (this.loadPromise === null) {
+      this.loadPromise = this.persist.load().then((raw) => this.hydrate(raw)).then((clean) => this.reconcilePayloads(clean)).finally(() => {
+        this.loadPromise = null;
+      });
+    }
+    await this.loadPromise;
+    if (this.cache === null) this.cache = emptyState();
+    return this.cache;
+  }
+  /**
+   * Parse the loaded primary blob into the cache (GAP-1 fail-closed policy).
+   * Never clobber a cache that a mutation populated while the load was in
+   * flight: re-check `this.cache === null` before each assignment.
+   *  - ABSENT: a clean first run, empty writable state.
+   *  - OK: the parsed state (bad outbox envelopes quarantined, not nuked).
+   *  - CORRUPT (a core field failed): recover from a valid `.bak`; without one,
+   *    SALVAGE a readable outbox (keep the queue and authored ids, default the
+   *    damaged fields, write the CLEANED state back, no recovery flag) or, when
+   *    the queue itself is unreadable (UNRECOVERABLE), resume empty and set the
+   *    recovery signal. Either way the raw blob goes to a sidecar and the
+   *    primary is rewritten, so a restart never re-locks.
+   * Returns true when the primary loaded as saved, so stored payloads it does not
+   * refer to are orphans, not evidence for the preserved copy.
+   */
+  async hydrate(raw) {
+    if (this.cache !== null) return false;
+    if (isRecord(raw) && !validRecoveryFields(raw)) {
+      await this.persist.preserveCorrupt(raw, this.now());
+      throw new Error("Invalid producer recovery journal; sync is paused with original state preserved.");
+    }
+    const outcome = parsePersistedState(raw);
+    if (outcome.status !== "corrupt") {
+      if (this.cache === null) this.cache = this.trimmed(outcome.state);
+      return true;
+    }
+    if (isRecord(raw) && (raw.producerRecovery !== void 0 || raw.reconciliationBackups !== void 0)) {
+      await this.persist.preserveCorrupt(raw, this.now());
+      throw new Error("Corrupt sync state includes recovery data; original state preserved.");
+    }
+    const backup = await this.persist.loadBackup();
+    if (this.cache !== null) return false;
+    const backupOutcome = parsePersistedState(backup);
+    if (backupOutcome.status === "ok") {
+      await this.persist.preserveCorrupt(raw, this.now());
+      if (this.cache === null) {
+        this.cache = this.trimmed(backupOutcome.state);
+        if (salvageHasOutboxEntriesMissingFrom(outcome.salvage, backupOutcome.state.outbox)) {
+          this.recoveryRequired = true;
+        }
+      }
+      return false;
+    }
+    await this.persist.preserveCorrupt(raw, this.now());
+    if (this.cache !== null) return false;
+    if (outcome.salvage !== null) {
+      this.cache = this.trimmed(outcome.salvage);
+    } else {
+      this.cache = emptyState();
+      if (outcome.outboxAtRisk) this.recoveryRequired = true;
+    }
+    await this.persist.save(this.toDiskForm(this.cache));
+    return false;
+  }
+  async mutate(next) {
+    const kept = this.trimmed(next);
+    await this.persist.save(this.toDiskForm(kept));
+    this.cache = kept;
+  }
+  /**
+   * Arch P1: the on-disk projection of `state`. Envelopes whose `revisionId` is in
+   * {@link externalized} (the store holds their bytes) become `payloadBase64: ''`
+   * plus `payloadExternalized: true`; all others stay inline. Returns `state`
+   * itself when nothing is externalized.
+   */
+  toDiskForm(state) {
+    if (this.externalized.size === 0) return state;
+    const strip = (env) => this.externalized.has(env.revisionId) ? { ...env, payloadBase64: "", payloadExternalized: true } : env;
+    const quarantinedEnvelopes = {};
+    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
+      quarantinedEnvelopes[key] = strip(env);
+    }
+    return {
+      ...state,
+      outbox: state.outbox.map(strip),
+      quarantinedEnvelopes
+    };
+  }
+  /** Fallible payload-store read: undefined on absence OR any store failure. */
+  async safeGetPayload(revisionId) {
+    if (this.payloadStore === void 0) return void 0;
+    try {
+      return await this.payloadStore.getPayload(revisionId);
+    } catch {
+      return void 0;
+    }
+  }
+  /**
+   * Fallible payload-store write: true when the bytes are durably in the store
+   * (so the caller marks the id externalized), false when there is no store or
+   * the write threw (keep the payload inline: the mobile fallback).
+   */
+  async safePutPayload(revisionId, payloadBase64) {
+    if (this.payloadStore === void 0) return false;
+    try {
+      await this.payloadStore.putPayload(revisionId, payloadBase64);
+      return true;
+    } catch {
+      console.warn(
+        `Havemind: outbox payload for ${revisionId} could not be externalized; keeping it inline in data.json.`
+      );
+      return false;
+    }
+  }
+  /**
+   * Drop a revision's externalized payload when it leaves BOTH the outbox and the
+   * stash for good (receipt, discard, eviction); a no-op for an inline payload.
+   * Best-effort: a failed delete only leaks bytes, so it is swallowed.
+   */
+  async dropPayload(revisionId) {
+    if (!this.externalized.has(revisionId)) return;
+    if (this.payloadStore !== void 0) {
+      try {
+        await this.payloadStore.deletePayload(revisionId);
+      } catch {
+      }
+    }
+    this.externalized.delete(revisionId);
+  }
+  /**
+   * Reconcile outbox/stash payloads with the out-of-band store after load (arch
+   * P1). EXTERNALIZED envelopes: fetch and rehydrate the cache so `peekEnvelope`
+   * drains the real payload; if it is missing, fail closed: an OUTBOX payload is
+   * quarantined (never drained empty), a STASH payload is dropped (its row
+   * already records the failure). INLINE ones (legacy or fallback) are MIGRATED
+   * into the store, and a changed state is persisted at once.
+   */
+  async reconcilePayloads(sweep) {
+    const state = this.cache;
+    if (state === null) return;
+    let cacheChanged = false;
+    let persistNeeded = false;
+    const nextOutbox = [];
+    const addedQuarantine = [];
+    for (const env of state.outbox) {
+      if (env.payloadExternalized === true) {
+        const payload = await this.safeGetPayload(env.revisionId);
+        if (typeof payload === "string") {
+          this.externalized.add(env.revisionId);
+          nextOutbox.push({ ...env, payloadBase64: payload });
+          cacheChanged = true;
+        } else {
+          console.warn(
+            `Havemind: outbox payload for ${env.revisionId} is missing from the store; quarantining it (fail-closed).`
+          );
+          addedQuarantine.push({
+            revisionId: env.revisionId,
+            fileId: env.fileId,
+            reason: PAYLOAD_MISSING_REASON
+          });
+          cacheChanged = true;
+          persistNeeded = true;
+        }
+      } else {
+        nextOutbox.push(env);
+        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+          this.externalized.add(env.revisionId);
+          persistNeeded = true;
+        }
+      }
+    }
+    const nextStash = {};
+    for (const [key, env] of Object.entries(state.quarantinedEnvelopes)) {
+      if (env.payloadExternalized === true) {
+        const payload = await this.safeGetPayload(env.revisionId);
+        if (typeof payload === "string") {
+          this.externalized.add(env.revisionId);
+          nextStash[key] = { ...env, payloadBase64: payload };
+          cacheChanged = true;
+        } else {
+          persistNeeded = true;
+        }
+      } else {
+        nextStash[key] = env;
+        if (await this.safePutPayload(env.revisionId, env.payloadBase64)) {
+          this.externalized.add(env.revisionId);
+          persistNeeded = true;
+        }
+      }
+    }
+    const next = {
+      ...state,
+      outbox: nextOutbox,
+      quarantine: [...state.quarantine, ...addedQuarantine],
+      quarantinedEnvelopes: nextStash
+    };
+    if (sweep) await this.sweepPayloads(next);
+    if (!cacheChanged && !persistNeeded) return;
+    this.cache = next;
+    if (persistNeeded) {
+      await this.persist.save(this.toDiskForm(next));
+    }
+  }
+  /**
+   * S1: deletes stored payloads no queued, stashed or quarantined change refers
+   * to. They are left by a stop between storing a payload and saving the queue,
+   * by a failed delete, and by entries moved into a reconciliation backup, which
+   * keeps its bytes inline. Best-effort: a failure leaves them for the next load.
+   */
+  async sweepPayloads(state) {
+    if (this.payloadStore === void 0) return;
+    const live = /* @__PURE__ */ new Set([
+      ...state.outbox.map((envelope) => envelope.revisionId),
+      ...Object.values(state.quarantinedEnvelopes).map((envelope) => envelope.revisionId),
+      ...state.quarantine.map((row) => row.revisionId)
+    ]);
+    try {
+      for (const revisionId of await this.payloadStore.listPayloadIds()) {
+        if (!live.has(revisionId)) await this.payloadStore.deletePayload(revisionId);
+      }
+    } catch {
+    }
+  }
+  /**
+   * Runs a read-modify-write `section` atomically w.r.t. every other section, by
+   * chaining them on {@link mutationTail}. Sections never nest (no mutating
+   * method calls another), so it cannot deadlock; the tail swallows outcomes so
+   * one rejection never wedges the next.
+   */
+  runExclusive(section) {
+    const run = this.mutationTail.then(section, section);
+    this.mutationTail = run.then(
+      () => void 0,
+      () => void 0
+    );
+    return run;
+  }
+};
+var CORRUPT_ENVELOPE_PREFIX = "corrupt-envelope:";
+function parseOutboxEntries(outbox) {
+  const parsedOutbox = [];
+  const quarantinedBadEnvelopes = [];
+  outbox.forEach((entry, index) => {
+    const parsed = parseEnvelope(entry);
+    if (parsed === null) {
+      quarantinedBadEnvelopes.push(quarantineForCorruptEnvelope(entry, index));
+    } else {
+      parsedOutbox.push(parsed);
+    }
+  });
+  if (quarantinedBadEnvelopes.length > 0) {
+    console.warn(
+      `Havemind: ${quarantinedBadEnvelopes.length} unparseable outbox envelope(s) were quarantined; the rest of the outbox was preserved.`
+    );
+  }
+  return { parsedOutbox, quarantinedBadEnvelopes };
+}
+function parsePersistedState(raw) {
+  if (raw === null || raw === void 0) {
+    return { status: "absent", state: emptyState(), salvage: null, outboxAtRisk: false };
+  }
+  const strict = strictParse(raw);
+  if (strict !== null) {
+    return { status: "ok", state: strict, salvage: null, outboxAtRisk: false };
+  }
+  return {
+    status: "corrupt",
+    state: emptyState(),
+    salvage: salvageState(raw),
+    outboxAtRisk: outboxAtRisk(raw)
+  };
+}
+function validRecoveryFields(raw) {
+  if (raw.producerRecovery !== void 0 && (!Array.isArray(raw.producerRecovery) || !raw.producerRecovery.every(validRecovery))) return false;
+  if (raw.reconciliationBackups !== void 0) {
+    if (!isRecord(raw.reconciliationBackups)) return false;
+    if (!Object.values(raw.reconciliationBackups).every((entries) => Array.isArray(entries) && entries.every((entry) => parseEnvelope(entry) !== null && isRecord(entry) && entry.payloadExternalized !== true))) return false;
+  }
+  return true;
+}
+function strictParse(raw) {
+  if (isRecord(raw) && !validRecoveryFields(raw)) return null;
+  if (!isRecord(raw) || raw.version !== 1) return null;
+  const cursor = raw.cursor;
+  const outbox = raw.outbox;
+  const locallyAuthored = raw.locallyAuthored;
+  const deferred = raw.deferred;
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || !Array.isArray(outbox) || !Array.isArray(locallyAuthored) || !Array.isArray(deferred)) {
+    return null;
+  }
+  if (!locallyAuthored.every((value) => typeof value === "string")) {
+    return null;
+  }
+  const parsedDeferred = [];
+  for (const entry of deferred) {
+    const parsed = parseRemoteEvent(entry);
+    if (parsed === null) return null;
+    parsedDeferred.push(parsed);
+  }
+  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(outbox);
+  const pathOwners = parseStringMap(raw.pathOwners) ?? warnDegrade("pathOwners", {});
+  const baseHashes = parseStringMap(raw.baseHashes) ?? warnDegrade("baseHashes", {});
+  const baseContents = parseStringMap(raw.baseContents) ?? warnDegrade("baseContents", {});
+  const conflictArtifacts = parseStringMap(raw.conflictArtifacts) ?? warnDegrade("conflictArtifacts", {});
+  const quarantine = parseQuarantine(raw.quarantine) ?? warnDegrade("quarantine", []);
+  const quarantinedEnvelopes = parseEnvelopeMap(raw.quarantinedEnvelopes) ?? warnDegrade("quarantinedEnvelopes", {});
+  return {
+    version: 1,
+    cursor,
+    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
+    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
+    outbox: parsedOutbox,
+    locallyAuthored,
+    deferred: parsedDeferred,
+    // Merge the corrupt-envelope rows in so nothing is silently dropped.
+    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
+    pathOwners,
+    baseHashes,
+    baseContents,
+    conflictArtifacts,
+    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
+    quarantinedEnvelopes
+  };
+}
+function optionalConflictCopyFileIds(value) {
+  if (value === void 0) return {};
+  const parsed = parseStringMap(value);
+  return parsed === null ? {} : { conflictCopyFileIds: parsed };
+}
+function salvageState(raw) {
+  if (!isRecord(raw) || !Array.isArray(raw.outbox)) return null;
+  const { parsedOutbox, quarantinedBadEnvelopes } = parseOutboxEntries(raw.outbox);
+  const cursor = Number.isSafeInteger(raw.cursor) && raw.cursor >= 0 ? raw.cursor : 0;
+  const locallyAuthored = Array.isArray(raw.locallyAuthored) && raw.locallyAuthored.every((value) => typeof value === "string") ? raw.locallyAuthored : [];
+  const quarantine = parseQuarantine(raw.quarantine) ?? [];
+  return {
+    version: 1,
+    cursor,
+    ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
+    ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
+    outbox: parsedOutbox,
+    locallyAuthored,
+    deferred: salvageDeferred(raw.deferred),
+    quarantine: [...quarantine, ...quarantinedBadEnvelopes],
+    pathOwners: parseStringMap(raw.pathOwners) ?? {},
+    baseHashes: parseStringMap(raw.baseHashes) ?? {},
+    baseContents: parseStringMap(raw.baseContents) ?? {},
+    conflictArtifacts: parseStringMap(raw.conflictArtifacts) ?? {},
+    ...optionalConflictCopyFileIds(raw.conflictCopyFileIds),
+    quarantinedEnvelopes: parseEnvelopeMap(raw.quarantinedEnvelopes) ?? {}
+  };
+}
+function salvageDeferred(value) {
+  if (!Array.isArray(value)) return [];
+  const result = [];
+  for (const entry of value) {
+    const parsed = parseRemoteEvent(entry);
+    if (parsed === null) return [];
+    result.push(parsed);
+  }
+  return result;
+}
+function outboxAtRisk(raw) {
+  if (!isRecord(raw)) return false;
+  const outbox = raw.outbox;
+  if (outbox === void 0 || Array.isArray(outbox)) return false;
+  return true;
+}
+function salvageHasOutboxEntriesMissingFrom(salvage, backupOutbox) {
+  if (salvage === null || salvage.outbox.length === 0) return false;
+  const backupIds = new Set(backupOutbox.map((entry) => entry.revisionId));
+  return salvage.outbox.some((entry) => !backupIds.has(entry.revisionId));
+}
+function quarantineForCorruptEnvelope(entry, index) {
+  const revisionId = isRecord(entry) && typeof entry.revisionId === "string" ? entry.revisionId : `${CORRUPT_ENVELOPE_PREFIX}${index}`;
+  const fileId = isRecord(entry) && typeof entry.fileId === "string" ? entry.fileId : "";
+  return { revisionId, fileId, reason: "corrupt-envelope" };
+}
+function warnDegrade(field, fallback) {
+  console.warn(
+    `Havemind: persisted "${field}" was malformed and was reset to its default; other sync state was preserved.`
+  );
+  return fallback;
+}
+function parseEnvelopeMap(value) {
+  if (value === void 0) return {};
+  if (!isRecord(value)) return null;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const parsed = parseEnvelope(entry);
+    if (parsed === null) return null;
+    result[key] = parsed;
+  }
+  return result;
+}
+function parseQuarantine(value) {
+  if (value === void 0) return [];
+  if (!Array.isArray(value)) return null;
+  const result = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.revisionId !== "string" || typeof entry.fileId !== "string" || typeof entry.reason !== "string") {
+      return null;
+    }
+    const parents = entry.parentRevisionIds;
+    result.push({
+      revisionId: entry.revisionId,
+      fileId: entry.fileId,
+      reason: entry.reason,
+      ...Array.isArray(parents) && parents.every((id) => typeof id === "string") ? { parentRevisionIds: parents } : {}
+    });
+  }
+  return result;
+}
+function parseStringMap(value) {
+  if (value === void 0) return {};
+  if (!isRecord(value)) return null;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string") return null;
+    result[key] = entry;
+  }
+  return result;
+}
+function parseEnvelope(value) {
+  if (!isRecord(value)) return null;
+  if (typeof value.operationId !== "string" || typeof value.revisionId !== "string" || typeof value.fileId !== "string" || typeof value.contentHash !== "string" || typeof value.idempotencyKey !== "string" || typeof value.payloadBase64 !== "string") {
+    return null;
+  }
+  return {
+    operationId: value.operationId,
+    revisionId: value.revisionId,
+    fileId: value.fileId,
+    contentHash: value.contentHash,
+    idempotencyKey: value.idempotencyKey,
+    payloadBase64: value.payloadBase64,
+    header: value.header,
+    // Keep the enqueue time across a restart (SND-01); a non-number reads as
+    // unstamped, i.e. old (see `outboxAges`).
+    ...typeof value.enqueuedAt === "number" ? { enqueuedAt: value.enqueuedAt } : {},
+    // Arch P1: carry the externalized marker so load-time reconciliation knows
+    // to rehydrate the payload from the store (an empty inline `payloadBase64` is
+    // otherwise indistinguishable from a genuinely 0-byte payload).
+    ...value.payloadExternalized === true ? { payloadExternalized: true } : {}
+  };
+}
+function parseRemoteEvent(value) {
+  if (!isRecord(value) || !Number.isSafeInteger(value.serverSequence)) {
+    return null;
+  }
+  const revision = value.revision;
+  if (!isRecord(revision) || typeof revision.revisionId !== "string" || typeof revision.fileId !== "string" || typeof revision.contentHash !== "string") {
+    return null;
+  }
+  return {
+    serverSequence: value.serverSequence,
+    revision: {
+      revisionId: revision.revisionId,
+      fileId: revision.fileId,
+      contentHash: revision.contentHash
+    }
+  };
+}
+
 // src/runtime/adapters/push-producer.ts
 function toActivityKind(kind) {
   return kind === "update" ? "edit" : kind;
 }
-function startPushProducer(plugin, state, identity, triggerSync, producerRef, hooks, fileApplyLock, initializeIdentities) {
+function startPushProducer(plugin, wiring) {
+  const { state, identity, triggerSync, producerRef, hooks, fileApplyLock, initializeIdentities } = wiring;
   const vault = plugin.app.vault;
   const store = {
     async load() {
@@ -22352,6 +21737,17 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
       });
       const config2 = await listSyncableConfigPaths(vault.adapter, CONFIG_DIR);
       return [...notes, ...config2];
+    },
+    // P7: size and mtime without reading the file, so the startup scan can
+    // skip files that have not changed since it last read them. A stat that
+    // fails only means the file is read.
+    async stat(path) {
+      try {
+        const stat = await vault.adapter.stat(path);
+        return stat === null || stat.type !== "file" ? null : { mtime: stat.mtime, size: stat.size };
+      } catch {
+        return null;
+      }
     },
     async readText(path) {
       if (isSyncableConfigPath(path)) {
@@ -22592,6 +21988,21 @@ function startPushProducer(plugin, state, identity, triggerSync, producerRef, ho
   };
 }
 
+// src/runtime/last-edited.ts
+function newestAuthor(heads) {
+  let newest = null;
+  for (const head of heads) {
+    if (newest === null || head.serverSequence > newest.serverSequence) newest = head;
+  }
+  return newest?.revision.authorMembershipId ?? null;
+}
+function lastEditedLabel(membershipId, roster) {
+  if (membershipId === null) return "";
+  const member = roster.find((entry) => entry.membershipId === membershipId);
+  if (member === void 0) return "Last edited by another member";
+  return `Last edited by ${member.self ? "you" : member.displayName}`;
+}
+
 // src/runtime/adapters/sync-controller.ts
 var import_obsidian5 = require("obsidian");
 
@@ -22623,22 +22034,6 @@ var DEFAULT_BASE_BACKOFF_MS = 5e3;
 var DEFAULT_MAX_BACKOFF_MS = 6e4;
 var DEFAULT_MAX_PUSH_BATCH_BYTES = 512 * 1024;
 var DEFAULT_MAX_PUSH_BATCH_ITEMS = 64;
-function decideRemoteApply(buffers, incomingContentHash) {
-  if (buffers.some((buffer) => buffer.unsaved)) return "defer";
-  const divergent = buffers.filter(
-    (buffer) => buffer.currentHash !== buffer.baseHash
-  );
-  if (divergent.length === 0) {
-    return "apply";
-  }
-  if (divergent.every((buffer) => buffer.currentHash === incomingContentHash)) {
-    return "apply";
-  }
-  if (divergent.some((buffer) => buffer.baseHash === null)) {
-    return "defer";
-  }
-  return "conflict";
-}
 var SyncRunner = class {
   constructor(options) {
     __publicField(this, "options");
@@ -22647,20 +22042,14 @@ var SyncRunner = class {
     __publicField(this, "failureCount", 0);
     __publicField(this, "cycleCounter", 0);
     __publicField(this, "stopped", false);
-    /** Cancellable retry timers still waiting to re-enter the sync loop. */
     __publicField(this, "pendingBackoffCancellations", /* @__PURE__ */ new Set());
-    /**
-     * The server head observed on the FIRST pull after this runner was built (a
-     * runner is rebuilt per connection). Every remote event at or below it belongs
-     * to the one-time initial catch-up that materialises the pre-existing vault, so
-     * its applies are flagged `bootstrap` and stay quiet in the Activity feed; an
-     * event beyond it is a live peer edit and records a normal entry. Null until the
-     * first successful pull sets it. The server returns the current head as the pull
-     * `cursor` (not a page end), so it is a stable boundary even when the catch-up
-     * spans several paged cycles.
-     */
     /** Consecutive failed applies per incoming revision, reset on success. */
     __publicField(this, "applyFailures", /* @__PURE__ */ new Map());
+    /**
+     * Server head at this runner's FIRST pull (it is rebuilt per connection):
+     * events up to it are the initial catch-up (`bootstrap`), later ones live. The
+     * pull `cursor` is the current head, so this holds across paged cycles.
+     */
     __publicField(this, "bootstrapTarget", null);
     this.options = {
       baseBackoffMs: options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS,
@@ -22672,14 +22061,9 @@ var SyncRunner = class {
     };
   }
   /**
-   * Single-flight entry point. Overlapping triggers coalesce into exactly one
-   * additional rerun rather than launching parallel cycles.
-   *
-   * A stopped runner is inert: it issues no push/pull. This is what guarantees
-   * that after a reconnect (or teardown) the previous connection's runner can
-   * never ship a stale-identity revision, its own backoff timer may still fire,
-   * but the trigger it drives is a no-op. Only the freshly-built runner, whose
-   * transport already carries the current identity, ever pushes after reconnect.
+   * Single-flight: overlapping triggers coalesce into one extra rerun. A stopped
+   * runner is inert, so an old runner's leftover backoff timer can never push
+   * under a stale identity after a reconnect.
    */
   trigger() {
     if (this.stopped) {
@@ -22691,13 +22075,7 @@ var SyncRunner = class {
     }
     return this.loop();
   }
-  /**
-   * Quiesces the runner permanently: it stops accepting triggers and cancels any
-   * pending backoff (the scheduled callback re-checks `stopped` before running).
-   * Called from the controller's `stop()` on teardown/reconnect so a prior-session
-   * runner cannot race a push onto the wire under an identity the server no longer
-   * accepts. Idempotent.
-   */
+  /** Quiesces the runner for good (no triggers, backoff cancelled); idempotent. */
   stop() {
     this.stopped = true;
     for (const cancel of this.pendingBackoffCancellations) {
@@ -22769,18 +22147,12 @@ var SyncRunner = class {
   }
   /**
    * Drains the outbox in size-bounded sub-batches and reconciles each per-item
-   * result. A permanently rejected revision is dead-lettered (quarantined) so it
-   * can never block other files or trigger an infinite retry; a transient
-   * rejection is left in the outbox to retry after the next pull. A whole-request
-   * permanent failure is isolated to a single item and quarantined; a transient
-   * transport failure is re-thrown so the cycle backs off offline as before.
+   * result: a permanent rejection is quarantined, a transient one stays queued
+   * until the next pull, a transient transport failure is re-thrown (backoff).
    *
-   * Quarantining a revision CASCADES to its outbox descendants (the revisions
-   * whose lineage transitively depends on it): a dead parent will never land, so
-   * every child would otherwise be rejected with MISSING_PARENT forever. The
-   * cascade dead-letters the whole lineage in topological order so descendants
-   * stop retrying, and the `quarantined` count reflects the full lineage so the
-   * status surface can never read a clean "synced" while a lineage is dead.
+   * Quarantine CASCADES to outbox descendants: a dead parent never lands, so its
+   * children would get MISSING_PARENT forever. The `quarantined` count covers
+   * the whole lineage so the status never reads "synced" beside a dead one.
    */
   async runPush() {
     const outbox = await this.options.state.listOutbox();
@@ -22862,11 +22234,8 @@ var SyncRunner = class {
     return { pushed, quarantined: quarantinedIds.size };
   }
   /**
-   * Whether a MISSING_PARENT child's lineage is still healthy: at least one of its
-   * parents is still pending in the outbox, was accepted earlier this cycle, or
-   * was locally authored on a prior cycle (already on the server). When true the
-   * child stays retryable (the parent will land); when false every parent is dead
-   * or absent, so the child is an orphan the runner dead-letters.
+   * Whether a MISSING_PARENT child can still land: a parent is pending, was
+   * accepted this cycle, or was authored earlier (already on the server).
    */
   async parentStillViable(revisionId, lineage, pending, accepted) {
     for (const parentId of lineage.parentsOf(revisionId)) {
@@ -22880,10 +22249,9 @@ var SyncRunner = class {
     return false;
   }
   /**
-   * Groups the outbox into sub-batches that each stay under the byte and item
-   * budgets. A single revision larger than the byte budget still occupies its
-   * own batch (it is the first item, so no split fires), isolating it so a 4xx
-   * on that one request never wedges other files.
+   * Groups the outbox into sub-batches under the byte and item budgets. An
+   * oversized revision gets its own batch (it is the first item, so no split
+   * fires), so a 4xx on it never wedges other files.
    */
   planPushBatches(outbox) {
     const maxBytes = this.options.maxPushBatchBytes;
@@ -22951,52 +22319,41 @@ var SyncRunner = class {
       const buffers = await this.options.vault.openBuffers(
         remoteEvent.revision.fileId
       );
-      const decision = decideRemoteApply(
-        buffers,
-        remoteEvent.revision.contentHash
-      );
-      if (decision === "defer") {
+      if (buffers.some((buffer) => buffer.unsaved)) {
         deferred += 1;
         break;
       }
-      if (decision === "conflict") {
-        await this.options.vault.recordConflict(remoteEvent);
+      let outcome;
+      try {
+        outcome = await this.options.vault.applyRemote(remoteEvent, {
+          bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
+        });
+      } catch (error51) {
+        const id = remoteEvent.revision.revisionId;
+        const attempts = (this.applyFailures.get(id) ?? 0) + 1;
+        if (isAuthDenied(error51) || this.options.state.parkRemote === void 0 || attempts < MAX_APPLY_ATTEMPTS) {
+          this.applyFailures.set(id, attempts);
+          throw error51;
+        }
+        this.applyFailures.delete(id);
+        await this.options.state.parkRemote(
+          remoteEvent,
+          error51 instanceof Error ? error51.message : String(error51)
+        );
+        cursor = remoteEvent.serverSequence;
+        await this.options.state.saveCursor(cursor);
+        continue;
+      }
+      this.applyFailures.delete(remoteEvent.revision.revisionId);
+      if (outcome === "deferred") {
+        deferred += 1;
+        break;
+      }
+      if (outcome === "conflict") {
         conflicts += 1;
       } else {
-        let outcome;
-        try {
-          outcome = await this.options.vault.applyRemote(remoteEvent, {
-            // At or below the connect-time head → part of the initial catch-up, so
-            // its Activity entry is suppressed (baseline). Beyond it → a live edit.
-            bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
-          });
-        } catch (error51) {
-          const id = remoteEvent.revision.revisionId;
-          const attempts = (this.applyFailures.get(id) ?? 0) + 1;
-          if (isAuthDenied(error51) || this.options.state.parkRemote === void 0 || attempts < MAX_APPLY_ATTEMPTS) {
-            this.applyFailures.set(id, attempts);
-            throw error51;
-          }
-          this.applyFailures.delete(id);
-          await this.options.state.parkRemote(
-            remoteEvent,
-            error51 instanceof Error ? error51.message : String(error51)
-          );
-          cursor = remoteEvent.serverSequence;
-          await this.options.state.saveCursor(cursor);
-          continue;
-        }
-        this.applyFailures.delete(remoteEvent.revision.revisionId);
-        if (outcome === "deferred") {
-          deferred += 1;
-          break;
-        }
-        if (outcome === "conflict") {
-          conflicts += 1;
-        } else {
-          await this.options.state.retireEquivalentMerges?.(remoteEvent);
-          applied += 1;
-        }
+        await this.options.state.retireEquivalentMerges?.(remoteEvent);
+        applied += 1;
       }
       cursor = remoteEvent.serverSequence;
       await this.options.state.saveCursor(cursor);
@@ -23263,7 +22620,7 @@ function isPermanentStatus(status) {
   return status === 400 || status === 403 || status === 413 || status === 422;
 }
 function stampCurrentIdentity(header, identity) {
-  if (identity === void 0 || !isRecord15(header)) {
+  if (identity === void 0 || !isRecord(header)) {
     return header;
   }
   return {
@@ -23349,16 +22706,16 @@ function wholeRequestCode(response) {
   } catch {
     return void 0;
   }
-  if (!isRecord15(body) || !isRecord15(body.error)) return void 0;
+  if (!isRecord(body) || !isRecord(body.error)) return void 0;
   return typeof body.error.code === "string" ? body.error.code : void 0;
 }
 function parsePushResponse(response) {
   const body = response.json;
-  if (!isRecord15(body) || !Array.isArray(body.results)) {
+  if (!isRecord(body) || !Array.isArray(body.results)) {
     throw malformed("push response missing results array");
   }
   return body.results.map((result) => {
-    if (!isRecord15(result) || typeof result.revisionId !== "string") {
+    if (!isRecord(result) || typeof result.revisionId !== "string") {
       throw malformed("push result missing revisionId");
     }
     if (result.status === "rejected") {
@@ -23372,7 +22729,7 @@ function parsePushResponse(response) {
         ...result.code === "MISSING_PARENT" ? { missingParent: true } : {}
       };
     }
-    if (!isRecord15(result.receipt)) {
+    if (!isRecord(result.receipt)) {
       throw malformed("push result missing receipt");
     }
     const receiptRevisionId = result.receipt.revisionId;
@@ -23392,11 +22749,11 @@ function parsePushResponse(response) {
 }
 function parsePullResponse(response) {
   const body = response.json;
-  if (!isRecord15(body) || !Number.isSafeInteger(body.cursor) || !Array.isArray(body.events)) {
+  if (!isRecord(body) || !Number.isSafeInteger(body.cursor) || !Array.isArray(body.events)) {
     throw malformed("pull response missing cursor or events");
   }
   const events = body.events.map((raw) => {
-    if (!isRecord15(raw) || !Number.isSafeInteger(raw.serverSequence) || typeof raw.revisionId !== "string" || typeof raw.fileId !== "string" || !isRecord15(raw.receipt) || typeof raw.receipt.blobHash !== "string") {
+    if (!isRecord(raw) || !Number.isSafeInteger(raw.serverSequence) || typeof raw.revisionId !== "string" || typeof raw.fileId !== "string" || !isRecord(raw.receipt) || typeof raw.receipt.blobHash !== "string") {
       throw malformed("pull event is malformed");
     }
     const rawParents = raw.receipt.parentRevisionIds;
@@ -23421,9 +22778,6 @@ function parsePullResponse(response) {
 }
 function malformed(detail) {
   return new RequestUrlTransportError("malformed-response", detail);
-}
-function isRecord15(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/runtime/bootstrap-identities.ts
@@ -23453,14 +22807,13 @@ async function bootstrapIdentities(options) {
     if (!path.eligible || mapped.has(path.collisionKey) || !await vault.exists(remote.path)) continue;
     blocked.add(path.collisionKey);
     if (pending.length > 0 || counts.get(head.revision.fileId) !== 1) continue;
-    let content;
+    let content = null;
     let contentHash;
     if (remote.kind === "binary") {
       if (vault.readBinary === void 0) continue;
       const bytes = await vault.readBinary(remote.path);
       contentHash = await hashBlob(bytes);
       if (remote.binaryContent == null || contentHash !== await hashBlob(remote.binaryContent)) continue;
-      content = bytesToBase642(bytes);
     } else {
       content = canonicalizeMarkdown(await vault.readText(remote.path));
       if (content !== remote.content) continue;
@@ -23468,7 +22821,7 @@ async function bootstrapIdentities(options) {
     }
     await state.recordPathOwner(head.revision.fileId, path.canonicalPath);
     await state.recordBaseHash(head.revision.fileId, contentHash);
-    if (remote.kind !== "binary") await state.recordBaseContent(head.revision.fileId, content);
+    if (content !== null) await state.recordBaseContent(head.revision.fileId, content);
     await producer.adoptRemoteMapping({
       fileId: head.revision.fileId,
       path: path.canonicalPath,
@@ -23724,7 +23077,7 @@ var WakeSubscription = class {
       throw new Error(`wake long-poll returned HTTP ${response.status}`);
     }
     const body = response.json;
-    if (!isRecord16(body) || !Number.isSafeInteger(body.cursor)) {
+    if (!isRecord(body) || !Number.isSafeInteger(body.cursor)) {
       throw new Error("wake long-poll response missing numeric cursor");
     }
     return body.cursor;
@@ -23780,14 +23133,12 @@ var WakeSubscription = class {
 function isAuthDenied2(error51) {
   return typeof error51 === "object" && error51 !== null && error51.authDenied === true;
 }
-function isRecord16(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 // src/runtime/adapters/sync-controller.ts
 var DEFAULT_INTERVAL_MS = 15 * 1e3;
 var PUSH_CONNECTED_INTERVAL_MS = 6e4;
-function buildSyncController(plugin, connection, onStatus, hooks, producerSync, fileApplyLock, getProducer, prepareProducer) {
+function buildSyncController(plugin, connection, wiring) {
+  const { onStatus, hooks, producerSync, fileApplyLock, getProducer, prepareProducer } = wiring;
   const state = new DurableSyncState({
     persist: createPersistPort(plugin),
     // Arch P1: keep large outbox payload bytes out of `data.json`. Best-effort,
@@ -23999,32 +23350,33 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
         }
       } : {}
     },
-    onStatus,
-    extras.hooks,
-    producerSync,
-    fileApplyLock,
-    () => producerRef.current,
-    async () => {
-      await producer?.initialize();
+    {
+      onStatus,
+      hooks: extras.hooks,
+      producerSync,
+      fileApplyLock,
+      getProducer: () => producerRef.current,
+      prepareProducer: async () => {
+        await producer?.initialize();
+      }
     }
   );
   if (hasPushIdentity) {
-    producer = startPushProducer(
-      plugin,
+    producer = startPushProducer(plugin, {
       state,
-      {
+      identity: {
         vaultId: connection.vaultId,
         memberId: connection.memberId,
         deviceId: connection.deviceId
       },
-      () => {
+      triggerSync: () => {
         void controller.syncNow();
       },
       producerRef,
-      extras.hooks,
+      hooks: extras.hooks,
       fileApplyLock,
-      initializeProducer
-    );
+      initializeIdentities: initializeProducer
+    });
   }
   controller.start();
   const selfMembership = connection.memberId === void 0 ? void 0 : { membershipId: connection.memberId, role: extras.role ?? "editor" };
@@ -24150,7 +23502,7 @@ async function connectAsOwner(plugin, pairingToken, serverUrl, options) {
     requestUrl: createRequestUrlFn(),
     apiBaseUrl,
     deviceLabel: OWNER_DEVICE_LABEL,
-    initialRefreshTokenHash: await sha256Hex2(refreshToken),
+    initialRefreshTokenHash: await sha256Hex(refreshToken),
     pairingToken
   });
   await secrets.saveRefreshToken(refreshToken);
@@ -24259,7 +23611,7 @@ async function approveRedeemedDevice(options) {
     throw describeFailure(response.status, response.json);
   }
   const json2 = response.json;
-  if (!isRecord17(json2) || typeof json2.deviceId !== "string" || typeof json2.membershipId !== "string" || typeof json2.userId !== "string") {
+  if (!isRecord(json2) || typeof json2.deviceId !== "string" || typeof json2.membershipId !== "string" || typeof json2.userId !== "string") {
     throw new ApproveDeviceError("The approval response was malformed.");
   }
   return {
@@ -24283,7 +23635,7 @@ async function rejectPendingDevice(options) {
   }
 }
 function describeFailure(status, json2) {
-  const error51 = isRecord17(json2) && isRecord17(json2.error) ? json2.error : void 0;
+  const error51 = isRecord(json2) && isRecord(json2.error) ? json2.error : void 0;
   const code = typeof error51?.code === "string" ? error51.code : void 0;
   const attemptsRemaining = typeof error51?.attemptsRemaining === "number" ? error51.attemptsRemaining : void 0;
   if (code === "PHRASE_MISMATCH") {
@@ -24302,9 +23654,6 @@ function describeFailure(status, json2) {
     return new ApproveDeviceError(known);
   }
   return new ApproveDeviceError(`Approval returned HTTP ${status}.`);
-}
-function isRecord17(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/runtime/create-invitation.ts
@@ -24337,7 +23686,7 @@ async function createVaultInvitation(options) {
     );
   }
   const json2 = response.json;
-  if (!isRecord18(json2) || typeof json2.invitationToken !== "string" || typeof json2.expiresAt !== "string" || typeof json2.invitationId !== "string") {
+  if (!isRecord(json2) || typeof json2.invitationToken !== "string" || typeof json2.expiresAt !== "string" || typeof json2.invitationId !== "string") {
     throw new CreateInvitationError("Invitation response was malformed.");
   }
   let envelope;
@@ -24357,9 +23706,6 @@ async function createVaultInvitation(options) {
     expiresAt: json2.expiresAt,
     invitationId: json2.invitationId
   };
-}
-function isRecord18(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/runtime/list-pending-approvals.ts
@@ -24382,14 +23728,14 @@ async function listPendingApprovals(options) {
       `Pending approvals returned HTTP ${response.status}.`
     );
   }
-  const pending = isRecord19(response.json) ? response.json.pending : void 0;
+  const pending = isRecord(response.json) ? response.json.pending : void 0;
   if (!Array.isArray(pending)) {
     throw new ListPendingApprovalsError("Pending approvals response was malformed.");
   }
   return pending.map(parsePendingApproval);
 }
 function parsePendingApproval(value) {
-  if (!isRecord19(value) || typeof value.invitationId !== "string" || typeof value.expiresAt !== "string") {
+  if (!isRecord(value) || typeof value.invitationId !== "string" || typeof value.expiresAt !== "string") {
     throw new ListPendingApprovalsError("Pending approvals response was malformed.");
   }
   if (value.intendedRole !== void 0 && value.intendedRole !== "editor" && value.intendedRole !== "owner") {
@@ -24405,9 +23751,101 @@ function parsePendingApproval(value) {
     invitationId: value.invitationId
   };
 }
-function isRecord19(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+
+// src/runtime/rejoin.ts
+var REJOIN_POLL_INTERVAL_MS = 3e4;
+var RejoinRequestError = class extends Error {
+  constructor(message, status) {
+    super(message);
+    __publicField(this, "name", "RejoinRequestError");
+    __publicField(this, "status");
+    this.status = status;
+  }
+};
+async function requestRejoinGrant(options) {
+  const token = await options.getAccessToken();
+  const response = await options.requestUrl({
+    url: `${options.apiBaseUrl}/owner/rejoin-grants`,
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    throw: false,
+    body: JSON.stringify({ membershipId: options.membershipId })
+  });
+  if (response.status < 200 || response.status >= 300) {
+    throw new RejoinRequestError(
+      `Rejoin grant request failed with HTTP ${response.status}.`,
+      response.status
+    );
+  }
+  const body = response.json;
+  const boundDeviceId = isRecord(body) && typeof body.boundDeviceId === "string" ? body.boundDeviceId : "";
+  return {
+    boundDeviceId,
+    membershipId: options.membershipId,
+    status: "waiting"
+  };
 }
+var RejoinController = class {
+  constructor(options) {
+    __publicField(this, "options");
+    __publicField(this, "state", "terminal-auth");
+    this.options = options;
+  }
+  /**
+   * Attempts a single redemption. Idempotent while in-flight: a concurrent call
+   * during `rejoining`, or a call after success, is a no-op that returns the
+   * current state rather than firing a second request.
+   */
+  async attempt() {
+    if (this.state === "rejoining" || this.state === "syncing") {
+      return this.state;
+    }
+    this.state = "rejoining";
+    const refreshToken = this.options.generateRefreshToken();
+    let response;
+    try {
+      response = await this.options.requestUrl({
+        url: `${this.options.apiBaseUrl}/auth/rejoin`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        throw: false,
+        body: JSON.stringify({
+          deviceId: this.options.deviceId,
+          initialRefreshTokenHash: this.options.hashRefreshToken(refreshToken),
+          membershipId: this.options.membershipId,
+          rejoinSecret: this.options.rejoinSecret
+        })
+      });
+    } catch {
+      this.state = "terminal-auth";
+      return this.state;
+    }
+    if (response.status < 200 || response.status >= 300) {
+      this.state = "terminal-auth";
+      return this.state;
+    }
+    const body = response.json;
+    if (!isRecord(body) || typeof body.membershipId !== "string" || typeof body.vaultId !== "string") {
+      this.state = "rejoin-failed";
+      return this.state;
+    }
+    try {
+      await this.options.saveRefreshToken(refreshToken);
+    } catch {
+      this.state = "rejoin-failed";
+      return this.state;
+    }
+    this.state = "syncing";
+    return {
+      membershipId: body.membershipId,
+      status: "syncing",
+      vaultId: body.vaultId
+    };
+  }
+};
 
 // src/runtime/remove-member.ts
 var RevokeMembershipError = class extends Error {
@@ -24627,7 +24065,7 @@ async function buildRejoinControllerForInvitee(plugin) {
     return null;
   }
   const candidateToken = generateRefreshTokenValue();
-  const candidateTokenHash = await sha256Hex2(candidateToken);
+  const candidateTokenHash = await sha256Hex(candidateToken);
   return new RejoinController({
     apiBaseUrl: identity.apiBaseUrl,
     requestUrl: createRequestUrlFn(),
@@ -24682,39 +24120,149 @@ function browserClipboardCopyDeps() {
   };
 }
 
-// src/ui/confirm-modal.ts
-var import_obsidian6 = require("obsidian");
-var ConfirmModal = class extends import_obsidian6.Modal {
-  constructor(app, options) {
-    super(app);
-    __publicField(this, "options");
-    this.options = options;
+// src/plugin/commands.ts
+function registerCommands(plugin) {
+  plugin.addCommand({
+    id: "open-activity",
+    name: "Open activity",
+    callback: () => plugin.openPane()
+  });
+  plugin.addCommand({
+    id: "connect",
+    name: "Connect to Havemind",
+    callback: () => {
+      plugin.invitations.connectionActive = false;
+      plugin.views.refreshOnboardingNow();
+      return plugin.openPane();
+    }
+  });
+  plugin.addCommand({
+    id: "create-connection",
+    name: "Create connection (owner)",
+    callback: () => plugin.invitations.openCreateConnectionView()
+  });
+  const actions = plugin.connectionActions();
+  plugin.addCommand({
+    id: "sync-now",
+    name: "Sync now",
+    checkCallback: (checking) => {
+      if (checking) return actions.connected();
+      actions.syncNow();
+      return true;
+    }
+  });
+  plugin.addCommand({
+    id: "disconnect",
+    name: "Disconnect",
+    checkCallback: (checking) => {
+      if (checking) return actions.connected();
+      actions.disconnect();
+      return true;
+    }
+  });
+  plugin.addCommand({
+    id: "reset-connection",
+    name: "Reset connection",
+    callback: () => {
+      actions.resetConnection();
+    }
+  });
+  plugin.addRibbonIcon("hexagon", "Open Havemind", () => {
+    void plugin.openPane();
+  });
+}
+
+// src/plugin/conflicts.ts
+var import_obsidian8 = require("obsidian");
+
+// src/runtime/conflict-cache.ts
+var CachedConflictList = class {
+  constructor(scan) {
+    __publicField(this, "scan", scan);
+    __publicField(this, "cached", null);
   }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.createEl("h3", { text: this.options.title });
-    contentEl.createEl("p", { text: this.options.body });
-    const buttons = contentEl.createDiv();
-    buttons.addClass("modal-button-container");
-    const cancel = buttons.createEl("button", { text: "Cancel" });
-    cancel.onClickEvent(() => this.close());
-    const confirm = buttons.createEl("button", { text: this.options.confirmLabel });
-    confirm.addClass("mod-warning");
-    confirm.onClickEvent(() => {
-      this.close();
-      this.options.onConfirm();
-    });
+  /** The current list, scanning only if the vault has moved since the last read. */
+  read() {
+    if (this.cached !== null) return this.cached;
+    const fresh = this.scan();
+    this.cached = fresh;
+    return fresh;
   }
-  onClose() {
-    this.contentEl.empty();
+  /** Drops the cached list; the next read rescans. */
+  invalidate() {
+    this.cached = null;
+  }
+};
+
+// src/runtime/conflict-sweep.ts
+async function sweepConflictCopies(deps) {
+  const merge2 = deps.merge ?? mergeText;
+  let resolved = 0;
+  for (const copy of listConflictCopies(deps.port)) {
+    if (copy.kind === "legacy" || copy.isBinary || !copy.targetKnown) continue;
+    const targetPath = copy.targetPath;
+    if (targetPath === null) continue;
+    try {
+      const fileId = deps.fileIdAtPath(targetPath);
+      if (fileId === null) continue;
+      if (deps.fileIdForCopy(copy.copyPath) !== fileId) continue;
+      const ancestor = await deps.ancestorFor(copy.copyPath, fileId, targetPath);
+      if (ancestor === null) continue;
+      const [mine, theirs] = await Promise.all([
+        deps.port.readText(targetPath),
+        deps.port.readText(copy.copyPath)
+      ]);
+      if (mine === null || theirs === null) continue;
+      const result = merge2(ancestor, mine, theirs);
+      if (result.status !== "merged") continue;
+      if (!await deps.port.replaceText(targetPath, mine, result.text)) continue;
+      await deps.port.deleteFile(copy.copyPath);
+      resolved += 1;
+    } catch {
+      continue;
+    }
+  }
+  if (resolved > 0) {
+    deps.notify(`Auto-resolved ${resolved} conflict(s)`);
+  }
+  return resolved;
+}
+
+// src/runtime/rerun-guard.ts
+var RerunGuard = class {
+  constructor(runOnce) {
+    __publicField(this, "runOnce");
+    __publicField(this, "running", false);
+    __publicField(this, "pending", false);
+    this.runOnce = runOnce;
+  }
+  /**
+   * Run the task. If it is already running, mark a re-run and return; the
+   * in-flight pass loops once more when it finishes. Resolves when no further
+   * re-run is pending.
+   */
+  async trigger() {
+    if (this.running) {
+      this.pending = true;
+      return;
+    }
+    this.running = true;
+    try {
+      do {
+        this.pending = false;
+        await this.runOnce();
+      } while (this.pending);
+    } finally {
+      this.running = false;
+    }
   }
 };
 
 // src/ui/conflict-modal.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // src/ui/primitives.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 function prefersReducedMotion() {
   return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -24728,7 +24276,7 @@ function renderViewTitle(content, text) {
   heading.addClass("havemind-view-title");
   const icon = heading.createEl("span", { attr: DECORATIVE });
   icon.addClass("havemind-title-icon");
-  (0, import_obsidian7.setIcon)(icon, "hexagon");
+  (0, import_obsidian6.setIcon)(icon, "hexagon");
 }
 function labelledField(parent, id, label, tag, options = {}) {
   parent.createEl("label", { text: label, attr: { for: id } });
@@ -24855,7 +24403,7 @@ function renderConflictModalBody(container, model, actions) {
   keepBoth.addClass("havemind-conflict-action");
   keepBoth.onClickEvent(() => actions.onKeepBoth());
 }
-var ConflictResolveModal = class extends import_obsidian8.Modal {
+var ConflictResolveModal = class extends import_obsidian7.Modal {
   constructor(app, model, actions) {
     super(app);
     __publicField(this, "model");
@@ -24871,8 +24419,996 @@ var ConflictResolveModal = class extends import_obsidian8.Modal {
   }
 };
 
+// src/plugin/conflicts.ts
+var CONFLICT_SWEEP_DEBOUNCE_MS = 2e3;
+var Conflicts = class {
+  constructor(plugin) {
+    __publicField(this, "plugin", plugin);
+    /**
+     * The conflict scan, cached between vault changes. The pane reads it twice
+     * per render and repaints often; each scan walks the whole vault.
+     */
+    __publicField(this, "list", new CachedConflictList(
+      () => listConflictCopies(this.conflictPort())
+    ));
+    /**
+     * MRG-03 conflict resolver. Its per-copy guard makes a double-clicked resolve
+     * fire each destructive vault op at most once. Lazily bound to the live vault
+     * port on first use so a headless test never needs a real vault.
+     */
+    __publicField(this, "conflictResolver", null);
+    /**
+     * Debounce timer for the MRG-05 auto-repair sweep. A burst of new conflict
+     * copies coalesces into a single pass ~2s after the last write.
+     */
+    __publicField(this, "conflictSweepTimer", null);
+    /**
+     * Serialises sweep runs AND re-arms one more pass when a trigger arrives
+     * mid-run, so a conflict copy written while a sweep is in flight is not
+     * dropped (MINOR); the guarded no-op used to leave it un-swept.
+     */
+    __publicField(this, "conflictSweepGuard", new RerunGuard(
+      () => this.runConflictSweepOnce()
+    ));
+  }
+  /**
+   * The cached conflict scan is invalidated by vault events, never by a timer:
+   * a timer would either rescan too often, which is the cost the cache exists
+   * to remove, or serve a stale list at the moment a conflict appears. A
+   * conflict the user cannot see is the one failure this plugin must not have
+   * (plan/01 rule 4). Rename counts: a copy moving in or out of the reserved
+   * folder changes the list without creating or deleting anything.
+   */
+  watchVault() {
+    for (const event of ["create", "delete", "rename"]) {
+      const { vault } = this.plugin.app;
+      const ref = vault.on?.(event, () => {
+        this.list.invalidate();
+        this.plugin.views.refreshOnboarding();
+      });
+      if (ref !== void 0 && ref !== null) {
+        this.plugin.registerEvent(ref);
+      }
+    }
+  }
+  /**
+   * The Obsidian-backed conflict vault port. `app.vault` is not modelled on
+   * the ambient `App`, so cast through a local shape rather than patching the
+   * shared interface (the port degrades to "no conflicts" for a stub vault).
+   */
+  conflictPort() {
+    const app = this.plugin.app;
+    return createObsidianConflictPort(app.vault, app.workspace);
+  }
+  /**
+   * Opens the MRG-03 resolve modal for a conflict copy: computes the note-vs-copy
+   * diff (text copies with a known target only), then wires the three actions to
+   * the shared resolver. After a resolve, the panel re-renders so the resolved
+   * row drops out and the section disappears once empty.
+   */
+  async openConflictModal(copyPath) {
+    try {
+      return await this.openConflictModalOnce(copyPath);
+    } catch {
+      new import_obsidian8.Notice("Havemind: could not open this conflict. Try again.");
+      this.plugin.views.refreshOnboarding();
+      return null;
+    }
+  }
+  /** The fallible vault read and modal construction behind the safe UI boundary. */
+  async openConflictModalOnce(copyPath) {
+    const port = this.conflictPort();
+    const copy = listConflictCopies(port).find((c) => c.copyPath === copyPath);
+    if (copy === void 0) return null;
+    let diff = null;
+    let diffTooLarge = false;
+    if (copy.targetKnown && !copy.isBinary && copy.targetPath !== null) {
+      const [mine, theirs] = await Promise.all([
+        port.readText(copy.targetPath),
+        port.readText(copy.copyPath)
+      ]);
+      if (mine !== null && theirs !== null) {
+        diff = computeLineDiff(mine, theirs);
+        diffTooLarge = diff === null;
+      }
+    }
+    if (this.conflictResolver === null) {
+      this.conflictResolver = createConflictResolver(port);
+    }
+    const resolver = this.conflictResolver;
+    const run = (action, modal2) => {
+      void resolver.resolve(copy, action).then(
+        (outcome) => {
+          if (outcome === "vanished") {
+            new import_obsidian8.Notice("This conflict was already auto-resolved.");
+          }
+          if (outcome === "target-missing") {
+            new import_obsidian8.Notice("The note was moved or deleted, so the conflict copy was kept.");
+          }
+          modal2.close();
+          this.plugin.views.refreshOnboarding();
+        },
+        () => {
+          new import_obsidian8.Notice("Havemind: could not resolve this conflict. Try again.");
+          this.plugin.views.refreshOnboarding();
+        }
+      );
+    };
+    const modal = new ConflictResolveModal(
+      this.plugin.app,
+      buildConflictModalModel(copy, diff, { diffTooLarge }),
+      {
+        onKeepMine: () => run("keepMine", modal),
+        ...copy.targetKnown && !copy.isBinary ? { onKeepTheirs: () => run("keepTheirs", modal) } : {},
+        onKeepBoth: () => run("keepBoth", modal)
+      }
+    );
+    modal.open();
+    return modal;
+  }
+  /**
+   * MRG-05: schedule a single debounced auto-repair sweep. A burst of new
+   * conflict copies (or a start-up call plus a runtime write) collapses into one
+   * pass ~2s after the last trigger. The sweep only writes notes (outside the
+   * reserved folder) and deletes resolved copies (inside it), and the trigger
+   * keys off NEW copy writes only, so a sweep never re-schedules itself.
+   */
+  scheduleConflictSweep() {
+    this.cancelConflictSweep();
+    this.conflictSweepTimer = globalThis.setTimeout(() => {
+      this.conflictSweepTimer = null;
+      void this.runConflictSweep().catch(() => {
+        new import_obsidian8.Notice("Havemind: automatic conflict repair could not finish.");
+        this.plugin.views.refreshOnboarding();
+      });
+    }, CONFLICT_SWEEP_DEBOUNCE_MS);
+  }
+  /** Drops a pending sweep, so none fires after unload. */
+  cancelConflictSweep() {
+    if (this.conflictSweepTimer !== null) {
+      globalThis.clearTimeout(this.conflictSweepTimer);
+      this.conflictSweepTimer = null;
+    }
+  }
+  /**
+   * Runs one auto-repair pass (MRG-05). The merge ancestor comes from the
+   * connection's revision history; a copy with none is left untouched for the
+   * manual modal. A guard prevents overlapping runs. Refreshes
+   * the panel afterwards so a resolved conflict's row drops out.
+   */
+  async runConflictSweep() {
+    if (this.plugin.syncState === null) return;
+    await this.conflictSweepGuard.trigger();
+  }
+  /** One sweep pass. Called only via {@link conflictSweepGuard}. */
+  async runConflictSweepOnce() {
+    const state = this.plugin.syncState;
+    if (state === null) return;
+    await sweepConflictCopies({
+      port: this.conflictPort(),
+      fileIdAtPath: (path) => state.fileIdAtPath(path),
+      fileIdForCopy: (path) => state.fileIdForConflictCopy(path),
+      ancestorFor: async (copyPath, fileId, targetPath) => await this.plugin.connection?.conflictAncestor?.(copyPath, fileId, targetPath) ?? null,
+      notify: (message) => {
+        new import_obsidian8.Notice(`Havemind: ${message}`);
+      }
+    });
+    this.plugin.views.refreshOnboarding();
+  }
+};
+
+// src/plugin/error-message.ts
+function errorMessage(error51) {
+  return error51 instanceof Error ? error51.message : "unexpected error";
+}
+
+// src/plugin/invitations.ts
+var Invitations = class {
+  constructor(plugin) {
+    __publicField(this, "plugin", plugin);
+    __publicField(this, "pendingInvitation", null);
+    __publicField(this, "pendingApprovals", []);
+    /** True while the composer is open; it then takes over the pane. */
+    __publicField(this, "connectionActive", false);
+    __publicField(this, "connectionNotice");
+    /** Visual treatment for `connectionNotice`; see CreateConnectionViewModel. */
+    __publicField(this, "connectionNoticeKind");
+  }
+  /**
+   * Owner action: open the unified "Create connection" panel where the invite
+   * is minted and the joining device is approved in one living surface.
+   */
+  openCreateConnectionView() {
+    this.connectionActive = true;
+    this.connectionNotice = void 0;
+    this.connectionNoticeKind = void 0;
+    this.plugin.views.refreshOnboardingNow();
+    return this.plugin.openPane();
+  }
+  /** Returns from the owner composer without discarding an already-minted invite. */
+  closeCreateConnectionView() {
+    this.connectionActive = false;
+    this.connectionNotice = void 0;
+    this.connectionNoticeKind = void 0;
+    this.plugin.views.refreshOnboardingNow();
+  }
+  /** Snapshot of the owner composer state for the unified panel. */
+  composerModel() {
+    return {
+      role: "editor",
+      name: "",
+      invitation: this.pendingInvitation,
+      pending: this.pendingApprovals,
+      invitationExpired: this.isInvitationExpired(),
+      ...this.connectionNotice === void 0 ? {} : { notice: this.connectionNotice },
+      ...this.connectionNoticeKind === void 0 ? {} : { noticeKind: this.connectionNoticeKind }
+    };
+  }
+  /** True once the minted invitation is past its ISO-8601 expiry. */
+  isInvitationExpired() {
+    if (this.pendingInvitation === null) return false;
+    const expiry = Date.parse(this.pendingInvitation.expiresAt);
+    return Number.isFinite(expiry) && Date.now() >= expiry;
+  }
+  /** Owner action: refuse the device waiting on `invitationId` and drop its row. */
+  async rejectPendingDevice(invitationId, report) {
+    try {
+      const rejected = await rejectPendingDeviceForOwner(this.plugin, { invitationId });
+      if (rejected === null) {
+        report("Connect as the vault owner before rejecting a device.");
+        return;
+      }
+      this.pendingApprovals = this.pendingApprovals.filter(
+        (entry) => entry.invitationId !== invitationId
+      );
+      this.connectionNotice = "Device rejected. Its invitation no longer works.";
+      this.connectionNoticeKind = void 0;
+      this.plugin.views.refreshOnboardingNow();
+    } catch (error51) {
+      report(error51 instanceof Error ? error51.message : "Could not reject the device.");
+    }
+  }
+  /**
+   * Owner action: approve the joining device that read out `verificationPhrase`
+   * against `POST …/invitations/:invitationId/approve`. The phrase is a
+   * second-channel secret and is never logged; failures are reported to the view.
+   */
+  async approvePendingDevice(invitationId, verificationPhrase, report) {
+    try {
+      const approved = await approvePendingDeviceForOwner(this.plugin, {
+        invitationId,
+        verificationPhrase
+      });
+      if (approved === null) {
+        report("Connect as the vault owner before approving a device.");
+        return;
+      }
+      const approvedEntry = this.pendingApprovals.find(
+        (entry) => entry.invitationId === invitationId
+      );
+      const approvedName = approvedEntry?.intendedMemberDisplayName;
+      const connectedMessage = `${approvedName ?? "Device"} connected.`;
+      try {
+        await this.plugin.people.recordRosterMember({
+          membershipId: approved.membershipId,
+          displayName: approvedName ?? "Member",
+          role: approvedEntry?.intendedRole ?? "editor",
+          self: false
+        });
+      } catch {
+        report(
+          "Device approved, but its local roster entry could not be saved. Reconnect to retry the local save."
+        );
+        return;
+      }
+      this.pendingApprovals = this.pendingApprovals.filter(
+        (entry) => entry.invitationId !== invitationId
+      );
+      this.connectionNotice = connectedMessage;
+      this.connectionNoticeKind = "success";
+      report(connectedMessage);
+      this.plugin.views.refreshOnboardingNow();
+    } catch (error51) {
+      if (error51 instanceof ApproveDeviceError && error51.locked) {
+        this.pendingApprovals = this.pendingApprovals.filter(
+          (entry) => entry.invitationId !== invitationId
+        );
+        this.connectionNotice = "This invitation is now invalid. Create a new one above to try again.";
+        this.connectionNoticeKind = void 0;
+        report(error51.message);
+        this.plugin.views.refreshOnboardingNow();
+        return;
+      }
+      if (error51 instanceof ApproveDeviceError) {
+        report(error51.message);
+        return;
+      }
+      report(`Could not approve: ${errorMessage(error51)}`);
+    }
+  }
+  /** Hydrates owner approvals after restart; failure never disrupts sync. */
+  async restorePendingApprovals() {
+    try {
+      const pending = await listPendingApprovalsForOwner(this.plugin);
+      if (pending === null || this.plugin.unloaded) return;
+      this.pendingApprovals = [...pending];
+      this.plugin.views.refreshOnboarding();
+    } catch {
+    }
+  }
+  /**
+   * Owner action: mint an invitation for the connected vault, reveal the
+   * copyable envelope, and register the joining device in the waiting list so
+   * the owner can approve it by clicking a row (never by typing a UUID). The
+   * envelope (a secret) is rendered only for the owner to copy, never logged.
+   */
+  async createInvitation(role, name, report) {
+    try {
+      const invitation = await createInvitationForOwner(this.plugin, {
+        intendedRole: role,
+        ...name.length === 0 ? {} : { intendedMemberDisplayName: name }
+      });
+      if (invitation === null) {
+        report("Connect as the vault owner before creating an invitation.");
+        return;
+      }
+      this.connectionActive = true;
+      this.pendingInvitation = invitation;
+      this.pendingApprovals = [
+        ...this.pendingApprovals.filter(
+          (entry) => entry.invitationId !== invitation.invitationId
+        ),
+        {
+          invitationId: invitation.invitationId,
+          expiresAt: invitation.expiresAt,
+          intendedRole: role,
+          ...name.length === 0 ? {} : { intendedMemberDisplayName: name }
+        }
+      ];
+      this.connectionNotice = "Invitation created. Copy it and send it to the other device.";
+      this.connectionNoticeKind = void 0;
+      this.plugin.views.refreshOnboardingNow();
+    } catch (error51) {
+      report(`Could not create invitation: ${errorMessage(error51)}`);
+    }
+  }
+  /**
+   * Clears the minted-invitation display without touching the waiting list, and
+   * closes the owner composer to return to the connection panel. Clearing
+   * `connectionActive` is what makes Done a real exit: `render()` gives the
+   * composer priority and returns before drawing the status indicator, so
+   * leaving the composer open would hide "Connected, synced" indefinitely and
+   * read as if the vault had disconnected.
+   */
+  dismissInvitation() {
+    this.pendingInvitation = null;
+    this.closeCreateConnectionView();
+  }
+};
+
+// src/plugin/people.ts
+var import_obsidian9 = require("obsidian");
+
+// src/runtime/roster.ts
+function upsertRosterMember(roster, member) {
+  return [
+    ...roster.filter((entry) => entry.membershipId !== member.membershipId),
+    member
+  ];
+}
+function removeRosterMember(roster, membershipId) {
+  return roster.filter((entry) => entry.membershipId !== membershipId);
+}
+var ROSTER_KEY = "approvedMembersRoster";
+function parseMember2(value) {
+  if (!isRecord(value) || typeof value.membershipId !== "string" || typeof value.displayName !== "string" || value.role !== "owner" && value.role !== "editor" || typeof value.self !== "boolean") {
+    return null;
+  }
+  return {
+    membershipId: value.membershipId,
+    displayName: value.displayName,
+    role: value.role,
+    self: value.self
+  };
+}
+function parseRoster(raw) {
+  const source = isRecord(raw) ? raw[ROSTER_KEY] : null;
+  if (!Array.isArray(source)) return [];
+  const members = [];
+  for (const entry of source) {
+    const parsed = parseMember2(entry);
+    if (parsed !== null) {
+      members.push(parsed);
+    }
+  }
+  return members;
+}
+var RosterStore = class {
+  constructor(options) {
+    __publicField(this, "persist");
+    this.persist = options.persist;
+  }
+  async readMembers() {
+    return parseRoster(await this.persist.load());
+  }
+  /** Upserts a member (idempotent by membershipId) and persists the roster. */
+  async recordMember(member) {
+    const data = await this.persist.load();
+    const base = isRecord(data) ? data : {};
+    const next = upsertRosterMember(parseRoster(data), member);
+    await this.persist.save({ ...base, [ROSTER_KEY]: next });
+    return next;
+  }
+  /**
+   * Replaces the whole roster with the server-authoritative list and persists
+   * it. Unlike `recordMember` this DROPS members the server no longer lists, so
+   * a member removed on another device disappears here too. Only the roster key
+   * is rewritten; every other plugin-data key is preserved.
+   */
+  async replaceMembers(members) {
+    const data = await this.persist.load();
+    const base = isRecord(data) ? data : {};
+    const next = [...members];
+    await this.persist.save({ ...base, [ROSTER_KEY]: next });
+    return next;
+  }
+  /**
+   * Removes a member (idempotent by membershipId) and persists the roster.
+   * Used when the owner permanently removes a member from the vault; the server
+   * revocation is append-only, and here the owner's local presence list simply
+   * drops the departed member.
+   */
+  async removeMember(membershipId) {
+    const data = await this.persist.load();
+    const base = isRecord(data) ? data : {};
+    const next = removeRosterMember(parseRoster(data), membershipId);
+    await this.persist.save({ ...base, [ROSTER_KEY]: next });
+    return next;
+  }
+};
+
+// src/plugin/people.ts
+var People = class {
+  constructor(plugin) {
+    __publicField(this, "plugin", plugin);
+    /**
+     * Persistent presence roster: the members connected to this vault. Sourced
+     * from approve-time records + the local self membership and persisted in
+     * data.json (endpoint-free). Never derived from sync activity.
+     */
+    __publicField(this, "rosterMembers", []);
+    /** Membership ids the owner has issued a rejoin grant for (awaiting reconnect). */
+    __publicField(this, "rejoinWaiting", /* @__PURE__ */ new Set());
+  }
+  /** Records the local member into the roster once the connection knows it. */
+  adoptSelfMembership(handle) {
+    const self = handle?.selfMembership;
+    if (self === void 0) return;
+    void this.recordRosterMember({
+      membershipId: self.membershipId,
+      displayName: "You",
+      role: self.role,
+      self: true
+    }).catch(() => {
+      new import_obsidian9.Notice("Havemind: could not save this device in the member roster.");
+      this.plugin.views.refreshOnboarding();
+    });
+  }
+  /** The durable roster store over the shared plugin-data blob. */
+  rosterStore() {
+    return new RosterStore({
+      persist: createSerializedDataPort(getPluginDataMutex(this.plugin))
+    });
+  }
+  async loadRoster() {
+    this.rosterMembers = await this.rosterStore().readMembers();
+    this.plugin.views.refreshOnboarding();
+  }
+  /**
+   * P3: replaces the People list with the vault's server-authoritative roster
+   * (`GET /members`). The roster used to be assembled from what each device
+   * happened to witness, so a guest saw a list of one while the owner saw
+   * everyone. The server holds the truth and every member reads the same list.
+   *
+   * Failure is deliberately silent and NON-DESTRUCTIVE: an unreachable server,
+   * a refused session or a malformed payload leaves `rosterMembers` exactly as
+   * it was, so an offline device keeps showing what it last knew instead of
+   * blanking the People pane. The next connect or reconnect retries.
+   */
+  async refreshRoster() {
+    const self = this.rosterMembers.find((member) => member.self);
+    const selfMembershipId = self?.membershipId ?? this.plugin.connection?.selfMembership?.membershipId ?? null;
+    try {
+      const members = await this.readRoster(selfMembershipId);
+      if (members === null || this.plugin.unloaded) return;
+      this.rosterMembers = await this.rosterStore().replaceMembers(members);
+      this.plugin.views.refreshOnboarding();
+    } catch {
+    }
+  }
+  /**
+   * B4: the live connection reads the roster with its own access token. The
+   * refresh-token route raced that connection's rotation (401 at every start)
+   * and is kept only for a server that does not send membership ids yet.
+   */
+  async readRoster(selfMembershipId) {
+    const readRoster = this.plugin.connection?.readRoster;
+    if (readRoster !== void 0) {
+      try {
+        return await readRoster(selfMembershipId);
+      } catch (error51) {
+        if (!(error51 instanceof LegacyRosterServerError)) throw error51;
+      }
+    }
+    return fetchMemberRosterForVault(this.plugin, { selfMembershipId });
+  }
+  /** Upserts a member, persists the roster, and refreshes the live surfaces. */
+  async recordRosterMember(member) {
+    this.rosterMembers = await this.rosterStore().recordMember(member);
+    this.plugin.views.refreshOnboarding();
+  }
+  /**
+   * Owner action: issue a rejoin grant for a known-dead contact via the existing
+   * authenticated transport, then show "waiting for <name> to reconnect" until
+   * the roster refreshes. Nothing secret is sent or shown.
+   */
+  async requestRejoin(membershipId) {
+    try {
+      const waiting = await requestRejoinGrantForOwner(this.plugin, { membershipId });
+      if (waiting === null) {
+        new import_obsidian9.Notice("Havemind: connect as the vault owner before rejoining a member.");
+        return;
+      }
+      this.rejoinWaiting = /* @__PURE__ */ new Set([...this.rejoinWaiting, membershipId]);
+      this.plugin.views.refreshOnboardingNow();
+    } catch (error51) {
+      new import_obsidian9.Notice(`Havemind: could not request rejoin, ${errorMessage(error51)}`);
+    }
+  }
+  /**
+   * Owner action: permanently remove a member from the vault. Revokes the
+   * membership server-side (append-only, the member's past revisions and
+   * attribution survive; their sessions are burned and they are terminally
+   * locked out), then drops the member from the local roster and clears any
+   * dead/waiting markers so no stale Rejoin affordance lingers. This is a
+   * control-plane action and records nothing in the Activity feed. On success a
+   * confirmation Notice names the removed member.
+   */
+  async removeMember(membershipId) {
+    const member = this.rosterMembers.find(
+      (entry) => entry.membershipId === membershipId
+    );
+    const displayName = member?.displayName ?? "member";
+    try {
+      const removed = await revokeMembershipForOwner(this.plugin, { membershipId });
+      if (removed === null) {
+        new import_obsidian9.Notice(
+          "Havemind: connect as the vault owner before removing a member."
+        );
+        return;
+      }
+      this.rosterMembers = await this.rosterStore().removeMember(membershipId);
+      this.rejoinWaiting = new Set(
+        [...this.rejoinWaiting].filter((id) => id !== membershipId)
+      );
+      new import_obsidian9.Notice(`Removed ${displayName} from the vault.`);
+      this.plugin.views.refreshOnboardingNow();
+    } catch (error51) {
+      new import_obsidian9.Notice(`Havemind: could not remove member, ${errorMessage(error51)}`);
+    }
+  }
+};
+
+// src/plugin/rejoin.ts
+var import_obsidian10 = require("obsidian");
+var InviteeRejoin = class {
+  constructor(plugin) {
+    __publicField(this, "plugin", plugin);
+    /**
+     * The live controller driving terminal-auth → syncing while this device
+     * polls for the owner's grant, plus the interval id so unload tears the poll
+     * down. Null when no rejoin is armed.
+     */
+    __publicField(this, "rejoinController", null);
+    __publicField(this, "rejoinPollTimer", null);
+    /** Guards the post-rejoin restart so it fires exactly once (no double-start). */
+    __publicField(this, "rejoinRestarted", false);
+    /** `connectGeneration` captured when the rejoin poll armed; null when disarmed. */
+    __publicField(this, "rejoinArmedGeneration", null);
+  }
+  /**
+   * Invitee side: arm the rejoin poll after a terminal auth failure. Idempotent
+   *, a second terminal status while a poll is already armed is a no-op, so the
+   * poll is never doubled. Builds the controller from this device's persisted
+   * (membershipId, deviceId); if none is stored there is nothing to rejoin with.
+   */
+  async armRejoin() {
+    if (this.rejoinController !== null) return;
+    let controller;
+    try {
+      controller = await buildRejoinControllerForInvitee(this.plugin);
+    } catch {
+      if (!this.plugin.unloaded) {
+        this.plugin.connectionError = "Havemind could not prepare reconnection. Pair again if this persists.";
+        this.plugin.views.refreshOnboardingNow();
+      }
+      return;
+    }
+    if (controller === null || this.plugin.unloaded || this.rejoinController !== null) {
+      return;
+    }
+    this.rejoinController = controller;
+    this.rejoinRestarted = false;
+    this.rejoinArmedGeneration = this.plugin.connectGeneration;
+    const timer = globalThis.setInterval(() => {
+      void this.pollRejoinOnce();
+    }, REJOIN_POLL_INTERVAL_MS);
+    this.plugin.registerInterval(timer);
+    this.rejoinPollTimer = timer;
+  }
+  /**
+   * One rejoin poll tick. Presents the persisted binding; on the first
+   * 'syncing' result it disarms and restarts the connection exactly once (the
+   * `rejoinRestarted` guard plus the controller's own idempotency prevent a
+   * double-start). If unload raced the in-flight attempt, it cancels cleanly.
+   */
+  async pollRejoinOnce() {
+    const controller = this.rejoinController;
+    if (controller === null || this.rejoinRestarted || this.plugin.unloaded) return;
+    if (this.rejoinArmedGeneration !== null && this.plugin.connectGeneration !== this.rejoinArmedGeneration) {
+      this.disarmRejoin();
+      return;
+    }
+    let result;
+    try {
+      result = await controller.attempt();
+    } catch {
+      if (this.plugin.unloaded || this.rejoinRestarted) return;
+      this.surfaceRejoinFailed();
+      return;
+    }
+    if (this.plugin.unloaded || this.rejoinRestarted) return;
+    if (typeof result === "object" && result.status === "syncing") {
+      this.rejoinRestarted = true;
+      this.disarmRejoin();
+      await this.restartConnectionAfterRejoin();
+      return;
+    }
+    if (result === "rejoin-failed") {
+      this.surfaceRejoinFailed();
+    }
+  }
+  /**
+   * Disarm the doomed poll and surface a terminal rejoin failure to the user
+   * (status + Notice), leaving a manual reconnect as the only retry path. Shared
+   * by the 'rejoin-failed' controller result and a raw throw from attempt().
+   */
+  surfaceRejoinFailed() {
+    this.disarmRejoin();
+    this.plugin.connectionError = "Rejoin failed, the server rejected the automatic rejoin. Reconnect manually to resume syncing.";
+    this.plugin.statusBar.setStatus(formatStatusBar({ status: "reconnect-required" }));
+    new import_obsidian10.Notice(
+      "Havemind: rejoin failed. Reconnect manually to resume syncing."
+    );
+    this.plugin.views.refreshOnboarding();
+  }
+  /** Tears the invitee rejoin poll down (idempotent). */
+  disarmRejoin() {
+    if (this.rejoinPollTimer !== null) {
+      globalThis.clearInterval(this.rejoinPollTimer);
+      this.rejoinPollTimer = null;
+    }
+    this.rejoinController = null;
+    this.rejoinArmedGeneration = null;
+  }
+  /**
+   * Restarts the connection after a successful rejoin. The fresh refresh token
+   * is already persisted, so startConnection resumes sync under the SAME
+   * membership. Follows the established invariant: stop-previous → await →
+   * guard-against-unload → assign (the guard lives inside startConnection).
+   */
+  async restartConnectionAfterRejoin() {
+    this.plugin.connection?.stop();
+    this.plugin.connection = null;
+    await this.plugin.startConnection();
+  }
+};
+
+// src/plugin/send-queue.ts
+var import_obsidian11 = require("obsidian");
+
+// src/runtime/send-queue-status.ts
+var DEFAULT_STALE_THRESHOLD_MS = 3e4;
+function buildSendQueueStatus(input) {
+  const threshold = input.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
+  const waitingCount = input.outbox.filter(
+    (entry) => input.now - entry.enqueuedAt >= threshold
+  ).length;
+  const failed = input.quarantine.map((entry) => ({
+    revisionId: entry.revisionId,
+    label: entry.path !== void 0 && entry.path.length > 0 ? entry.path : entry.fileId.length > 0 ? entry.fileId : "Unknown change",
+    reason: entry.reason
+  }));
+  return { waitingCount, failed };
+}
+function selectNewlyQuarantined(known, quarantine) {
+  const fresh = quarantine.filter((entry) => !known.has(entry.revisionId));
+  const next = new Set(known);
+  for (const entry of quarantine) next.add(entry.revisionId);
+  return { fresh, next };
+}
+
+// src/ui/retry-plan.ts
+function planRetryFromDisk(outcome, path, discardOnRetrigger) {
+  switch (outcome) {
+    case "file-missing":
+      return {
+        notice: `${path} no longer exists, removing it from the queue.`,
+        discard: true
+      };
+    case "retriggered":
+      return { notice: null, discard: discardOnRetrigger };
+    default:
+      return {
+        notice: "Cannot retry while disconnected, reconnect first.",
+        discard: false
+      };
+  }
+}
+function planQuarantineRequeueFallback(requeued, path) {
+  if (requeued) return { kind: "requeued" };
+  if (path !== null) return { kind: "retry-from-disk", path };
+  return {
+    kind: "discard-dead-letter",
+    notice: "The original file for this change no longer exists, removing it."
+  };
+}
+
+// src/plugin/send-queue.ts
+var PARKED_ROW_PREFIX = "received:";
+var SendQueue = class {
+  constructor(plugin) {
+    __publicField(this, "plugin", plugin);
+    /**
+     * Quarantine revisionIds already announced with a Notice (SND-01). A Notice
+     * fires only the FIRST time an item enters quarantine, never on every retry.
+     */
+    __publicField(this, "notifiedQuarantineIds", /* @__PURE__ */ new Set());
+  }
+  /**
+   * SND-01 send-queue view for the panel, or null when disconnected (no state).
+   * Reads outbox ages + quarantine straight from the persisted sync state and
+   * resolves each quarantined fileId back to a vault path where one is known.
+   */
+  sendQueueView() {
+    const state = this.plugin.syncState;
+    if (state === null) return null;
+    return buildSendQueueStatus({
+      outbox: state.outboxAges(),
+      quarantine: [
+        ...state.quarantineSnapshot(),
+        // Incoming changes this device could not apply (B2) share the same rows.
+        ...state.parkedSnapshot().map((item) => ({
+          ...item,
+          revisionId: `${PARKED_ROW_PREFIX}${item.revisionId}`,
+          reason: `Could not be received: ${item.reason}`
+        }))
+      ].map((item) => {
+        const path = state.pathForFileId(item.fileId);
+        return {
+          revisionId: item.revisionId,
+          fileId: item.fileId,
+          reason: item.reason,
+          ...path === null ? {} : { path }
+        };
+      }),
+      now: Date.now()
+    });
+  }
+  /**
+   * Retry a quarantined send. A server-rejected send (SND-01) re-enqueues its
+   * stashed envelope through the outbox. A failed-to-queue row (SND-02, MAJOR 2)
+   * has no envelope, it never reached the outbox, so Retry re-runs the commit
+   * chain for the path against the current on-disk content; if the file has
+   * since been deleted, surface a Notice and drop the stale row instead of
+   * pushing a phantom empty create for a vanished file.
+   */
+  async retrySend(revisionId) {
+    if (revisionId.startsWith(PARKED_ROW_PREFIX)) {
+      await this.retryParked(revisionId.slice(PARKED_ROW_PREFIX.length));
+      return;
+    }
+    const failedPath = parseFailedToQueuePath(revisionId);
+    if (failedPath !== null) {
+      await this.retryFromDisk(revisionId, failedPath, { discardOnRetrigger: false });
+      return;
+    }
+    const requeued = await this.plugin.syncState?.requeueQuarantined(revisionId) ?? false;
+    const fallback = planQuarantineRequeueFallback(
+      requeued,
+      this.pathForQuarantineRow(revisionId)
+    );
+    if (fallback.kind === "retry-from-disk") {
+      await this.retryFromDisk(revisionId, fallback.path, {
+        discardOnRetrigger: true
+      });
+      return;
+    }
+    if (fallback.kind === "discard-dead-letter") {
+      new import_obsidian11.Notice(fallback.notice);
+      await this.plugin.syncState?.discardQuarantined(revisionId);
+    }
+    this.plugin.views.refreshOnboarding();
+  }
+  /** The vault path a quarantine row's fileId resolves to, or null. */
+  pathForQuarantineRow(revisionId) {
+    const state = this.plugin.syncState;
+    if (state === null) return null;
+    const row = state.quarantineSnapshot().find((item) => item.revisionId === revisionId);
+    return row === void 0 ? null : state.pathForFileId(row.fileId);
+  }
+  /**
+   * Re-run the commit chain for `path` from disk (the MAJOR 2 recovery for a row
+   * with no usable stashed envelope). FINDING 1: the retry outcome is tri-state.
+   * Only a CONFIRMED-missing file drops the row; `unavailable` (debouncer
+   * disposed) and a null/uncallable connection, the common state for a durable
+   * row after a restart, before reconnect, keep the row and tell the user to
+   * reconnect, so a real unsynced change is never silently discarded.
+   * `discardOnRetrigger` drops the row immediately after a real re-trigger for a
+   * superseded server-rejected row (MAJOR 4); a failed-to-queue row keeps its
+   * row until the commit lands.
+   */
+  async retryFromDisk(revisionId, path, options) {
+    const outcome = this.plugin.connection?.retryFailedCommit?.(path);
+    const effect = planRetryFromDisk(outcome, path, options.discardOnRetrigger);
+    if (effect.notice !== null) new import_obsidian11.Notice(effect.notice);
+    if (effect.discard) await this.plugin.syncState?.discardQuarantined(revisionId);
+    this.plugin.views.refreshOnboardingNow();
+  }
+  /** Applies a parked incoming change again (B2). */
+  async retryParked(revisionId) {
+    try {
+      const done = await this.plugin.connection?.retryParked?.(revisionId) ?? false;
+      if (!done) {
+        new import_obsidian11.Notice("Havemind: the note is open with unsaved changes, or you are not connected. Try again later.");
+      }
+    } catch (error51) {
+      new import_obsidian11.Notice(
+        `Havemind: still cannot apply this change, ${errorMessage(error51)}`
+      );
+    }
+    this.plugin.views.refreshOnboardingNow();
+  }
+  /** Permanently discard a quarantined send (SND-01). */
+  async discardSend(revisionId) {
+    if (revisionId.startsWith(PARKED_ROW_PREFIX)) {
+      await this.plugin.syncState?.unparkRemote(revisionId.slice(PARKED_ROW_PREFIX.length));
+      this.plugin.views.refreshOnboardingNow();
+      return;
+    }
+    await this.plugin.syncState?.discardQuarantined(revisionId);
+    this.plugin.views.refreshOnboardingNow();
+  }
+  /**
+   * SND-01: emit one Notice per item the FIRST time it enters quarantine. A
+   * retry that re-quarantines the same revision is silent, its id is already in
+   * `notifiedQuarantineIds`. Discarding then re-quarantining a NEW revision for
+   * the same file does notify, which is correct: it is a distinct failed send.
+   */
+  checkQuarantineNotices() {
+    const state = this.plugin.syncState;
+    if (state === null) return;
+    const quarantine = state.quarantineSnapshot().map((item) => ({
+      revisionId: item.revisionId,
+      fileId: item.fileId,
+      reason: item.reason,
+      ...state.pathForFileId(item.fileId) === null ? {} : { path: state.pathForFileId(item.fileId) }
+    }));
+    const { fresh, next } = selectNewlyQuarantined(
+      this.notifiedQuarantineIds,
+      quarantine
+    );
+    this.notifiedQuarantineIds = new Set(next);
+    for (const item of fresh) {
+      const label = item.path ?? item.fileId;
+      new import_obsidian11.Notice(
+        `A change to ${label} could not be sent, see the Havemind panel.`
+      );
+    }
+  }
+};
+
+// src/plugin/status-bar.ts
+var import_obsidian12 = require("obsidian");
+var StatusBar = class {
+  constructor(plugin) {
+    __publicField(this, "plugin", plugin);
+    __publicField(this, "statusItem", null);
+    /** Status bar item naming who last edited the open note. */
+    __publicField(this, "lastEditedItem", null);
+  }
+  /** Adds both items; `onload` calls this once. */
+  attach() {
+    this.statusItem = this.plugin.addStatusBarItem();
+    this.statusItem.addClass("havemind-status-bar");
+    this.statusItem.onClickEvent(() => {
+      void this.plugin.openPane();
+    });
+    this.statusItem.setAttribute("role", "button");
+    this.statusItem.setAttribute("tabindex", "0");
+    this.statusItem.setAttribute("aria-label", "Open Havemind panel");
+    this.plugin.registerDomEvent(this.statusItem, "keydown", (event) => {
+      const keyboardEvent = event;
+      if (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ") return;
+      keyboardEvent.preventDefault();
+      void this.plugin.openPane();
+    });
+    this.setStatus(formatStatusBar({ status: "disconnected" }));
+    this.lastEditedItem = this.plugin.addStatusBarItem();
+    const workspace = this.plugin.app.workspace;
+    const fileOpen = workspace.on?.("file-open", () => {
+      void this.refreshLastEdited();
+    });
+    if (fileOpen !== void 0 && fileOpen !== null) {
+      this.plugin.registerEvent(fileOpen);
+    }
+  }
+  setStatus(view) {
+    const item = this.statusItem;
+    if (item === null) return;
+    item.empty();
+    const glyph = item.createEl("span", { attr: DECORATIVE });
+    (0, import_obsidian12.setIcon)(glyph, "hexagon");
+    item.createEl("span", { text: view.text });
+  }
+  /** Names the last editor of the open note in the status bar. */
+  async refreshLastEdited() {
+    const item = this.lastEditedItem;
+    if (item === null) return;
+    const file2 = this.plugin.app.workspace.getActiveFile?.();
+    const fileId = file2 === null || file2 === void 0 ? null : this.plugin.syncState?.fileIdAtPath(file2.path) ?? null;
+    let author = null;
+    if (fileId !== null) {
+      try {
+        author = await this.plugin.connection?.lastAuthor?.(fileId) ?? null;
+      } catch {
+        author = null;
+      }
+    }
+    item.setText(lastEditedLabel(author, this.plugin.people.rosterMembers));
+  }
+};
+
+// src/ui/confirm-modal.ts
+var import_obsidian13 = require("obsidian");
+var ConfirmModal = class extends import_obsidian13.Modal {
+  constructor(app, options) {
+    super(app);
+    __publicField(this, "options");
+    this.options = options;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: this.options.title });
+    contentEl.createEl("p", { text: this.options.body });
+    const buttons = contentEl.createDiv();
+    buttons.addClass("modal-button-container");
+    const cancel = buttons.createEl("button", { text: "Cancel" });
+    cancel.onClickEvent(() => this.close());
+    const confirm = buttons.createEl("button", { text: this.options.confirmLabel });
+    confirm.addClass("mod-warning");
+    confirm.onClickEvent(() => {
+      this.close();
+      this.options.onConfirm();
+    });
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
 // src/ui/onboarding-view.ts
-var import_obsidian17 = require("obsidian");
+var import_obsidian22 = require("obsidian");
 
 // src/runtime/handshake.ts
 function groupCode(code) {
@@ -25001,7 +25537,7 @@ function buildPaneTabs(input) {
 }
 
 // src/ui/pane-tabs-section.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 var PANE_TABPANEL_ID = "havemind-tabpanel";
 function paneTabDomId(id) {
   return `havemind-tab-${id}`;
@@ -25051,7 +25587,7 @@ function renderPaneTabs(content, options) {
     if (tab.needsAttention === true) button.addClass("needs-attention");
     const icon = button.createEl("span", { attr: DECORATIVE });
     icon.addClass("havemind-tab-icon");
-    (0, import_obsidian9.setIcon)(icon, tab.icon);
+    (0, import_obsidian14.setIcon)(icon, tab.icon);
     button.createEl("span", { text: tab.label }).addClass("havemind-tab-label");
     if (tab.count !== void 0) {
       button.createEl("span", { text: `${tab.count}` }).addClass("havemind-tab-count");
@@ -25151,14 +25687,14 @@ function buildHostView() {
 }
 
 // src/ui/entry-chooser-section.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 function renderEntryChooser(content, options) {
   const { model } = options;
   const head = content.createDiv();
   head.addClass("havemind-entry-head");
   const mark = head.createEl("span", { attr: DECORATIVE });
   mark.addClass("havemind-pane-mark");
-  (0, import_obsidian10.setIcon)(mark, "hexagon");
+  (0, import_obsidian15.setIcon)(mark, "hexagon");
   head.createEl("span", { text: model.heading, cls: "havemind-pane-title" });
   content.createDiv({ text: model.subheading }).addClass("havemind-entry-subheading");
   content.createDiv({ text: model.question }).addClass("havemind-hint");
@@ -25500,7 +26036,7 @@ function renderRejoinRoster(content, roster, actions) {
 }
 
 // src/ui/screens/status-indicator.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 function renderStatusIndicator(content, panel, actions = {}, includeRecovery = true) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
@@ -25513,7 +26049,7 @@ function renderStatusIndicator(content, panel, actions = {}, includeRecovery = t
     if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
   } else {
     const icon = row.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian11.setIcon)(icon, panel.icon);
+    (0, import_obsidian16.setIcon)(icon, panel.icon);
   }
   row.createEl("span", { text: ` ${panel.label}` });
   const detail = content.createDiv();
@@ -25600,7 +26136,7 @@ function renderConnectionControls(content, panel, helpOpen, actions) {
 }
 
 // src/ui/screens/invite-composer.ts
-var import_obsidian13 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 
 // src/ui/screens/invitation-envelope.ts
 var COPY_FAILED = "Could not copy automatically. Select and copy the invitation manually.";
@@ -25648,12 +26184,12 @@ function renderInvitationEnvelope(content, model, actions) {
 }
 
 // src/ui/screens/pending-approval-row.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 function renderPendingRow(content, entry, actions, codes = {}) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-pending-row");
   row.style.setProperty("color", "var(--text-accent)");
-  (0, import_obsidian12.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
+  (0, import_obsidian17.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
   row.createEl("span", {
     text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires ${entry.expiresAt}`
   });
@@ -25768,7 +26304,7 @@ function renderNotice(content, notice, kind) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-success)");
-  (0, import_obsidian13.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
+  (0, import_obsidian18.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
   row.createEl("span", { text: ` ${notice}` });
 }
 
@@ -25787,7 +26323,7 @@ function renderPeopleTab(body, composer, actions) {
 }
 
 // src/ui/conflict-section.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 function renderConflictSection(content, copies, actions) {
   if (copies.length === 0) return;
   const block = renderAlarmBlock(content, "havemind-alarm-conflict");
@@ -25795,7 +26331,7 @@ function renderConflictSection(content, copies, actions) {
   header.addClass("havemind-conflict-header");
   const icon = header.createEl("span", { attr: DECORATIVE });
   icon.addClass("havemind-conflict-icon");
-  (0, import_obsidian14.setIcon)(icon, "git-merge");
+  (0, import_obsidian19.setIcon)(icon, "git-merge");
   header.createEl("span", {
     text: copies.length === 1 ? " 1 conflict" : ` ${copies.length} conflicts`
   });
@@ -26050,13 +26586,13 @@ var RepaintScheduler = class {
 };
 
 // src/ui/screens/guest-invalid.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian20 = require("obsidian");
 function renderGuestInvalid(content, ownerName, actions) {
   const view = buildSpentInvitation(ownerName);
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-error)");
-  (0, import_obsidian15.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
+  (0, import_obsidian20.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
   row.createEl("span", { text: ` ${view.heading}` });
   content.createDiv({ text: view.explanation }).addClass("havemind-hint");
   actions.renderForm(content);
@@ -26082,14 +26618,14 @@ function readPaneState(options, entryChoice, draftToken) {
 }
 
 // src/ui/pane-header.ts
-var import_obsidian16 = require("obsidian");
+var import_obsidian21 = require("obsidian");
 function renderPaneHeader(content, options) {
   const strip = content.createDiv();
   strip.addClass("havemind-pane-header");
   const markWrap = strip.createDiv();
   markWrap.addClass("havemind-pane-mark");
   const mark = markWrap.createEl("span", { attr: DECORATIVE });
-  (0, import_obsidian16.setIcon)(mark, "hexagon");
+  (0, import_obsidian21.setIcon)(mark, "hexagon");
   if (options.alarmed === true) {
     const dot = markWrap.createEl("span", {
       attr: { title: "Needs attention" }
@@ -26102,7 +26638,7 @@ function renderPaneHeader(content, options) {
       attr: { "aria-label": "Invite someone" }
     });
     invite.addClass("havemind-header-action");
-    (0, import_obsidian16.setIcon)(invite, "user-plus");
+    (0, import_obsidian21.setIcon)(invite, "user-plus");
     invite.onClickEvent(() => options.onInvite?.());
   }
   const more = strip.createEl("button", {
@@ -26113,7 +26649,7 @@ function renderPaneHeader(content, options) {
   });
   more.addClass("havemind-header-action");
   more.addClass("havemind-pane-more");
-  (0, import_obsidian16.setIcon)(more, "more-horizontal");
+  (0, import_obsidian21.setIcon)(more, "more-horizontal");
   more.onClickEvent(() => options.onToggleMenu());
   if (!options.menuOpen) return;
   const menu = content.createDiv();
@@ -26218,7 +26754,7 @@ function renderPaneChromeFor(content, panel, options, state, callbacks) {
 var HAVEMIND_ONBOARDING_VIEW = "havemind-onboarding";
 
 // src/ui/onboarding-view.ts
-var HavemindOnboardingView = class extends import_obsidian17.ItemView {
+var HavemindOnboardingView = class extends import_obsidian22.ItemView {
   constructor(leaf, options = {}) {
     super(leaf);
     __publicField(this, "options");
@@ -26380,39 +26916,13 @@ var HavemindOnboardingView = class extends import_obsidian17.ItemView {
   /** Renders the rejoin-aware roster with its owner actions from the options. */
 };
 
-// src/ui/retry-plan.ts
-function planRetryFromDisk(outcome, path, discardOnRetrigger) {
-  switch (outcome) {
-    case "file-missing":
-      return {
-        notice: `${path} no longer exists, removing it from the queue.`,
-        discard: true
-      };
-    case "retriggered":
-      return { notice: null, discard: discardOnRetrigger };
-    default:
-      return {
-        notice: "Cannot retry while disconnected, reconnect first.",
-        discard: false
-      };
-  }
-}
-function planQuarantineRequeueFallback(requeued, path) {
-  if (requeued) return { kind: "requeued" };
-  if (path !== null) return { kind: "retry-from-disk", path };
-  return {
-    kind: "discard-dead-letter",
-    notice: "The original file for this change no longer exists, removing it."
-  };
-}
-
 // src/ui/setting-tab.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian23 = require("obsidian");
 function formatMemberCount(count) {
   if (count === 0) return "No members recorded yet";
   return count === 1 ? "1 member" : `${count} members`;
 }
-var HavemindSettingTab = class extends import_obsidian18.PluginSettingTab {
+var HavemindSettingTab = class extends import_obsidian23.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     /**
@@ -26427,12 +26937,12 @@ var HavemindSettingTab = class extends import_obsidian18.PluginSettingTab {
     this.containerEl.empty();
     const plugin = this.havemind;
     const info = plugin.settingsInfo();
-    new import_obsidian18.Setting(this.containerEl).setName("Havemind").setHeading();
-    new import_obsidian18.Setting(this.containerEl).setName("Server").setDesc(info.server);
-    new import_obsidian18.Setting(this.containerEl).setName("Connection").setDesc(info.status);
-    new import_obsidian18.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
-    new import_obsidian18.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
-    new import_obsidian18.Setting(this.containerEl).setName("Actions").setHeading();
+    new import_obsidian23.Setting(this.containerEl).setName("Havemind").setHeading();
+    new import_obsidian23.Setting(this.containerEl).setName("Server").setDesc(info.server);
+    new import_obsidian23.Setting(this.containerEl).setName("Connection").setDesc(info.status);
+    new import_obsidian23.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
+    new import_obsidian23.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
+    new import_obsidian23.Setting(this.containerEl).setName("Actions").setHeading();
     this.renderActions(plugin, info);
     const refresh = this.containerEl.createEl("button", { text: "Refresh" });
     refresh.onClickEvent(() => this.display());
@@ -26444,18 +26954,18 @@ var HavemindSettingTab = class extends import_obsidian18.PluginSettingTab {
    */
   renderActions(plugin, info) {
     const actions = plugin.connectionActions();
-    new import_obsidian18.Setting(this.containerEl).setName("Havemind panel").setDesc(
+    new import_obsidian23.Setting(this.containerEl).setName("Havemind panel").setDesc(
       "Connect a device, invite a peer, resolve conflicts and inspect the send queue."
     ).addButton(
       (button) => button.setButtonText("Open Havemind panel").setCta().onClick(() => plugin.revealPanel())
     );
-    new import_obsidian18.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
+    new import_obsidian23.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
       (button) => button.setButtonText("Sync now").setDisabled(!info.connected).onClick(() => actions.syncNow())
     );
-    new import_obsidian18.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
+    new import_obsidian23.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
       (button) => button.setButtonText("Disconnect").setDisabled(!info.connected).onClick(() => actions.disconnect())
     );
-    new import_obsidian18.Setting(this.containerEl).setName("Reset connection").setDesc(
+    new import_obsidian23.Setting(this.containerEl).setName("Reset connection").setDesc(
       "Clear the stored pairing so this device can be paired again. No note is touched."
     ).addButton(
       (button) => button.setButtonText("Reset connection").onClick(() => actions.resetConnection())
@@ -26493,12 +27003,9 @@ var PluginViewRegistry = class {
 };
 
 // src/main.ts
-var PARKED_ROW_PREFIX = "received:";
-var CONFLICT_SWEEP_DEBOUNCE_MS = 2e3;
-var HavemindPlugin = class extends import_obsidian19.Plugin {
+var HavemindPlugin = class extends import_obsidian24.Plugin {
   constructor() {
     super(...arguments);
-    __publicField(this, "statusItem", null);
     __publicField(this, "connection", null);
     /**
      * Set true in `onunload`. `startConnection` runs on `onLayoutReady` and awaits
@@ -26508,17 +27015,11 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
      * `stop()` ever reaching them.
      */
     __publicField(this, "unloaded", false);
-    __publicField(this, "pendingInvitation", null);
-    __publicField(this, "pendingApprovals", []);
-    __publicField(this, "connectionActive", false);
     /**
      * True once the user opened an `obsidian://havemind-join` link, which answers
      * the entry chooser on their behalf: they hold an invitation (design 1d).
      */
     __publicField(this, "arrivedWithInvitation", false);
-    __publicField(this, "connectionNotice");
-    /** Visual treatment for `connectionNotice`; see CreateConnectionViewModel. */
-    __publicField(this, "connectionNoticeKind");
     __publicField(this, "awaitingApproval", null);
     /**
      * True once the server reported this invitation is dead (owner rejected the
@@ -26536,35 +27037,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     /** Disposer for the activityLog subscription set up in onload(); torn down in onunload(). */
     __publicField(this, "activityLogUnsubscribe", null);
     /**
-     * Persistent presence roster: the members connected to this vault. Sourced
-     * from approve-time records + the local self membership and persisted in
-     * data.json (endpoint-free). Never derived from sync activity.
-     */
-    __publicField(this, "rosterMembers", []);
-    /**
-     * F9 Rejoin (owner side). Membership ids the owner has asserted are dead
-     * (pilot heuristic, no server liveness signal yet, see renderRejoinRoster):
-     * their roster rows draw as disconnected and offer Rejoin.
-     */
-    /** Membership ids the owner has issued a rejoin grant for (awaiting reconnect). */
-    __publicField(this, "rejoinWaiting", /* @__PURE__ */ new Set());
-    /**
-     * F9 Rejoin (invitee side). The live controller driving terminal-auth →
-     * syncing while this device polls for the owner's grant, plus the interval id
-     * so unload tears the poll down. Null when no rejoin is armed.
-     */
-    __publicField(this, "rejoinController", null);
-    /**
-     * The conflict scan, cached between vault changes. The pane reads it twice
-     * per render and repaints often; each scan walks the whole vault.
-     */
-    __publicField(this, "conflicts", new CachedConflictList(
-      () => listConflictCopies(this.conflictPort())
-    ));
-    __publicField(this, "rejoinPollTimer", null);
-    /** Guards the post-rejoin restart so it fires exactly once (no double-start). */
-    __publicField(this, "rejoinRestarted", false);
-    /**
      * Monotonic counter bumped each time a live connection is (re-)established
      * (`startConnection`/`connectFromInput` assign a handle). The invitee rejoin
      * poll captures it when it arms; a poll tick that sees the counter has advanced
@@ -26573,8 +27045,6 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
      * see `pollRejoinOnce` (FINDING 1b).
      */
     __publicField(this, "connectGeneration", 0);
-    /** `connectGeneration` captured when the rejoin poll armed; null when disarmed. */
-    __publicField(this, "rejoinArmedGeneration", null);
     /**
      * Guards a user-initiated "Retry now" so a rapid double-click never spawns a
      * second connection build while the first is still in flight, two live
@@ -26590,37 +27060,17 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
      */
     __publicField(this, "resetInFlight", false);
     /**
-     * MRG-03 conflict resolver. Its per-copy guard makes a double-clicked resolve
-     * fire each destructive vault op at most once. Lazily bound to the live vault
-     * port on first use so a headless test never needs a real vault.
-     */
-    __publicField(this, "conflictResolver", null);
-    /**
      * The live durable sync state (SND-01 + MRG-05), captured from the connection
      * handle. Null when disconnected, the send-queue panel then renders nothing
      * and the sweep is a no-op.
      */
     __publicField(this, "syncState", null);
-    /**
-     * Quarantine revisionIds already announced with a Notice (SND-01). A Notice
-     * fires only the FIRST time an item enters quarantine, never on every retry.
-     */
-    __publicField(this, "notifiedQuarantineIds", /* @__PURE__ */ new Set());
-    /**
-     * Debounce timer for the MRG-05 auto-repair sweep. A burst of new conflict
-     * copies coalesces into a single pass ~2s after the last write.
-     */
-    __publicField(this, "conflictSweepTimer", null);
-    /**
-     * Serialises sweep runs AND re-arms one more pass when a trigger arrives
-     * mid-run, so a conflict copy written while a sweep is in flight is not
-     * dropped (MINOR); the guarded no-op used to leave it un-swept.
-     */
-    __publicField(this, "conflictSweepGuard", new RerunGuard(
-      () => this.runConflictSweepOnce()
-    ));
-    /** Status bar item naming who last edited the open note. */
-    __publicField(this, "lastEditedItem", null);
+    __publicField(this, "people", new People(this));
+    __publicField(this, "invitations", new Invitations(this));
+    __publicField(this, "rejoin", new InviteeRejoin(this));
+    __publicField(this, "conflicts", new Conflicts(this));
+    __publicField(this, "sendQueue", new SendQueue(this));
+    __publicField(this, "statusBar", new StatusBar(this));
   }
   onload() {
     this.activityLogUnsubscribe = this.activityLog.subscribe(() => {
@@ -26631,53 +27081,51 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         // A phone joins vaults, it does not run them: hosting needs Docker, a
         // terminal and a machine that stays awake. The entry chooser drops the
         // host branch there rather than walking the user to a dead end.
-        canHost: !import_obsidian19.Platform.isMobileApp,
+        canHost: !import_obsidian24.Platform.isMobileApp,
         // The activity feed is a tab of this pane (plans/007 Stage 0): the log
         // snapshot mapped through the roster, so each row shows the author's
         // display name and colour.
-        activityFeedProvider: () => activityEntriesToRecords(this.activityLog.snapshot(), this.rosterMembers),
+        activityFeedProvider: () => activityEntriesToRecords(this.activityLog.snapshot(), this.people.rosterMembers),
         onRestore: (revisionId) => {
           void this.handleRestore(revisionId);
         },
-        // The overlay toggle lost its ribbon icon in Stage 0 and lives in the
-        // pane footer now, beside the vault it annotates.
         arrivedWithInvitationProvider: () => this.arrivedWithInvitation,
         onOpenComposer: () => {
-          void this.openCreateConnectionView();
+          void this.invitations.openCreateConnectionView();
         },
-        onCloseComposer: () => this.closeCreateConnectionView(),
+        onCloseComposer: () => this.invitations.closeCreateConnectionView(),
         onSyncNow: () => {
           void this.syncNow();
         },
-        composerProvider: () => this.connectionActive ? this.composerModel() : null,
+        composerProvider: () => this.invitations.connectionActive ? this.invitations.composerModel() : null,
         guestWaitingProvider: () => this.awaitingApproval,
         guestInvalidProvider: () => this.guestInvitationInvalid,
         panelProvider: () => this.connectionPanel(),
-        conflictsProvider: () => this.conflicts.read(),
+        conflictsProvider: () => this.conflicts.list.read(),
         onResolveConflict: (copyPath) => {
-          void this.openConflictModal(copyPath);
+          void this.conflicts.openConflictModal(copyPath);
         },
-        sendQueueProvider: () => this.sendQueueView(),
+        sendQueueProvider: () => this.sendQueue.sendQueueView(),
         recoveryRequiredProvider: () => this.syncState?.isRecoveryRequired() ?? false,
         onRetrySend: (revisionId) => {
-          void this.retrySend(revisionId).catch(() => {
-            new import_obsidian19.Notice("Havemind: could not retry this queued change.");
+          void this.sendQueue.retrySend(revisionId).catch(() => {
+            new import_obsidian24.Notice("Havemind: could not retry this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
         onDiscardSend: (revisionId) => {
-          void this.discardSend(revisionId).catch(() => {
-            new import_obsidian19.Notice("Havemind: could not discard this queued change.");
+          void this.sendQueue.discardSend(revisionId).catch(() => {
+            new import_obsidian24.Notice("Havemind: could not discard this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
-        rejoinRosterProvider: () => this.rejoinRosterView(),
-        rejoinWaitingProvider: () => this.rejoinWaiting,
+        rejoinRosterProvider: () => buildRejoinRosterView(this.people.rosterMembers),
+        rejoinWaitingProvider: () => this.people.rejoinWaiting,
         onRejoin: (membershipId) => {
-          void this.requestRejoin(membershipId);
+          void this.people.requestRejoin(membershipId);
         },
         onRemove: (membershipId) => {
-          void this.removeMember(membershipId);
+          void this.people.removeMember(membershipId);
         },
         onConnect: (input, serverUrl, report) => {
           void this.connectFromInput(input, serverUrl, report).catch(() => {
@@ -26696,104 +27144,30 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
           return copyTextToClipboard(envelope, browserClipboardCopyDeps());
         },
         onCreateInvitation: (role, name, report) => {
-          void this.createInvitation(role, name, report);
+          void this.invitations.createInvitation(role, name, report);
         },
-        onDismissInvitation: () => this.dismissInvitation(),
+        onDismissInvitation: () => this.invitations.dismissInvitation(),
         onApprove: (invitationId, verificationPhrase, report) => {
-          void this.approvePendingDevice(invitationId, verificationPhrase, report);
+          void this.invitations.approvePendingDevice(invitationId, verificationPhrase, report);
         },
         onReject: (invitationId, report) => {
-          void this.rejectPendingDevice(invitationId, report);
+          void this.invitations.rejectPendingDevice(invitationId, report);
         },
         onClosed: () => this.views.unregisterOnboarding(view)
       });
       this.views.registerOnboarding(view);
       return view;
     });
-    this.addCommand({
-      id: "open-activity",
-      name: "Open activity",
-      callback: () => this.openActivityView()
-    });
-    this.addCommand({
-      id: "connect",
-      name: "Connect to Havemind",
-      callback: () => this.openConnectView()
-    });
-    this.addCommand({
-      id: "create-connection",
-      name: "Create connection (owner)",
-      callback: () => this.openCreateConnectionView()
-    });
-    const actions = this.connectionActions();
-    this.addCommand({
-      id: "sync-now",
-      name: "Sync now",
-      checkCallback: (checking) => {
-        if (checking) return actions.connected();
-        actions.syncNow();
-        return true;
-      }
-    });
-    this.addCommand({
-      id: "disconnect",
-      name: "Disconnect",
-      checkCallback: (checking) => {
-        if (checking) return actions.connected();
-        actions.disconnect();
-        return true;
-      }
-    });
-    this.addCommand({
-      id: "reset-connection",
-      name: "Reset connection",
-      callback: () => {
-        actions.resetConnection();
-      }
-    });
-    this.addRibbonIcon("hexagon", "Open Havemind", () => {
-      void this.openHavemindPane();
-    });
-    this.statusItem = this.addStatusBarItem();
-    this.statusItem.addClass("havemind-status-bar");
-    this.statusItem.onClickEvent(() => {
-      void this.openView(HAVEMIND_ONBOARDING_VIEW);
-    });
-    this.statusItem.setAttribute("role", "button");
-    this.statusItem.setAttribute("tabindex", "0");
-    this.statusItem.setAttribute("aria-label", "Open Havemind panel");
-    this.registerDomEvent(this.statusItem, "keydown", (event) => {
-      const keyboardEvent = event;
-      if (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ") return;
-      keyboardEvent.preventDefault();
-      void this.openView(HAVEMIND_ONBOARDING_VIEW);
-    });
-    this.setStatus(formatStatusBar({ status: "disconnected" }));
-    this.lastEditedItem = this.addStatusBarItem();
-    const workspace = this.app.workspace;
-    const fileOpen = workspace.on?.("file-open", () => {
-      void this.refreshLastEdited();
-    });
-    if (fileOpen !== void 0 && fileOpen !== null) {
-      this.registerEvent(fileOpen);
-    }
+    registerCommands(this);
+    this.statusBar.attach();
     this.addSettingTab(new HavemindSettingTab(this.app, this));
     this.registerObsidianProtocolHandler("havemind-join", (data) => {
       if (!isSafePassiveJoinProtocolData(data)) return;
-      this.connectionActive = false;
+      this.invitations.connectionActive = false;
       this.arrivedWithInvitation = true;
-      void this.openView(HAVEMIND_ONBOARDING_VIEW);
+      void this.openPane();
     });
-    for (const event of ["create", "delete", "rename"]) {
-      const { vault } = this.app;
-      const ref = vault.on?.(event, () => {
-        this.conflicts.invalidate();
-        this.views.refreshOnboarding();
-      });
-      if (ref !== void 0 && ref !== null) {
-        this.registerEvent(ref);
-      }
-    }
+    this.conflicts.watchVault();
     this.app.workspace.onLayoutReady(() => {
       void this.startConnection();
     });
@@ -26809,135 +27183,13 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
   onunload() {
     this.unloaded = true;
     this.abortConnectionAttempts();
-    this.disarmRejoin();
-    if (this.conflictSweepTimer !== null) {
-      globalThis.clearTimeout(this.conflictSweepTimer);
-      this.conflictSweepTimer = null;
-    }
+    this.rejoin.disarmRejoin();
+    this.conflicts.cancelConflictSweep();
     this.connection?.stop();
     this.connection = null;
     this.syncState = null;
     this.activityLogUnsubscribe?.();
     this.activityLogUnsubscribe = null;
-  }
-  openConnectView() {
-    this.connectionActive = false;
-    this.views.refreshOnboardingNow();
-    return this.openView(HAVEMIND_ONBOARDING_VIEW);
-  }
-  /**
-   * Owner action: open the unified "Create connection" panel where the invite
-   * is minted and the joining device is approved in one living surface.
-   */
-  openCreateConnectionView() {
-    this.connectionActive = true;
-    this.connectionNotice = void 0;
-    this.connectionNoticeKind = void 0;
-    this.views.refreshOnboardingNow();
-    return this.openView(HAVEMIND_ONBOARDING_VIEW);
-  }
-  /** Returns from the owner composer without discarding an already-minted invite. */
-  closeCreateConnectionView() {
-    this.connectionActive = false;
-    this.connectionNotice = void 0;
-    this.connectionNoticeKind = void 0;
-    this.views.refreshOnboardingNow();
-  }
-  /** Snapshot of the owner composer state for the unified panel. */
-  composerModel() {
-    return {
-      role: "editor",
-      name: "",
-      invitation: this.pendingInvitation,
-      pending: this.pendingApprovals,
-      invitationExpired: this.isInvitationExpired(),
-      ...this.connectionNotice === void 0 ? {} : { notice: this.connectionNotice },
-      ...this.connectionNoticeKind === void 0 ? {} : { noticeKind: this.connectionNoticeKind }
-    };
-  }
-  /** True once the minted invitation is past its ISO-8601 expiry. */
-  isInvitationExpired() {
-    if (this.pendingInvitation === null) return false;
-    const expiry = Date.parse(this.pendingInvitation.expiresAt);
-    return Number.isFinite(expiry) && Date.now() >= expiry;
-  }
-  /** Owner action: refuse the device waiting on `invitationId` and drop its row. */
-  async rejectPendingDevice(invitationId, report) {
-    try {
-      const rejected = await rejectPendingDeviceForOwner(this, { invitationId });
-      if (rejected === null) {
-        report("Connect as the vault owner before rejecting a device.");
-        return;
-      }
-      this.pendingApprovals = this.pendingApprovals.filter(
-        (entry) => entry.invitationId !== invitationId
-      );
-      this.connectionNotice = "Device rejected. Its invitation no longer works.";
-      this.connectionNoticeKind = void 0;
-      this.views.refreshOnboardingNow();
-    } catch (error51) {
-      report(error51 instanceof Error ? error51.message : "Could not reject the device.");
-    }
-  }
-  /**
-   * Owner action: approve the joining device that read out `verificationPhrase`
-   * against `POST …/invitations/:invitationId/approve`. The phrase is a
-   * second-channel secret and is never logged; failures are reported to the view.
-   */
-  async approvePendingDevice(invitationId, verificationPhrase, report) {
-    try {
-      const approved = await approvePendingDeviceForOwner(this, {
-        invitationId,
-        verificationPhrase
-      });
-      if (approved === null) {
-        report("Connect as the vault owner before approving a device.");
-        return;
-      }
-      const approvedEntry = this.pendingApprovals.find(
-        (entry) => entry.invitationId === invitationId
-      );
-      const approvedName = approvedEntry?.intendedMemberDisplayName;
-      const connectedMessage = `${approvedName ?? "Device"} connected.`;
-      try {
-        await this.recordRosterMember({
-          membershipId: approved.membershipId,
-          displayName: approvedName ?? "Member",
-          role: approvedEntry?.intendedRole ?? "editor",
-          self: false
-        });
-      } catch {
-        report(
-          "Device approved, but its local roster entry could not be saved. Reconnect to retry the local save."
-        );
-        return;
-      }
-      this.pendingApprovals = this.pendingApprovals.filter(
-        (entry) => entry.invitationId !== invitationId
-      );
-      this.connectionNotice = connectedMessage;
-      this.connectionNoticeKind = "success";
-      report(connectedMessage);
-      this.views.refreshOnboardingNow();
-    } catch (error51) {
-      if (error51 instanceof ApproveDeviceError && error51.locked) {
-        this.pendingApprovals = this.pendingApprovals.filter(
-          (entry) => entry.invitationId !== invitationId
-        );
-        this.connectionNotice = "This invitation is now invalid. Create a new one above to try again.";
-        this.connectionNoticeKind = void 0;
-        report(error51.message);
-        this.views.refreshOnboardingNow();
-        return;
-      }
-      if (error51 instanceof ApproveDeviceError) {
-        report(error51.message);
-        return;
-      }
-      report(
-        `Could not approve: ${error51 instanceof Error ? error51.message : "unexpected error"}`
-      );
-    }
   }
   /** Starts sync without allowing startup failures to escape UI/event callbacks. */
   async startConnection() {
@@ -26947,8 +27199,8 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       if (this.unloaded) return;
       this.connectionStatus = "offline";
       this.connectionError = "Havemind could not start syncing. Try reconnecting.";
-      this.setStatus(formatStatusBar({ status: "offline" }));
-      new import_obsidian19.Notice("Havemind: could not start syncing. Try reconnecting.");
+      this.statusBar.setStatus(formatStatusBar({ status: "offline" }));
+      new import_obsidian24.Notice("Havemind: could not start syncing. Try reconnecting.");
       this.views.refreshOnboarding();
     }
   }
@@ -26956,7 +27208,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
   async startConnectionOnce() {
     const attempt = this.beginConnectionAttempt();
     try {
-      await this.loadRoster();
+      await this.people.loadRoster();
       if (attempt.signal.aborted) return;
       const handle = await startHavemindConnection(
         this,
@@ -26971,12 +27223,12 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       this.connection = handle;
       this.syncState = handle.state ?? null;
       this.connectGeneration += 1;
-      this.adoptSelfMembership(this.connection);
-      void this.refreshRoster();
+      this.people.adoptSelfMembership(this.connection);
+      void this.people.refreshRoster();
       if (handle.selfMembership?.role === "owner") {
-        void this.restorePendingApprovals();
+        void this.invitations.restorePendingApprovals();
       }
-      this.scheduleConflictSweep();
+      this.conflicts.scheduleConflictSweep();
     } finally {
       this.connectionAttemptAborters.delete(attempt);
     }
@@ -26989,14 +27241,14 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       // the other device's edits are no longer invisible.
       onRemoteActivity: (entry) => this.activityLog.record(entry),
       // MRG-05: a new conflict copy schedules a debounced auto-repair sweep.
-      onConflictWritten: () => this.scheduleConflictSweep(),
+      onConflictWritten: () => this.conflicts.scheduleConflictSweep(),
       // MAJOR 1: a successful commit that cleared a stale failed-to-queue row
       // refreshes the panel at once, so the phantom failure disappears.
       onSendQueueChanged: () => this.views.refreshOnboarding(),
       // MINOR 7: commit-recovery already showed a Notice for this failed-to-queue
       // row, so record its id as notified, the panel's quarantine-notice check
       // then skips it, preventing a duplicate Notice for the same event.
-      onFailedToQueueNotified: (revisionId) => this.notifiedQuarantineIds.add(revisionId)
+      onFailedToQueueNotified: (revisionId) => this.sendQueue.notifiedQuarantineIds.add(revisionId)
     };
   }
   /**
@@ -27007,7 +27259,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     const connection = this.connection;
     const state = this.syncState;
     if (connection?.revisionContent === void 0 || state === null) {
-      new import_obsidian19.Notice("Havemind: connect before restoring a revision.");
+      new import_obsidian24.Notice("Havemind: connect before restoring a revision.");
       return;
     }
     try {
@@ -27020,159 +27272,17 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         revisionId
       );
       if (result.outcome === "unavailable") {
-        new import_obsidian19.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
+        new import_obsidian24.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
       } else if (result.outcome === "unchanged") {
-        new import_obsidian19.Notice(`Havemind: ${result.path} already has that text.`);
+        new import_obsidian24.Notice(`Havemind: ${result.path} already has that text.`);
       } else {
-        new import_obsidian19.Notice(`Havemind: restored ${result.path} to that version.`);
+        new import_obsidian24.Notice(`Havemind: restored ${result.path} to that version.`);
       }
     } catch (error51) {
-      new import_obsidian19.Notice(
-        `Havemind: could not restore that version, ${error51 instanceof Error ? error51.message : "unexpected error"}`
+      new import_obsidian24.Notice(
+        `Havemind: could not restore that version, ${errorMessage(error51)}`
       );
     }
-  }
-  /**
-   * The Obsidian-backed conflict vault port. `this.app.vault` is not modelled on
-   * the ambient `App`, so cast through a local shape rather than patching the
-   * shared interface (the port degrades to "no conflicts" for a stub vault).
-   */
-  conflictPort() {
-    const app = this.app;
-    return createObsidianConflictPort(app.vault, app.workspace);
-  }
-  /**
-   * Opens the MRG-03 resolve modal for a conflict copy: computes the note-vs-copy
-   * diff (text copies with a known target only), then wires the three actions to
-   * the shared resolver. After a resolve, the panel re-renders so the resolved
-   * row drops out and the section disappears once empty.
-   */
-  async openConflictModal(copyPath) {
-    try {
-      return await this.openConflictModalOnce(copyPath);
-    } catch {
-      new import_obsidian19.Notice("Havemind: could not open this conflict. Try again.");
-      this.views.refreshOnboarding();
-      return null;
-    }
-  }
-  /** The fallible vault read and modal construction behind the safe UI boundary. */
-  async openConflictModalOnce(copyPath) {
-    const port = this.conflictPort();
-    const copy = listConflictCopies(port).find((c) => c.copyPath === copyPath);
-    if (copy === void 0) return null;
-    let diff = null;
-    let diffTooLarge = false;
-    if (copy.targetKnown && !copy.isBinary && copy.targetPath !== null) {
-      const [mine, theirs] = await Promise.all([
-        port.readText(copy.targetPath),
-        port.readText(copy.copyPath)
-      ]);
-      if (mine !== null && theirs !== null) {
-        diff = computeLineDiff(mine, theirs);
-        diffTooLarge = diff === null;
-      }
-    }
-    if (this.conflictResolver === null) {
-      this.conflictResolver = createConflictResolver(port);
-    }
-    const resolver = this.conflictResolver;
-    const run = (action, modal2) => {
-      void resolver.resolve(copy, action).then(
-        (outcome) => {
-          if (outcome === "vanished") {
-            new import_obsidian19.Notice("This conflict was already auto-resolved.");
-          }
-          if (outcome === "target-missing") {
-            new import_obsidian19.Notice("The note was moved or deleted, so the conflict copy was kept.");
-          }
-          modal2.close();
-          this.views.refreshOnboarding();
-        },
-        () => {
-          new import_obsidian19.Notice("Havemind: could not resolve this conflict. Try again.");
-          this.views.refreshOnboarding();
-        }
-      );
-    };
-    const modal = new ConflictResolveModal(
-      this.app,
-      buildConflictModalModel(copy, diff, { diffTooLarge }),
-      {
-        onKeepMine: () => run("keepMine", modal),
-        ...copy.targetKnown && !copy.isBinary ? { onKeepTheirs: () => run("keepTheirs", modal) } : {},
-        onKeepBoth: () => run("keepBoth", modal)
-      }
-    );
-    modal.open();
-    return modal;
-  }
-  /** Records the local member into the roster once the connection knows it. */
-  adoptSelfMembership(handle) {
-    const self = handle?.selfMembership;
-    if (self === void 0) return;
-    void this.recordRosterMember({
-      membershipId: self.membershipId,
-      displayName: "You",
-      role: self.role,
-      self: true
-    }).catch(() => {
-      new import_obsidian19.Notice("Havemind: could not save this device in the member roster.");
-      this.views.refreshOnboarding();
-    });
-  }
-  /** The durable roster store over the shared plugin-data blob. */
-  rosterStore() {
-    return new RosterStore({
-      persist: createSerializedDataPort(getPluginDataMutex(this))
-    });
-  }
-  async loadRoster() {
-    this.rosterMembers = await this.rosterStore().readMembers();
-    this.views.refreshOnboarding();
-  }
-  /**
-   * P3: replaces the People list with the vault's server-authoritative roster
-   * (`GET /members`). The roster used to be assembled from what each device
-   * happened to witness, so a guest saw a list of one while the owner saw
-   * everyone. The server holds the truth and every member reads the same list.
-   *
-   * Failure is deliberately silent and NON-DESTRUCTIVE: an unreachable server,
-   * a refused session or a malformed payload leaves `rosterMembers` exactly as
-   * it was, so an offline device keeps showing what it last knew instead of
-   * blanking the People pane. The next connect or reconnect retries.
-   */
-  async refreshRoster() {
-    const self = this.rosterMembers.find((member) => member.self);
-    const selfMembershipId = self?.membershipId ?? this.connection?.selfMembership?.membershipId ?? null;
-    try {
-      const members = await this.readRoster(selfMembershipId);
-      if (members === null || this.unloaded) return;
-      this.rosterMembers = await this.rosterStore().replaceMembers(members);
-      this.views.refreshOnboarding();
-    } catch {
-    }
-  }
-  /**
-   * B4: the live connection reads the roster with its own access token. The
-   * refresh-token route raced that connection's rotation (401 at every start)
-   * and is kept only for a server that does not send membership ids yet.
-   */
-  async readRoster(selfMembershipId) {
-    const readRoster = this.connection?.readRoster;
-    if (readRoster !== void 0) {
-      try {
-        return await readRoster(selfMembershipId);
-      } catch (error51) {
-        if (!(error51 instanceof LegacyRosterServerError)) throw error51;
-      }
-    }
-    return fetchMemberRosterForVault(this, { selfMembershipId });
-  }
-  /** Upserts a member, persists the roster, and refreshes the live surfaces. */
-  async recordRosterMember(member) {
-    this.rosterMembers = await this.rosterStore().recordMember(member);
-    this.views.refreshOnboarding();
   }
   /**
    * Drives the Connect form: classifies the pasted input (invitation envelope or
@@ -27218,9 +27328,9 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
         this.connection = handle;
         this.syncState = handle.state ?? null;
         this.connectGeneration += 1;
-        this.adoptSelfMembership(handle);
-        void this.refreshRoster();
-        this.scheduleConflictSweep();
+        this.people.adoptSelfMembership(handle);
+        void this.people.refreshRoster();
+        this.conflicts.scheduleConflictSweep();
       }
     } finally {
       this.connectionAttemptAborters.delete(attempt);
@@ -27238,7 +27348,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
   async syncNow() {
     const connection = this.connection;
     if (connection === null) {
-      new import_obsidian19.Notice("Havemind: connect before syncing.");
+      new import_obsidian24.Notice("Havemind: connect before syncing.");
       return;
     }
     if (connection.syncNow !== void 0 && this.connectionStatus !== "reconnect-required") {
@@ -27253,13 +27363,13 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     this.connection?.stop();
     this.connection = null;
     this.syncState = null;
-    this.disarmRejoin();
+    this.rejoin.disarmRejoin();
     this.connectionStatus = "disconnected";
     this.lastSyncedAt = void 0;
     this.connectionError = void 0;
     this.awaitingApproval = null;
     this.guestInvitationInvalid = false;
-    this.setStatus(formatStatusBar({ status: "disconnected" }));
+    this.statusBar.setStatus(formatStatusBar({ status: "disconnected" }));
     this.views.refreshOnboardingNow();
   }
   /** Starts a tracked connection build; all live attempts are cancelled on teardown. */
@@ -27283,367 +27393,18 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     if (status === "synced") {
       this.lastSyncedAt = Date.now();
       this.connectionError = void 0;
-      void this.refreshLastEdited();
+      void this.statusBar.refreshLastEdited();
     }
     if (status === "reset-required") {
       this.connectionError = void 0;
     }
     if (status === "reconnect-required") {
       this.connectionError = "The server refused the session, reconnect.";
-      void this.armRejoin();
+      void this.rejoin.armRejoin();
     }
-    this.checkQuarantineNotices();
-    this.setStatus(view);
+    this.sendQueue.checkQuarantineNotices();
+    this.statusBar.setStatus(view);
     this.views.refreshOnboarding();
-  }
-  /**
-   * SND-01 send-queue view for the panel, or null when disconnected (no state).
-   * Reads outbox ages + quarantine straight from the persisted sync state and
-   * resolves each quarantined fileId back to a vault path where one is known.
-   */
-  sendQueueView() {
-    const state = this.syncState;
-    if (state === null) return null;
-    return buildSendQueueStatus({
-      outbox: state.outboxAges(),
-      quarantine: [
-        ...state.quarantineSnapshot(),
-        // Incoming changes this device could not apply (B2) share the same rows.
-        ...state.parkedSnapshot().map((item) => ({
-          ...item,
-          revisionId: `${PARKED_ROW_PREFIX}${item.revisionId}`,
-          reason: `Could not be received: ${item.reason}`
-        }))
-      ].map((item) => {
-        const path = state.pathForFileId(item.fileId);
-        return {
-          revisionId: item.revisionId,
-          fileId: item.fileId,
-          reason: item.reason,
-          ...path === null ? {} : { path }
-        };
-      }),
-      now: Date.now()
-    });
-  }
-  /**
-   * Retry a quarantined send. A server-rejected send (SND-01) re-enqueues its
-   * stashed envelope through the outbox. A failed-to-queue row (SND-02, MAJOR 2)
-   * has no envelope, it never reached the outbox, so Retry re-runs the commit
-   * chain for the path against the current on-disk content; if the file has
-   * since been deleted, surface a Notice and drop the stale row instead of
-   * pushing a phantom empty create for a vanished file.
-   */
-  async retrySend(revisionId) {
-    if (revisionId.startsWith(PARKED_ROW_PREFIX)) {
-      await this.retryParked(revisionId.slice(PARKED_ROW_PREFIX.length));
-      return;
-    }
-    const failedPath = parseFailedToQueuePath(revisionId);
-    if (failedPath !== null) {
-      await this.retryFromDisk(revisionId, failedPath, { discardOnRetrigger: false });
-      return;
-    }
-    const requeued = await this.syncState?.requeueQuarantined(revisionId) ?? false;
-    const fallback = planQuarantineRequeueFallback(
-      requeued,
-      this.pathForQuarantineRow(revisionId)
-    );
-    if (fallback.kind === "retry-from-disk") {
-      await this.retryFromDisk(revisionId, fallback.path, {
-        discardOnRetrigger: true
-      });
-      return;
-    }
-    if (fallback.kind === "discard-dead-letter") {
-      new import_obsidian19.Notice(fallback.notice);
-      await this.syncState?.discardQuarantined(revisionId);
-    }
-    this.views.refreshOnboarding();
-  }
-  /** The vault path a quarantine row's fileId resolves to, or null. */
-  pathForQuarantineRow(revisionId) {
-    const state = this.syncState;
-    if (state === null) return null;
-    const row = state.quarantineSnapshot().find((item) => item.revisionId === revisionId);
-    return row === void 0 ? null : state.pathForFileId(row.fileId);
-  }
-  /**
-   * Re-run the commit chain for `path` from disk (the MAJOR 2 recovery for a row
-   * with no usable stashed envelope). FINDING 1: the retry outcome is tri-state.
-   * Only a CONFIRMED-missing file drops the row; `unavailable` (debouncer
-   * disposed) and a null/uncallable connection, the common state for a durable
-   * row after a restart, before reconnect, keep the row and tell the user to
-   * reconnect, so a real unsynced change is never silently discarded.
-   * `discardOnRetrigger` drops the row immediately after a real re-trigger for a
-   * superseded server-rejected row (MAJOR 4); a failed-to-queue row keeps its
-   * row until the commit lands.
-   */
-  async retryFromDisk(revisionId, path, options) {
-    const outcome = this.connection?.retryFailedCommit?.(path);
-    const effect = planRetryFromDisk(outcome, path, options.discardOnRetrigger);
-    if (effect.notice !== null) new import_obsidian19.Notice(effect.notice);
-    if (effect.discard) await this.syncState?.discardQuarantined(revisionId);
-    this.views.refreshOnboardingNow();
-  }
-  /** Permanently discard a quarantined send (SND-01). */
-  /** Applies a parked incoming change again (B2). */
-  async retryParked(revisionId) {
-    try {
-      const done = await this.connection?.retryParked?.(revisionId) ?? false;
-      if (!done) {
-        new import_obsidian19.Notice("Havemind: the note is open with unsaved changes, or you are not connected. Try again later.");
-      }
-    } catch (error51) {
-      new import_obsidian19.Notice(
-        `Havemind: still cannot apply this change, ${error51 instanceof Error ? error51.message : "unexpected error"}`
-      );
-    }
-    this.views.refreshOnboardingNow();
-  }
-  async discardSend(revisionId) {
-    if (revisionId.startsWith(PARKED_ROW_PREFIX)) {
-      await this.syncState?.unparkRemote(revisionId.slice(PARKED_ROW_PREFIX.length));
-      this.views.refreshOnboardingNow();
-      return;
-    }
-    await this.syncState?.discardQuarantined(revisionId);
-    this.views.refreshOnboardingNow();
-  }
-  /**
-   * SND-01: emit one Notice per item the FIRST time it enters quarantine. A
-   * retry that re-quarantines the same revision is silent, its id is already in
-   * `notifiedQuarantineIds`. Discarding then re-quarantining a NEW revision for
-   * the same file does notify, which is correct: it is a distinct failed send.
-   */
-  checkQuarantineNotices() {
-    const state = this.syncState;
-    if (state === null) return;
-    const quarantine = state.quarantineSnapshot().map((item) => ({
-      revisionId: item.revisionId,
-      fileId: item.fileId,
-      reason: item.reason,
-      ...state.pathForFileId(item.fileId) === null ? {} : { path: state.pathForFileId(item.fileId) }
-    }));
-    const { fresh, next } = selectNewlyQuarantined(
-      this.notifiedQuarantineIds,
-      quarantine
-    );
-    this.notifiedQuarantineIds = new Set(next);
-    for (const item of fresh) {
-      const label = item.path ?? item.fileId;
-      new import_obsidian19.Notice(
-        `A change to ${label} could not be sent, see the Havemind panel.`
-      );
-    }
-  }
-  /**
-   * MRG-05: schedule a single debounced auto-repair sweep. A burst of new
-   * conflict copies (or a start-up call plus a runtime write) collapses into one
-   * pass ~2s after the last trigger. The sweep only writes notes (outside the
-   * reserved folder) and deletes resolved copies (inside it), and the trigger
-   * keys off NEW copy writes only, so a sweep never re-schedules itself.
-   */
-  scheduleConflictSweep() {
-    if (this.conflictSweepTimer !== null) {
-      globalThis.clearTimeout(this.conflictSweepTimer);
-    }
-    this.conflictSweepTimer = globalThis.setTimeout(() => {
-      this.conflictSweepTimer = null;
-      void this.runConflictSweep().catch(() => {
-        new import_obsidian19.Notice("Havemind: automatic conflict repair could not finish.");
-        this.views.refreshOnboarding();
-      });
-    }, CONFLICT_SWEEP_DEBOUNCE_MS);
-  }
-  /**
-   * Runs one auto-repair pass (MRG-05). The merge ancestor comes from the
-   * connection's revision history; a copy with none is left untouched for the
-   * manual modal. A guard prevents overlapping runs. Refreshes
-   * the panel afterwards so a resolved conflict's row drops out.
-   */
-  async runConflictSweep() {
-    if (this.syncState === null) return;
-    await this.conflictSweepGuard.trigger();
-  }
-  /** One sweep pass. Called only via {@link conflictSweepGuard}. */
-  async runConflictSweepOnce() {
-    const state = this.syncState;
-    if (state === null) return;
-    await sweepConflictCopies({
-      port: this.conflictPort(),
-      fileIdAtPath: (path) => state.fileIdAtPath(path),
-      fileIdForCopy: (path) => state.fileIdForConflictCopy(path),
-      ancestorFor: async (copyPath, fileId, targetPath) => await this.connection?.conflictAncestor?.(copyPath, fileId, targetPath) ?? null,
-      notify: (message) => {
-        new import_obsidian19.Notice(`Havemind: ${message}`);
-      }
-    });
-    this.views.refreshOnboarding();
-  }
-  /** The rejoin-aware roster projection over the persistent members. */
-  rejoinRosterView() {
-    return buildRejoinRosterView(this.rosterMembers);
-  }
-  /**
-   * Owner action: issue a rejoin grant for a known-dead contact via the existing
-   * authenticated transport, then show "waiting for <name> to reconnect" until
-   * the roster refreshes. Nothing secret is sent or shown.
-   */
-  async requestRejoin(membershipId) {
-    try {
-      const waiting = await requestRejoinGrantForOwner(this, { membershipId });
-      if (waiting === null) {
-        new import_obsidian19.Notice("Havemind: connect as the vault owner before rejoining a member.");
-        return;
-      }
-      this.rejoinWaiting = /* @__PURE__ */ new Set([...this.rejoinWaiting, membershipId]);
-      this.views.refreshOnboardingNow();
-    } catch (error51) {
-      new import_obsidian19.Notice(
-        `Havemind: could not request rejoin, ${error51 instanceof Error ? error51.message : "unexpected error"}`
-      );
-    }
-  }
-  /**
-   * Owner action: permanently remove a member from the vault. Revokes the
-   * membership server-side (append-only, the member's past revisions and
-   * attribution survive; their sessions are burned and they are terminally
-   * locked out), then drops the member from the local roster and clears any
-   * dead/waiting markers so no stale Rejoin affordance lingers. This is a
-   * control-plane action and records nothing in the Activity feed. On success a
-   * confirmation Notice names the removed member.
-   */
-  async removeMember(membershipId) {
-    const member = this.rosterMembers.find(
-      (entry) => entry.membershipId === membershipId
-    );
-    const displayName = member?.displayName ?? "member";
-    try {
-      const removed = await revokeMembershipForOwner(this, { membershipId });
-      if (removed === null) {
-        new import_obsidian19.Notice(
-          "Havemind: connect as the vault owner before removing a member."
-        );
-        return;
-      }
-      this.rosterMembers = await this.rosterStore().removeMember(membershipId);
-      this.rejoinWaiting = new Set(
-        [...this.rejoinWaiting].filter((id) => id !== membershipId)
-      );
-      new import_obsidian19.Notice(`Removed ${displayName} from the vault.`);
-      this.views.refreshOnboardingNow();
-    } catch (error51) {
-      new import_obsidian19.Notice(
-        `Havemind: could not remove member, ${error51 instanceof Error ? error51.message : "unexpected error"}`
-      );
-    }
-  }
-  /**
-   * Invitee side: arm the rejoin poll after a terminal auth failure. Idempotent
-   *, a second terminal status while a poll is already armed is a no-op, so the
-   * poll is never doubled. Builds the controller from this device's persisted
-   * (membershipId, deviceId); if none is stored there is nothing to rejoin with.
-   */
-  async armRejoin() {
-    if (this.rejoinController !== null) return;
-    let controller;
-    try {
-      controller = await buildRejoinControllerForInvitee(this);
-    } catch {
-      if (!this.unloaded) {
-        this.connectionError = "Havemind could not prepare reconnection. Pair again if this persists.";
-        this.views.refreshOnboardingNow();
-      }
-      return;
-    }
-    if (controller === null || this.unloaded || this.rejoinController !== null) {
-      return;
-    }
-    this.rejoinController = controller;
-    this.rejoinRestarted = false;
-    this.rejoinArmedGeneration = this.connectGeneration;
-    const timer = globalThis.setInterval(() => {
-      void this.pollRejoinOnce();
-    }, REJOIN_POLL_INTERVAL_MS);
-    this.registerInterval(timer);
-    this.rejoinPollTimer = timer;
-  }
-  /** Hydrates owner approvals after restart; failure never disrupts sync. */
-  async restorePendingApprovals() {
-    try {
-      const pending = await listPendingApprovalsForOwner(this);
-      if (pending === null || this.unloaded) return;
-      this.pendingApprovals = [...pending];
-      this.views.refreshOnboarding();
-    } catch {
-    }
-  }
-  /**
-   * One rejoin poll tick. Presents the persisted binding; on the first
-   * 'syncing' result it disarms and restarts the connection exactly once (the
-   * `rejoinRestarted` guard plus the controller's own idempotency prevent a
-   * double-start). If unload raced the in-flight attempt, it cancels cleanly.
-   */
-  async pollRejoinOnce() {
-    const controller = this.rejoinController;
-    if (controller === null || this.rejoinRestarted || this.unloaded) return;
-    if (this.rejoinArmedGeneration !== null && this.connectGeneration !== this.rejoinArmedGeneration) {
-      this.disarmRejoin();
-      return;
-    }
-    let result;
-    try {
-      result = await controller.attempt();
-    } catch {
-      if (this.unloaded || this.rejoinRestarted) return;
-      this.surfaceRejoinFailed();
-      return;
-    }
-    if (this.unloaded || this.rejoinRestarted) return;
-    if (typeof result === "object" && result.status === "syncing") {
-      this.rejoinRestarted = true;
-      this.disarmRejoin();
-      await this.restartConnectionAfterRejoin();
-      return;
-    }
-    if (result === "rejoin-failed") {
-      this.surfaceRejoinFailed();
-    }
-  }
-  /**
-   * Disarm the doomed poll and surface a terminal rejoin failure to the user
-   * (status + Notice), leaving a manual reconnect as the only retry path. Shared
-   * by the 'rejoin-failed' controller result and a raw throw from attempt().
-   */
-  surfaceRejoinFailed() {
-    this.disarmRejoin();
-    this.connectionError = "Rejoin failed, the server rejected the automatic rejoin. Reconnect manually to resume syncing.";
-    this.setStatus(formatStatusBar({ status: "reconnect-required" }));
-    new import_obsidian19.Notice(
-      "Havemind: rejoin failed. Reconnect manually to resume syncing."
-    );
-    this.views.refreshOnboarding();
-  }
-  /** Tears the invitee rejoin poll down (idempotent). */
-  disarmRejoin() {
-    if (this.rejoinPollTimer !== null) {
-      globalThis.clearInterval(this.rejoinPollTimer);
-      this.rejoinPollTimer = null;
-    }
-    this.rejoinController = null;
-    this.rejoinArmedGeneration = null;
-  }
-  /**
-   * Restarts the connection after a successful rejoin. The fresh refresh token
-   * is already persisted, so startConnection resumes sync under the SAME
-   * membership. Follows the established invariant: stop-previous → await →
-   * guard-against-unload → assign (the guard lives inside startConnection).
-   */
-  async restartConnectionAfterRejoin() {
-    this.connection?.stop();
-    this.connection = null;
-    await this.startConnection();
   }
   /**
    * User-initiated "Retry now": force an immediate reconnect from a non-synced
@@ -27676,13 +27437,27 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     }
     this.retryInFlight = true;
     try {
-      this.disarmRejoin();
+      this.rejoin.disarmRejoin();
       this.connection?.stop();
       this.connection = null;
       await this.startConnection();
     } finally {
       this.retryInFlight = false;
     }
+  }
+  /**
+   * U2: every entry point to Reset connection asks first. It wipes the pairing
+   * and the sync state, and only the owner's approval brings the device back.
+   */
+  confirmResetConnection() {
+    new ConfirmModal(this.app, {
+      title: "Reset connection?",
+      body: "This device forgets its pairing and sync state. No note is touched, but syncing stops until you paste a new invitation and the owner approves it.",
+      confirmLabel: "Reset connection",
+      onConfirm: () => {
+        void this.resetConnection();
+      }
+    }).open();
   }
   /**
    * User-initiated "Reset connection" (P1 #5): clear the damaged persisted
@@ -27698,52 +27473,36 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
    * is touched: notes on disk are the source of truth and are re-reconciled once
    * the device is paired again.
    */
-  /**
-   * U2: every entry point to Reset connection asks first. It wipes the pairing
-   * and the sync state, and only the owner's approval brings the device back.
-   */
-  confirmResetConnection() {
-    new ConfirmModal(this.app, {
-      title: "Reset connection?",
-      body: "This device forgets its pairing and sync state. No note is touched, but syncing stops until you paste a new invitation and the owner approves it.",
-      confirmLabel: "Reset connection",
-      onConfirm: () => {
-        void this.resetConnection();
-      }
-    }).open();
-  }
   async resetConnection() {
     if (this.resetInFlight) return;
     this.resetInFlight = true;
     try {
       this.abortConnectionAttempts();
-      this.disarmRejoin();
+      this.rejoin.disarmRejoin();
       this.connection?.stop();
       this.connection = null;
       this.syncState = null;
       await resetHavemindConnectionState(this);
       forgetSharedAccessProvider(this);
-      this.rosterMembers = [];
-      this.rejoinWaiting = /* @__PURE__ */ new Set();
-      this.pendingInvitation = null;
-      this.pendingApprovals = [];
-      this.notifiedQuarantineIds = /* @__PURE__ */ new Set();
+      this.people.rosterMembers = [];
+      this.people.rejoinWaiting = /* @__PURE__ */ new Set();
+      this.invitations.pendingInvitation = null;
+      this.invitations.pendingApprovals = [];
+      this.sendQueue.notifiedQuarantineIds = /* @__PURE__ */ new Set();
       this.awaitingApproval = null;
       this.guestInvitationInvalid = false;
-      this.connectionActive = false;
-      this.connectionNotice = void 0;
-      this.connectionNoticeKind = void 0;
+      this.invitations.connectionActive = false;
+      this.invitations.connectionNotice = void 0;
+      this.invitations.connectionNoticeKind = void 0;
       this.connectionStatus = "disconnected";
       this.lastSyncedAt = void 0;
       this.connectionError = void 0;
-      this.setStatus(formatStatusBar({ status: "disconnected" }));
-      new import_obsidian19.Notice(
+      this.statusBar.setStatus(formatStatusBar({ status: "disconnected" }));
+      new import_obsidian24.Notice(
         "Havemind: connection reset. Paste a new invitation or pairing token to connect."
       );
     } catch (error51) {
-      new import_obsidian19.Notice(
-        `Havemind: could not reset the connection, ${error51 instanceof Error ? error51.message : "unexpected error"}`
-      );
+      new import_obsidian24.Notice(`Havemind: could not reset the connection, ${errorMessage(error51)}`);
     } finally {
       this.resetInFlight = false;
       this.views.refreshOnboarding();
@@ -27759,7 +27518,7 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
   }
   /** Opens (or reveals) the Havemind pane. */
   revealPanel() {
-    void this.openView(HAVEMIND_ONBOARDING_VIEW);
+    void this.openPane();
   }
   /**
    * The three connection actions plus their availability, in one place. Both the
@@ -27787,25 +27546,9 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
       server: serverName.length === 0 ? "Not connected" : serverName,
       status: this.panelStatusLabel(),
       lastSync: this.lastSyncedAt === void 0 ? "Not yet" : formatActivityTime(this.lastSyncedAt),
-      members: formatMemberCount(this.rosterMembers.length),
+      members: formatMemberCount(this.people.rosterMembers.length),
       connected: this.connection !== null
     };
-  }
-  /** Names the last editor of the open note in the status bar. */
-  async refreshLastEdited() {
-    const item = this.lastEditedItem;
-    if (item === null) return;
-    const file2 = this.app.workspace.getActiveFile?.();
-    const fileId = file2 === null || file2 === void 0 ? null : this.syncState?.fileIdAtPath(file2.path) ?? null;
-    let author = null;
-    if (fileId !== null) {
-      try {
-        author = await this.connection?.lastAuthor?.(fileId) ?? null;
-      } catch {
-        author = null;
-      }
-    }
-    item.setText(lastEditedLabel(author, this.rosterMembers));
   }
   connectionPanel() {
     return buildConnectionPanel({
@@ -27817,92 +27560,18 @@ var HavemindPlugin = class extends import_obsidian19.Plugin {
     });
   }
   /**
-   * Owner action: mint an invitation for the connected vault, reveal the
-   * copyable envelope, and register the joining device in the waiting list so
-   * the owner can approve it by clicking a row (never by typing a UUID). The
-   * envelope (a secret) is rendered only for the owner to copy, never logged.
-   */
-  async createInvitation(role, name, report) {
-    try {
-      const invitation = await createInvitationForOwner(this, {
-        intendedRole: role,
-        ...name.length === 0 ? {} : { intendedMemberDisplayName: name }
-      });
-      if (invitation === null) {
-        report("Connect as the vault owner before creating an invitation.");
-        return;
-      }
-      this.connectionActive = true;
-      this.setPendingInvitation(invitation);
-      this.pendingApprovals = [
-        ...this.pendingApprovals.filter(
-          (entry) => entry.invitationId !== invitation.invitationId
-        ),
-        {
-          invitationId: invitation.invitationId,
-          expiresAt: invitation.expiresAt,
-          intendedRole: role,
-          ...name.length === 0 ? {} : { intendedMemberDisplayName: name }
-        }
-      ];
-      this.connectionNotice = "Invitation created. Copy it and send it to the other device.";
-      this.connectionNoticeKind = void 0;
-      this.views.refreshOnboardingNow();
-    } catch (error51) {
-      report(
-        `Could not create invitation: ${error51 instanceof Error ? error51.message : "unexpected error"}`
-      );
-    }
-  }
-  /** Clears the minted-invitation display without touching the waiting list. */
-  /**
-   * Closes the owner composer and returns to the connection panel. Clearing
-   * `connectionActive` is what makes Done a real exit: `render()` gives the
-   * composer priority and returns before drawing the status indicator, so
-   * leaving the composer open would hide "Connected, synced" indefinitely and
-   * read as if the vault had disconnected.
-   */
-  dismissInvitation() {
-    this.pendingInvitation = null;
-    this.connectionActive = false;
-    this.connectionNotice = void 0;
-    this.connectionNoticeKind = void 0;
-    this.views.refreshOnboardingNow();
-  }
-  /** Stores the created invitation so the onboarding view can display it. */
-  setPendingInvitation(invitation) {
-    this.pendingInvitation = invitation;
-  }
-  setStatus(view) {
-    const item = this.statusItem;
-    if (item === null) return;
-    item.empty();
-    const glyph = item.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian19.setIcon)(glyph, "hexagon");
-    item.createEl("span", { text: view.text });
-  }
-  /**
    * The single door into the plugin (plans/007 Stage 0). Every entry point,
    * the ribbon hexagon, `open-activity`, `connect`, resolves here, so the user
-   * never has to know which of two panes holds the thing they want. `openView`
-   * reuses an existing leaf, so asking twice focuses the pane rather than
-   * opening a second copy of it.
+   * never has to know which of two panes holds the thing they want. It reuses
+   * an existing leaf, so asking twice focuses the pane rather than opening a
+   * second copy of it.
    */
-  openHavemindPane() {
-    return this.openView(HAVEMIND_ONBOARDING_VIEW);
-  }
-  openActivityView() {
-    return this.openHavemindPane();
-  }
-  async openView(type) {
-    const existingLeaf = this.app.workspace.getLeavesOfType(type)[0];
+  async openPane() {
+    const existingLeaf = this.app.workspace.getLeavesOfType(HAVEMIND_ONBOARDING_VIEW)[0];
     const leaf = existingLeaf ?? this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
     if (!existingLeaf) {
-      await leaf.setViewState({
-        active: true,
-        type
-      });
+      await leaf.setViewState({ active: true, type: HAVEMIND_ONBOARDING_VIEW });
     }
     await this.app.workspace.revealLeaf(leaf);
   }
