@@ -16524,6 +16524,72 @@ function withCorruptSidecar(base, prefix, timestamp, raw) {
   return next;
 }
 
+// src/runtime/adapters/producer-state.ts
+var EMPTY_PRODUCER_STATE = { mappings: [], heads: {} };
+function isValidProducerMapping(entry) {
+  return isRecord(entry) && typeof entry.collisionKey === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
+}
+function buildProducerMapping(entry) {
+  return {
+    collisionKey: entry.collisionKey,
+    contentHash: entry.contentHash,
+    // Preserve the binary/markdown discriminator across every load→save
+    // cycle. Dropping it here silently converts a persisted binary mapping
+    // to markdown, so the startup rebase then canonicalises its base64 over
+    // the markdown path and corrupts the raw-byte hash → a false conflict on
+    // the next binary sync (BLOCKER). Validate as an optional
+    // 'markdown'|'binary'; anything else (absent/legacy) defaults to
+    // markdown by omission, keeping legacy mappings unchanged.
+    ...entry.contentKind === "binary" || entry.contentKind === "markdown" ? { contentKind: entry.contentKind } : {},
+    fileId: entry.fileId,
+    path: entry.path,
+    // P7: the startup scan's stat; a malformed one is dropped, which only
+    // means the file is read at the next start.
+    ...isFileStat(entry.stat) ? { stat: { mtime: entry.stat.mtime, size: entry.stat.size } } : {}
+  };
+}
+function isFileStat(value) {
+  return isRecord(value) && Number.isFinite(value.mtime) && Number.isFinite(value.size);
+}
+function parseProducerStateResult(raw) {
+  if (raw === null || raw === void 0) {
+    return {
+      status: "absent",
+      state: EMPTY_PRODUCER_STATE,
+      quarantinedMappings: []
+    };
+  }
+  if (!isRecord(raw) || !Array.isArray(raw.mappings) || !isRecord(raw.heads)) {
+    console.warn(
+      "Havemind: producer state was present but structurally corrupt; its raw bytes were preserved to a sidecar and an empty state was used for this session."
+    );
+    return {
+      status: "corrupt",
+      state: EMPTY_PRODUCER_STATE,
+      quarantinedMappings: []
+    };
+  }
+  const mappings = [];
+  const quarantinedMappings = [];
+  for (const entry of raw.mappings) {
+    if (isValidProducerMapping(entry)) {
+      mappings.push(buildProducerMapping(entry));
+    } else {
+      quarantinedMappings.push(entry);
+    }
+  }
+  if (quarantinedMappings.length > 0) {
+    console.warn(
+      `Havemind: ${quarantinedMappings.length} malformed producer mapping(s) were preserved for recovery; the rest of the mapping set was kept.`
+    );
+  }
+  const heads = {};
+  for (const [fileId, revisionId] of Object.entries(raw.heads)) {
+    if (typeof revisionId === "string") heads[fileId] = revisionId;
+  }
+  return { status: "ok", state: { mappings, heads }, quarantinedMappings };
+}
+
 // src/runtime/adapters/plugin-data-ports.ts
 function createPersistPort(plugin) {
   const mutex = getPluginDataMutex(plugin);
@@ -16541,6 +16607,7 @@ function createPersistPort(plugin) {
         if (priorPrimary !== void 0) next[PERSIST_BAK_KEY] = priorPrimary;
         next[PERSIST_KEY] = state;
         delete next[PERSIST_STAGING_KEY];
+        if (state.producer !== void 0) delete next[PUSH_PRODUCER_KEY];
         return next;
       });
     },
@@ -16548,6 +16615,21 @@ function createPersistPort(plugin) {
       await mutex.update(
         (base) => withCorruptSidecar(base, PERSIST_CORRUPT_PREFIX, timestamp, raw)
       );
+    },
+    async loadLegacyProducer() {
+      const raw = (await mutex.load())[PUSH_PRODUCER_KEY] ?? null;
+      if (raw === null) return null;
+      const result = parseProducerStateResult(raw);
+      try {
+        if (result.status === "corrupt") {
+          await preserveCorruptProducerState(plugin, raw, Date.now());
+        } else if (result.quarantinedMappings.length > 0) {
+          await preserveCorruptProducerState(plugin, { mappings: result.quarantinedMappings }, Date.now());
+        }
+      } catch {
+        console.warn("Havemind: failed to preserve corrupt producer state to a sidecar.");
+      }
+      return result.state;
     }
   };
 }
@@ -18627,72 +18709,6 @@ function registerVaultChangeListeners(vault, handlers) {
   };
 }
 
-// src/runtime/adapters/producer-state.ts
-var EMPTY_PRODUCER_STATE = { mappings: [], heads: {} };
-function isValidProducerMapping(entry) {
-  return isRecord(entry) && typeof entry.collisionKey === "string" && typeof entry.contentHash === "string" && typeof entry.fileId === "string" && typeof entry.path === "string";
-}
-function buildProducerMapping(entry) {
-  return {
-    collisionKey: entry.collisionKey,
-    contentHash: entry.contentHash,
-    // Preserve the binary/markdown discriminator across every load→save
-    // cycle. Dropping it here silently converts a persisted binary mapping
-    // to markdown, so the startup rebase then canonicalises its base64 over
-    // the markdown path and corrupts the raw-byte hash → a false conflict on
-    // the next binary sync (BLOCKER). Validate as an optional
-    // 'markdown'|'binary'; anything else (absent/legacy) defaults to
-    // markdown by omission, keeping legacy mappings unchanged.
-    ...entry.contentKind === "binary" || entry.contentKind === "markdown" ? { contentKind: entry.contentKind } : {},
-    fileId: entry.fileId,
-    path: entry.path,
-    // P7: the startup scan's stat; a malformed one is dropped, which only
-    // means the file is read at the next start.
-    ...isFileStat(entry.stat) ? { stat: { mtime: entry.stat.mtime, size: entry.stat.size } } : {}
-  };
-}
-function isFileStat(value) {
-  return isRecord(value) && Number.isFinite(value.mtime) && Number.isFinite(value.size);
-}
-function parseProducerStateResult(raw) {
-  if (raw === null || raw === void 0) {
-    return {
-      status: "absent",
-      state: EMPTY_PRODUCER_STATE,
-      quarantinedMappings: []
-    };
-  }
-  if (!isRecord(raw) || !Array.isArray(raw.mappings) || !isRecord(raw.heads)) {
-    console.warn(
-      "Havemind: producer state was present but structurally corrupt; its raw bytes were preserved to a sidecar and an empty state was used for this session."
-    );
-    return {
-      status: "corrupt",
-      state: EMPTY_PRODUCER_STATE,
-      quarantinedMappings: []
-    };
-  }
-  const mappings = [];
-  const quarantinedMappings = [];
-  for (const entry of raw.mappings) {
-    if (isValidProducerMapping(entry)) {
-      mappings.push(buildProducerMapping(entry));
-    } else {
-      quarantinedMappings.push(entry);
-    }
-  }
-  if (quarantinedMappings.length > 0) {
-    console.warn(
-      `Havemind: ${quarantinedMappings.length} malformed producer mapping(s) were preserved for recovery; the rest of the mapping set was kept.`
-    );
-  }
-  const heads = {};
-  for (const [fileId, revisionId] of Object.entries(raw.heads)) {
-    if (typeof revisionId === "string") heads[fileId] = revisionId;
-  }
-  return { status: "ok", state: { mappings, heads }, quarantinedMappings };
-}
-
 // src/runtime/connect-driver.ts
 var CANCELLED = /* @__PURE__ */ Symbol("cancelled");
 function awaitOrCancel(operation, signal) {
@@ -19805,6 +19821,36 @@ async function pollConfigOnce(deps) {
   return ops;
 }
 
+// src/runtime/producer-recovery.ts
+function mappingMetadata(m) {
+  return {
+    fileId: m.fileId,
+    path: m.path,
+    collisionKey: m.collisionKey,
+    contentHash: m.contentHash,
+    ...m.contentKind === void 0 ? {} : { contentKind: m.contentKind },
+    ...m.stat === void 0 ? {} : { stat: m.stat }
+  };
+}
+function validRecovery(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value;
+  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string" && s.length > 0);
+  if (typeof row.id !== "string" || !row.id || !["apply", "resolution"].includes(String(row.kind)) || !strings(row.fileIds) || !strings(row.discardRevisionIds) || typeof row.state !== "object" || row.state === null) return false;
+  if (row.applyState !== void 0) {
+    if (typeof row.applyState !== "object" || row.applyState === null) return false;
+    const saved = row.applyState;
+    if (!["pathOwners", "baseHashes", "baseContents"].every((key) => typeof saved[key] === "object" && saved[key] !== null && !Array.isArray(saved[key]) && Object.values(saved[key]).every((value2) => typeof value2 === "string"))) return false;
+  }
+  const state = row.state;
+  if (!Array.isArray(state.mappings) || typeof state.heads !== "object" || state.heads === null || Array.isArray(state.heads)) return false;
+  return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
+    if (typeof m !== "object" || m === null) return false;
+    const item = m;
+    return ["fileId", "path", "collisionKey", "contentHash"].every((key) => typeof item[key] === "string") && (row.kind !== "resolution" || item.contentKind === "binary" || typeof item.content === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
+  });
+}
+
 // src/sync/outbox-repository.ts
 var MAX_BINARY_PAYLOAD_BYTES = 36 * 1024 * 1024;
 var OPERATION_BY_KIND = {
@@ -19823,14 +19869,7 @@ var OutboxLocalChangeRepository = class {
     this.options = options;
   }
   async saveState(state) {
-    await this.options.store.save({ ...state, mappings: state.mappings.map((m) => ({
-      fileId: m.fileId,
-      path: m.path,
-      collisionKey: m.collisionKey,
-      contentHash: m.contentHash,
-      ...m.contentKind === void 0 ? {} : { contentKind: m.contentKind },
-      ...m.stat === void 0 ? {} : { stat: m.stat }
-    })) });
+    await this.options.store.save({ ...state, mappings: state.mappings.map(mappingMetadata) });
   }
   /**
    * P7: records the startup scan's file stats in one save, only on mappings
@@ -19857,14 +19896,6 @@ var OutboxLocalChangeRepository = class {
     for (const record2 of await this.options.recovery.pendingProducerRecoveries()) {
       if (this.activeApplies.has(record2.id)) continue;
       await this.options.recovery.recoverProducerQueue(record2.id);
-      const current = await this.options.store.load();
-      const ids = new Set(record2.fileIds);
-      const heads = Object.fromEntries(Object.entries(current.heads).filter(([id]) => !ids.has(id)));
-      await this.saveState({
-        mappings: [...current.mappings.filter((m) => !ids.has(m.fileId)), ...record2.state.mappings],
-        heads: { ...heads, ...record2.state.heads }
-      });
-      await this.options.recovery.completeProducerRecovery(record2.id);
     }
   }
   /** Persist undo intent before adoption or enqueue. Interrupted applies are
@@ -19920,7 +19951,7 @@ var OutboxLocalChangeRepository = class {
         discardRevisionIds: input.pendingIds,
         state: { mappings: [input.mapping], heads: { [input.mapping.fileId]: revisionId } }
       };
-      if (await recovery.startProducerRecovery(record2, replacement)) await this.recoverLocked();
+      await recovery.commitProducerChange(record2, replacement);
     });
   }
   async listMappings() {
@@ -19982,40 +20013,31 @@ var OutboxLocalChangeRepository = class {
     });
   }
   /**
-   * Publishes a local change so the queue entry and the producer mapping can
-   * never be observed apart. The journal records the producer state this commit
-   * INTENDS, alongside the envelope, in a single durable write; `recoverLocked`
-   * then replays that state on the next call, before any scan can look for a
-   * mapping and fail to find one.
-   *
-   * `kind: 'resolution'` (not `'apply'`) because there is nothing to roll back:
-   * this is a new local edit, so recovery must finish it forwards rather than
-   * restore a previous state.
+   * Publishes a local change in ONE write (A1): the queue entry, the producer's
+   * files and heads, and the owners and bases the apply side reads. Written
+   * apart, a failure between them left a queued revision whose file had no
+   * mapping, and the next scan minted a second identity for it (2026-09-19:
+   * seven file ids for three blobs). The record covers every file the commit
+   * changes, since an upsert can displace another file on the same path.
    */
-  async commitWithRecovery(envelope, next, operation) {
-    const recovery = this.options.recovery;
+  async commitAtomically(before, next, operation, envelope) {
+    const fileIds = [.../* @__PURE__ */ new Set([operation.fileId, ...changedFiles(before, next)])];
+    const ids = new Set(fileIds);
+    const text = operation.contentKind === "binary" || operation.content === null ? void 0 : operation.content;
     const record2 = {
       id: this.options.generateRevisionId(),
       kind: "resolution",
-      fileIds: [operation.fileId],
+      fileIds,
       state: {
-        mappings: next.mappings.filter((m) => m.fileId === operation.fileId).map((m) => ({
-          ...m,
-          ...operation.contentKind === "binary" || operation.content === null ? {} : { content: operation.content }
-        })),
-        heads: Object.fromEntries(
-          Object.entries(next.heads).filter(([id]) => id === operation.fileId)
-        )
+        // The note text seeds the merge ancestor on first authorship.
+        mappings: next.mappings.filter((m) => ids.has(m.fileId)).map((m) => m.fileId === operation.fileId && text !== void 0 ? { ...m, content: text } : m),
+        heads: Object.fromEntries(Object.entries(next.heads).filter(([id]) => ids.has(id)))
       },
       discardRevisionIds: []
     };
-    const started = await recovery.startProducerRecovery(record2, envelope);
-    if (!started) {
+    if (!await this.options.recovery.commitProducerChange(record2, envelope)) {
       throw new Error("Local commit recovery transaction was refused.");
     }
-    await this.saveState(next);
-    await this.seedSharedState(operation);
-    await recovery.completeProducerRecovery(record2.id);
   }
   /**
    * The parents a new revision of a file may name: its head, or, when the head
@@ -20090,43 +20112,15 @@ var OutboxLocalChangeRepository = class {
           revisionId,
           isDelete: kind === "delete"
         });
-        await this.commitWithRecovery(envelope, next, operation);
+        await this.commitAtomically(state, next, operation, envelope);
         return built.revisionId;
       }
-      await this.saveState(
-        applyCommit(state, commit, {
-          fileId: operation.fileId,
-          revisionId: null,
-          isDelete: true
-        })
-      );
-      await this.seedSharedState(operation);
-      return null;
-    });
-  }
-  /**
-   * Mirrors a committed local change into the SHARED apply-side ownership+base
-   * so a later remote edit to a locally-authored file updates in place instead
-   * of forever diverting to a conflict artifact. A create/update/rename seeds the
-   * owner+base (and forgets the prior path on a rename); a delete forgets both.
-   */
-  async seedSharedState(operation) {
-    if (operation.kind === "delete") {
-      await this.options.onLocalForgotten?.({
+      await this.commitAtomically(state, applyCommit(state, commit, {
         fileId: operation.fileId,
-        path: operation.path
-      });
-      return;
-    }
-    if (operation.contentHash === null) return;
-    await this.options.onLocalMaterialized?.({
-      fileId: operation.fileId,
-      path: operation.path,
-      contentHash: operation.contentHash,
-      // Seed the merge ancestor from the authored markdown text; a binary file
-      // (base64 in `content`) never merges, so it passes null.
-      content: operation.contentKind === "binary" ? null : operation.content,
-      previousPath: operation.previousPath
+        revisionId: null,
+        isDelete: true
+      }), operation);
+      return null;
     });
   }
   /**
@@ -20183,6 +20177,13 @@ function applyCommit(state, commit, head) {
     heads[head.fileId] = head.revisionId;
   }
   return { mappings, heads };
+}
+function changedFiles(before, after) {
+  const shape = (state) => new Map(state.mappings.map((m) => [m.fileId, JSON.stringify(mappingMetadata(m))]));
+  const was = shape(before);
+  const now = shape(after);
+  const ids = /* @__PURE__ */ new Set([...was.keys(), ...now.keys(), ...Object.keys(before.heads), ...Object.keys(after.heads)]);
+  return [...ids].filter((id) => was.get(id) !== now.get(id) || before.heads[id] !== after.heads[id]);
 }
 function nextMappings(mappings, commit) {
   let next = [...mappings];
@@ -20479,25 +20480,6 @@ function retryFailedCommit(path, deps) {
   return deps.retrigger(path) ? "retriggered" : "unavailable";
 }
 
-// src/runtime/local-base-lifecycle.ts
-async function applyLocalMaterialization(store, input) {
-  if (input.previousPath !== null && input.previousPath !== input.path) {
-    await store.forgetPath(input.previousPath);
-  }
-  await store.recordPathOwner(input.fileId, input.path);
-  if (store.baseHashFor(input.fileId) === null) {
-    await store.recordBaseHash(input.fileId, input.contentHash);
-    if (input.content !== null) {
-      await store.recordBaseContent(input.fileId, input.content);
-    }
-  }
-}
-async function forgetLocalMaterialization(store, input) {
-  await store.forgetPath(input.path);
-  await store.forgetBaseHash(input.fileId);
-  await store.forgetBaseContent(input.fileId);
-}
-
 // src/runtime/modify-debounce.ts
 var MODIFY_SETTLE_MS = 1500;
 var realTimer = {
@@ -20577,26 +20559,6 @@ var ModifyDebouncer = class {
   }
 };
 
-// src/runtime/producer-recovery.ts
-function validRecovery(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const row = value;
-  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === "string" && s.length > 0);
-  if (typeof row.id !== "string" || !row.id || !["apply", "resolution"].includes(String(row.kind)) || !strings(row.fileIds) || !strings(row.discardRevisionIds) || typeof row.state !== "object" || row.state === null) return false;
-  if (row.applyState !== void 0) {
-    if (typeof row.applyState !== "object" || row.applyState === null) return false;
-    const saved = row.applyState;
-    if (!["pathOwners", "baseHashes", "baseContents"].every((key) => typeof saved[key] === "object" && saved[key] !== null && !Array.isArray(saved[key]) && Object.values(saved[key]).every((value2) => typeof value2 === "string"))) return false;
-  }
-  const state = row.state;
-  if (!Array.isArray(state.mappings) || typeof state.heads !== "object" || state.heads === null || Array.isArray(state.heads)) return false;
-  return Object.entries(state.heads).every(([id, head]) => row.fileIds instanceof Array && row.fileIds.includes(id) && typeof head === "string") && state.mappings.every((m) => {
-    if (typeof m !== "object" || m === null) return false;
-    const item = m;
-    return ["fileId", "path", "collisionKey", "contentHash"].every((key) => typeof item[key] === "string") && (row.kind !== "resolution" || item.contentKind === "binary" || typeof item.content === "string") && row.fileIds.includes(item.fileId) && (item.contentKind === void 0 || item.contentKind === "markdown" || item.contentKind === "binary");
-  });
-}
-
 // src/runtime/sync-state.ts
 var PAYLOAD_MISSING_REASON = "payload-missing";
 var DEFAULT_MAX_LOCALLY_AUTHORED = 1e4;
@@ -20609,6 +20571,44 @@ function parseFailedToQueuePath(revisionId) {
   if (!revisionId.startsWith(FAILED_TO_QUEUE_PREFIX)) return null;
   const path = revisionId.slice(FAILED_TO_QUEUE_PREFIX.length);
   return path.length === 0 ? null : path;
+}
+var EMPTY_PRODUCER = { mappings: [], heads: {} };
+function withProducerFiles(producer, record2) {
+  const ids = new Set(record2.fileIds);
+  return {
+    mappings: [...producer.mappings.filter((m) => !ids.has(m.fileId)), ...record2.state.mappings.map(mappingMetadata)],
+    heads: { ...Object.fromEntries(Object.entries(producer.heads).filter(([id]) => !ids.has(id))), ...record2.state.heads }
+  };
+}
+function rolledForward(state, record2) {
+  const pathOwners = { ...state.pathOwners };
+  const baseHashes = { ...state.baseHashes };
+  const baseContents = { ...state.baseContents };
+  for (const fileId of record2.fileIds) {
+    const mapping = record2.state.mappings.find((m) => m.fileId === fileId);
+    for (const [path, owner] of Object.entries(pathOwners)) {
+      if (owner === fileId && path !== mapping?.path) delete pathOwners[path];
+    }
+    if (mapping === void 0) {
+      delete baseHashes[fileId];
+      delete baseContents[fileId];
+    } else {
+      pathOwners[mapping.path] = fileId;
+      baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
+      if (mapping.contentKind !== "binary" && mapping.content !== void 0 && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
+    }
+  }
+  return {
+    ...state,
+    pathOwners,
+    baseHashes,
+    baseContents,
+    producer: withProducerFiles(state.producer ?? EMPTY_PRODUCER, record2),
+    producerRecovery: (state.producerRecovery ?? []).filter((r) => r.id !== record2.id)
+  };
+}
+function parseProducerField(value) {
+  return value === void 0 ? {} : { producer: parseProducerStateResult(value).state };
 }
 function emptyState() {
   return {
@@ -20703,16 +20703,10 @@ var DurableSyncState = class {
   async startProducerRecovery(record2, replacement) {
     return this.runExclusive(async () => {
       const state = await this.ensureLoaded();
-      if ((state.producerRecovery ?? []).some((r) => r.fileIds.some((id) => record2.fileIds.includes(id)))) {
-        throw new Error("Producer recovery must finish before another transaction.");
-      }
-      const ids = new Set(record2.discardRevisionIds);
-      const originals = state.outbox.filter((e) => ids.has(e.revisionId));
-      if (originals.length !== ids.size || this.hasUncoveredChildren(state, ids)) return false;
-      if (replacement !== void 0 && (ids.has(replacement.revisionId) || parentIdsFromHeader(replacement.header).some((id) => ids.has(id)))) return false;
+      const swapped = await this.swapQueue(state, record2, replacement);
+      if (swapped === null) return false;
       await this.mutate({
-        ...state,
-        outbox: [...state.outbox.filter((e) => !ids.has(e.revisionId)), ...replacement === void 0 ? [] : [{ ...replacement, enqueuedAt: this.now() }]],
+        ...swapped,
         producerRecovery: [...state.producerRecovery ?? [], record2.kind === "apply" ? {
           ...record2,
           applyState: {
@@ -20720,11 +20714,84 @@ var DurableSyncState = class {
             baseHashes: Object.fromEntries(Object.entries(state.baseHashes).filter(([id]) => record2.fileIds.includes(id))),
             baseContents: Object.fromEntries(Object.entries(state.baseContents).filter(([id]) => record2.fileIds.includes(id)))
           }
-        } : record2],
-        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: this.backedUp(originals) } }
+        } : record2]
       });
       return true;
     });
+  }
+  /**
+   * A1: a local commit or head resolution in ONE write: the queue swap, the
+   * producer's file and head, and the owner and base the apply side reads. It
+   * needs no journal entry, since there is no second write to recover from.
+   */
+  async commitProducerChange(record2, replacement) {
+    return this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      const swapped = await this.swapQueue(state, record2, replacement);
+      if (swapped === null) return false;
+      await this.mutate(rolledForward(swapped, record2));
+      return true;
+    });
+  }
+  /**
+   * The queue with `record`'s discarded revisions backed up and `replacement`
+   * queued, its payload in the store when there is one (arch P1). Null when the
+   * swap would lose or orphan queued work.
+   */
+  async swapQueue(state, record2, replacement) {
+    if ((state.producerRecovery ?? []).some((r) => r.fileIds.some((id) => record2.fileIds.includes(id)))) {
+      throw new Error("Producer recovery must finish before another transaction.");
+    }
+    const ids = new Set(record2.discardRevisionIds);
+    const originals = state.outbox.filter((e) => ids.has(e.revisionId));
+    if (originals.length !== ids.size || this.hasUncoveredChildren(state, ids)) return null;
+    if (replacement !== void 0 && (ids.has(replacement.revisionId) || parentIdsFromHeader(replacement.header).some((id) => ids.has(id)))) return null;
+    if (replacement !== void 0) {
+      if (await this.safePutPayload(replacement.revisionId, replacement.payloadBase64)) {
+        this.externalized.add(replacement.revisionId);
+      } else {
+        this.externalized.delete(replacement.revisionId);
+      }
+    }
+    return {
+      ...state,
+      outbox: [...state.outbox.filter((e) => !ids.has(e.revisionId)), ...replacement === void 0 ? [] : [{ ...replacement, enqueuedAt: this.now() }]],
+      ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: this.backedUp(originals) } }
+    };
+  }
+  /** The producer's files and heads (A1); empty before the first commit. */
+  async loadProducer() {
+    return (await this.ensureLoaded()).producer ?? EMPTY_PRODUCER;
+  }
+  async saveProducer(producer) {
+    await this.runExclusive(async () => {
+      const state = await this.ensureLoaded();
+      await this.mutate({ ...state, producer });
+    });
+  }
+  /**
+   * A1, part of the load. Keeps the bytes of an unreadable stored producer in a
+   * sidecar (GAP-3). When the loaded state has no producer, it takes the one
+   * the raw primary still carries (a `.bak` or an empty state replaced a
+   * corrupt primary, and right after the upgrade the `.bak` predates the
+   * producer), else imports the pre-1.6.0 key once. The save that carries it
+   * is the one that drops the old key.
+   */
+  async settleProducer(raw) {
+    const stored = isRecord(raw) ? raw.producer : void 0;
+    const parsed = stored === void 0 ? null : parseProducerStateResult(stored);
+    if (parsed?.status === "corrupt") {
+      await this.persist.preserveCorrupt({ producer: stored }, this.now());
+    } else if (parsed !== null && parsed.quarantinedMappings.length > 0) {
+      await this.persist.preserveCorrupt({ producer: { mappings: parsed.quarantinedMappings } }, this.now());
+    }
+    const state = this.cache;
+    if (state === null || state.producer !== void 0) return;
+    const producer = parsed?.status === "ok" ? parsed.state : this.persist.loadLegacyProducer === void 0 ? void 0 : await this.persist.loadLegacyProducer() ?? EMPTY_PRODUCER;
+    if (producer === void 0) return;
+    const next = { ...state, producer };
+    await this.persist.save(this.toDiskForm(next));
+    this.cache = next;
   }
   /** Inline copies for a reconciliation backup, stamped for the 7-day prune. */
   backedUp(envelopes) {
@@ -20734,43 +20801,35 @@ var DurableSyncState = class {
   hasUncoveredChildren(state, ids) {
     return [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((e) => !ids.has(e.revisionId) && parentIdsFromHeader(e.header).some((id) => ids.has(id)));
   }
+  /**
+   * Finishes an interrupted journal entry in one write and drops it: a
+   * 'resolution' (only written before 1.6.0) rolls forward, an 'apply' rolls
+   * the producer, owners and bases back to its snapshot and drops what it
+   * queued.
+   */
   async recoverProducerQueue(id) {
     await this.runExclusive(async () => {
       const state = await this.ensureLoaded();
       const record2 = state.producerRecovery?.find((r) => r.id === id);
       if (record2 === void 0) return;
       if (record2.kind === "resolution") {
-        const pathOwners = { ...state.pathOwners };
-        const baseHashes = { ...state.baseHashes };
-        const baseContents = { ...state.baseContents };
-        for (const fileId of record2.fileIds) {
-          const mapping = record2.state.mappings.find((m) => m.fileId === fileId);
-          for (const [path, owner] of Object.entries(pathOwners)) {
-            if (owner === fileId && path !== mapping?.path) delete pathOwners[path];
-          }
-          if (mapping === void 0) {
-            delete baseHashes[fileId];
-            delete baseContents[fileId];
-          } else {
-            pathOwners[mapping.path] = fileId;
-            baseHashes[fileId] ?? (baseHashes[fileId] = mapping.contentHash);
-            if (mapping.contentKind !== "binary" && mapping.content !== void 0 && baseContents[fileId] === void 0 && baseHashes[fileId] === mapping.contentHash) baseContents[fileId] = mapping.content;
-          }
-        }
-        await this.mutate({ ...state, pathOwners, baseHashes, baseContents });
+        await this.mutate(rolledForward(state, record2));
         return;
       }
       const ids = new Set(record2.discardRevisionIds);
       if (this.hasUncoveredChildren(state, ids)) throw new Error("Recovery would orphan pending work.");
       const originals = state.outbox.filter((e) => ids.has(e.revisionId));
       const undo = record2.applyState;
+      const other = (fileId) => !record2.fileIds.includes(fileId);
       await this.mutate({
         ...state,
         ...undo === void 0 ? {} : {
-          pathOwners: { ...Object.fromEntries(Object.entries(state.pathOwners).filter(([, fileId]) => !record2.fileIds.includes(fileId))), ...undo.pathOwners },
-          baseHashes: { ...Object.fromEntries(Object.entries(state.baseHashes).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseHashes },
-          baseContents: { ...Object.fromEntries(Object.entries(state.baseContents).filter(([fileId]) => !record2.fileIds.includes(fileId))), ...undo.baseContents }
+          pathOwners: { ...Object.fromEntries(Object.entries(state.pathOwners).filter(([, fileId]) => other(fileId))), ...undo.pathOwners },
+          baseHashes: { ...Object.fromEntries(Object.entries(state.baseHashes).filter(([fileId]) => other(fileId))), ...undo.baseHashes },
+          baseContents: { ...Object.fromEntries(Object.entries(state.baseContents).filter(([fileId]) => other(fileId))), ...undo.baseContents }
         },
+        producer: withProducerFiles(state.producer ?? EMPTY_PRODUCER, record2),
+        producerRecovery: (state.producerRecovery ?? []).filter((r) => r.id !== id),
         outbox: state.outbox.filter((e) => !ids.has(e.revisionId)),
         ...originals.length === 0 ? {} : { reconciliationBackups: {
           ...state.reconciliationBackups,
@@ -21205,7 +21264,11 @@ var DurableSyncState = class {
   async ensureLoaded() {
     if (this.cache !== null && this.loadPromise === null) return this.cache;
     if (this.loadPromise === null) {
-      this.loadPromise = this.persist.load().then((raw) => this.hydrate(raw)).then((clean) => this.reconcilePayloads(clean)).finally(() => {
+      this.loadPromise = this.persist.load().then(async (raw) => {
+        const clean = await this.hydrate(raw);
+        await this.settleProducer(raw);
+        return clean;
+      }).then((clean) => this.reconcilePayloads(clean)).finally(() => {
         this.loadPromise = null;
       });
     }
@@ -21526,6 +21589,7 @@ function strictParse(raw) {
   return {
     version: 1,
     cursor,
+    ...parseProducerField(raw.producer),
     ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
     ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
     outbox: parsedOutbox,
@@ -21555,6 +21619,7 @@ function salvageState(raw) {
   return {
     version: 1,
     cursor,
+    ...parseProducerField(raw.producer),
     ...raw.producerRecovery === void 0 ? {} : { producerRecovery: raw.producerRecovery },
     ...raw.reconciliationBackups === void 0 ? {} : { reconciliationBackups: raw.reconciliationBackups },
     outbox: parsedOutbox,
@@ -21688,33 +21753,8 @@ function startPushProducer(plugin, wiring) {
   const { state, identity, triggerSync, producerRef, hooks, fileApplyLock, initializeIdentities } = wiring;
   const vault = plugin.app.vault;
   const store = {
-    async load() {
-      const data = await getPluginDataMutex(plugin).load();
-      const raw = data[PUSH_PRODUCER_KEY] ?? null;
-      const result = parseProducerStateResult(raw);
-      try {
-        if (result.status === "corrupt") {
-          await preserveCorruptProducerState(plugin, raw, Date.now());
-        } else if (result.quarantinedMappings.length > 0) {
-          await preserveCorruptProducerState(
-            plugin,
-            { mappings: result.quarantinedMappings },
-            Date.now()
-          );
-        }
-      } catch {
-        console.warn(
-          "Havemind: failed to preserve corrupt producer state to a sidecar."
-        );
-      }
-      return result.state;
-    },
-    async save(next) {
-      await getPluginDataMutex(plugin).update((base) => ({
-        ...base,
-        [PUSH_PRODUCER_KEY]: next
-      }));
-    }
+    load: () => state.loadProducer(),
+    save: (next) => state.saveProducer(next)
   };
   const repository = new OutboxLocalChangeRepository({
     identity,
@@ -21722,20 +21762,7 @@ function startPushProducer(plugin, wiring) {
     store,
     hasAuthoredRevision: (revisionId) => state.hasAuthoredRevision(revisionId),
     quarantinedParents: (revisionId) => state.quarantinedParents(revisionId),
-    generateRevisionId: () => globalThis.crypto.randomUUID(),
-    // FIX 1: seed the SHARED apply store for every file this device authors or
-    // pushes, so a later peer edit to a locally-authored file resolves to its
-    // real fileId and updates in place instead of forever forking to a conflict
-    // artifact. A rename also forgets the stale owner of the previous path.
-    //
-    // DATA-SAFETY (rule 3): the base is SEEDED only on first authorship and is
-    // NEVER advanced by a local push, advancing it here reopened the silent-
-    // overwrite window (a concurrent peer revision matching the just-authored
-    // base slips past the on-disk guard). The single source of truth for that
-    // rule lives in `local-base-lifecycle.ts`, shared with the integration
-    // harness so a regression can't hide behind a differently-modelled test.
-    onLocalMaterialized: (materialization) => applyLocalMaterialization(state, materialization),
-    onLocalForgotten: (forget) => forgetLocalMaterialization(state, forget)
+    generateRevisionId: () => globalThis.crypto.randomUUID()
   });
   producerRef.current = repository;
   const snapshot = {
