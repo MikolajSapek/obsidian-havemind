@@ -20721,10 +20721,15 @@ var DurableSyncState = class {
             baseContents: Object.fromEntries(Object.entries(state.baseContents).filter(([id]) => record2.fileIds.includes(id)))
           }
         } : record2],
-        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: originals.map((e) => ({ ...e, payloadExternalized: false })) } }
+        ...originals.length === 0 ? {} : { reconciliationBackups: { ...state.reconciliationBackups, [record2.id]: this.backedUp(originals) } }
       });
       return true;
     });
+  }
+  /** Inline copies for a reconciliation backup, stamped for the 7-day prune. */
+  backedUp(envelopes) {
+    const backedUpAt = this.now();
+    return envelopes.map((e) => ({ ...e, payloadExternalized: false, backedUpAt }));
   }
   hasUncoveredChildren(state, ids) {
     return [...state.outbox, ...Object.values(state.quarantinedEnvelopes)].some((e) => !ids.has(e.revisionId) && parentIdsFromHeader(e.header).some((id) => ids.has(id)));
@@ -20769,7 +20774,7 @@ var DurableSyncState = class {
         outbox: state.outbox.filter((e) => !ids.has(e.revisionId)),
         ...originals.length === 0 ? {} : { reconciliationBackups: {
           ...state.reconciliationBackups,
-          [id]: [...state.reconciliationBackups?.[id] ?? [], ...originals.map((e) => ({ ...e, payloadExternalized: false }))]
+          [id]: [...state.reconciliationBackups?.[id] ?? [], ...this.backedUp(originals)]
         } }
       });
     });
@@ -20833,17 +20838,7 @@ var DurableSyncState = class {
       });
       if (retired.length === 0) return;
       const ids = new Set(retired.map((entry) => entry.revisionId));
-      await this.mutate({
-        ...state,
-        outbox: state.outbox.filter((entry) => !ids.has(entry.revisionId)),
-        reconciliationBackups: {
-          ...state.reconciliationBackups,
-          [event.revision.revisionId]: [
-            ...state.reconciliationBackups?.[event.revision.revisionId] ?? [],
-            ...retired.map((entry) => ({ ...entry, payloadExternalized: false }))
-          ]
-        }
-      });
+      await this.mutate({ ...state, outbox: state.outbox.filter((entry) => !ids.has(entry.revisionId)) });
     });
   }
   async recordPushReceipt(receipt) {
@@ -21398,8 +21393,14 @@ var DurableSyncState = class {
         }
       }
     }
+    const backups = withoutExpiredBackups(state.reconciliationBackups, this.now());
+    if (backups !== state.reconciliationBackups) {
+      cacheChanged = true;
+      persistNeeded = true;
+    }
     const next = {
       ...state,
+      ...backups === void 0 ? {} : { reconciliationBackups: backups },
       outbox: nextOutbox,
       quarantine: [...state.quarantine, ...addedQuarantine],
       quarantinedEnvelopes: nextStash
@@ -21479,6 +21480,14 @@ function parsePersistedState(raw) {
     salvage: salvageState(raw),
     outboxAtRisk: outboxAtRisk(raw)
   };
+}
+var BACKUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+function withoutExpiredBackups(backups, now) {
+  if (backups === void 0) return void 0;
+  const fresh = (e) => now - (e.backedUpAt ?? e.enqueuedAt ?? 0) < BACKUP_RETENTION_MS;
+  if (Object.values(backups).every((entries) => entries.every(fresh))) return backups;
+  const kept = Object.entries(backups).map(([key, entries]) => [key, entries.filter(fresh)]).filter(([, entries]) => entries.length > 0);
+  return Object.fromEntries(kept);
 }
 function validRecoveryFields(raw) {
   if (raw.producerRecovery !== void 0 && (!Array.isArray(raw.producerRecovery) || !raw.producerRecovery.every(validRecovery))) return false;
