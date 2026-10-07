@@ -25694,11 +25694,13 @@ function renderPaneTabs(content, options) {
 function renderConnectedBody(content, panel, composer, state, screens) {
   const composerOpen = composer != null;
   if (panel.showForm && !composerOpen) {
-    renderSection(
-      content,
-      "status",
-      () => screens.renderIndicator(content, panel)
-    );
+    if (panel.status !== "disconnected") {
+      renderSection(
+        content,
+        "status",
+        () => screens.renderIndicator(content, panel)
+      );
+    }
     renderSection(content, "send queue", () => screens.renderSendQueue(content));
     renderSection(content, "conflicts", () => screens.renderConflicts(content));
     renderSection(content, "connection", () => screens.renderEntryPath(content));
@@ -25825,6 +25827,10 @@ function assignInitials(members) {
 var FLOWER_SEATS = 6;
 function coreFor(status) {
   switch (status) {
+    // Green means everything this device has is on the server. A conflict is
+    // connected but not done, so it stays violet.
+    case "synced":
+      return "done";
     case "syncing":
     case "retrying":
       return "syncing";
@@ -25838,6 +25844,7 @@ function coreFor(status) {
   }
 }
 var CORE_WORDS = {
+  done: "Server connected.",
   alive: "Server connected.",
   syncing: "Syncing with the server.",
   unreachable: "Server out of reach."
@@ -25934,7 +25941,6 @@ function renderFlower(parent, model) {
     const spoke = svg.createSvg("path", { cls: "havemind-flower-spoke", attr: { d: spokePath(seatCentre(index).angle) } });
     spoke.addClass(`is-${seat.kind}`);
   });
-  svg.createSvg("path", { cls: "havemind-flower-pulse", attr: { d: hexPath(CX, CY, R + 2) } });
   svg.createSvg("path", { cls: "havemind-flower-core", attr: { d: hexPath(CX, CY, R + 2) } });
   svg.createSvg("circle", { cls: "havemind-flower-core-dot", attr: { cx: fixed(CX), cy: fixed(CY), r: "5" } });
   model.seats.forEach((seat, index) => {
@@ -26037,6 +26043,7 @@ function renderEntryPath(content, state, providers2, actions) {
     });
     return;
   }
+  content.addClass("havemind-view-scrolls");
   const back = content.createEl("button", { text: "Back" });
   back.addClass("havemind-entry-back");
   back.onClickEvent(() => actions.onChoose("undecided"));
@@ -27119,6 +27126,7 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
     captureDrafts(this.draft, this.liveInputs);
     content.empty();
     content.addClass("havemind-view");
+    content.removeClass("havemind-view-scrolls");
     this.liveInputs = {};
     const { panel, composer, state } = readPaneState(
       this.options,
