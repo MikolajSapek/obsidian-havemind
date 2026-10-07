@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => HavemindPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian24 = require("obsidian");
+var import_obsidian23 = require("obsidian");
 
 // src/runtime/is-record.ts
 function isRecord(value) {
@@ -691,10 +691,23 @@ function connectionStatusFromCycle(status) {
   }
 }
 function formatStatusBar(input) {
-  const text = `Havemind: ${LABELS[input.status]}`;
+  const label = `Havemind: ${LABELS[input.status]}`;
   const format = input.formatTimestamp ?? defaultFormatTimestamp;
-  const lastSync = input.lastSyncedAt === void 0 ? "Last sync: not yet." : `Last sync: ${format(input.lastSyncedAt)}.`;
-  return { text, tooltip: `${text}, ${lastSync} ${NO_E2EE_NOTE}` };
+  const lastSync2 = input.lastSyncedAt === void 0 ? "Last sync: not yet." : `Last sync: ${format(input.lastSyncedAt)}.`;
+  const text = input.status === "synced" && input.lastSyncedAt !== void 0 ? `${label} \xB7 ${format(input.lastSyncedAt)}` : label;
+  return { text, tooltip: `${label}, ${lastSync2} ${NO_E2EE_NOTE}`, status: input.status };
+}
+function withCounts(view, counts) {
+  const plural2 = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  let suffix = "";
+  if ((view.status === "syncing" || view.status === "retrying") && counts.waiting > 0) {
+    suffix = `${counts.waiting} to send`;
+  } else if (view.status === "offline" && counts.waiting > 0) {
+    suffix = `${counts.waiting} waiting`;
+  } else if (view.status === "conflict" && counts.conflicts > 0) {
+    suffix = plural2(counts.conflicts, "note", "notes");
+  }
+  return suffix === "" ? view : { ...view, text: `${view.text} \xB7 ${suffix}` };
 }
 var MONTH_ABBREVIATIONS = "JanFebMarAprMayJunJulAugSepOctNovDec";
 function twoDigits(value) {
@@ -23676,9 +23689,9 @@ function describeFailure(status, json2) {
   const attemptsRemaining = typeof error51?.attemptsRemaining === "number" ? error51.attemptsRemaining : void 0;
   if (code === "PHRASE_MISMATCH") {
     const remaining = attemptsRemaining ?? 0;
-    const plural = remaining === 1 ? "attempt" : "attempts";
+    const plural2 = remaining === 1 ? "attempt" : "attempts";
     return new ApproveDeviceError(
-      `Incorrect code, ${remaining} ${plural} left.`,
+      `Incorrect code, ${remaining} ${plural2} left.`,
       { attemptsRemaining: remaining }
     );
   }
@@ -24406,6 +24419,10 @@ function renderConflictModalBody(container, model, actions) {
     tooLarge.addClass("havemind-conflict-hint");
   }
   if (model.diff !== null) {
+    const legend = container.createDiv({
+      text: `\u2212 your version \xB7 + ${model.author ?? "the other version"}`
+    });
+    legend.addClass("havemind-conflict-legend");
     const diffBox = container.createDiv({ text: "" });
     diffBox.addClass("havemind-conflict-diff");
     for (const line of model.diff) {
@@ -24435,8 +24452,9 @@ function renderConflictModalBody(container, model, actions) {
       actions.onKeepTheirs
     );
   }
-  const keepBoth = buttons.createEl("button", { text: "Keep both (close)" });
+  const keepBoth = buttons.createEl("button", { text: "Keep both" });
   keepBoth.addClass("havemind-conflict-action");
+  keepBoth.addClass("mod-cta");
   keepBoth.onClickEvent(() => actions.onKeepBoth());
 }
 var ConflictResolveModal = class extends import_obsidian7.Modal {
@@ -25356,12 +25374,17 @@ var SendQueue = class {
 
 // src/plugin/status-bar.ts
 var import_obsidian12 = require("obsidian");
+var HEXAGON = "M24 12L19 20.7H9L4 12L9 3.3H19Z";
+var SPLIT = "M20.3 5.7L24 12L19 20.7H9L7.7 18.3Z";
 var StatusBar = class {
   constructor(plugin) {
     __publicField(this, "plugin", plugin);
     __publicField(this, "statusItem", null);
     /** Status bar item naming who last edited the open note. */
     __publicField(this, "lastEditedItem", null);
+    __publicField(this, "glyph", null);
+    __publicField(this, "label", null);
+    __publicField(this, "glyphState", null);
   }
   /** Adds both items; `onload` calls this once. */
   attach() {
@@ -25392,10 +25415,39 @@ var StatusBar = class {
   setStatus(view) {
     const item = this.statusItem;
     if (item === null) return;
-    item.empty();
-    const glyph = item.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian12.setIcon)(glyph, "hexagon");
-    item.createEl("span", { text: view.text });
+    if (this.glyph === null || this.label === null) {
+      item.empty();
+      const holder = item.createEl("span", { attr: DECORATIVE });
+      const svg = holder.createSvg("svg", {
+        cls: "havemind-status-glyph",
+        attr: { viewBox: "0 0 28 24", width: "16", height: "14" }
+      });
+      svg.createSvg("path", { cls: "havemind-status-glyph-ring", attr: { d: HEXAGON } });
+      svg.createSvg("path", { cls: "havemind-status-glyph-hex", attr: { d: HEXAGON } });
+      svg.createSvg("path", { cls: "havemind-status-glyph-split", attr: { d: SPLIT } });
+      this.glyph = svg;
+      this.label = item.createEl("span");
+    }
+    if (this.glyphState !== view.status) {
+      if (this.glyphState !== null) this.glyph.removeClass(`is-${this.glyphState}`);
+      this.glyph.addClass(`is-${view.status}`);
+      this.glyphState = view.status;
+    }
+    this.label.setText(withCounts(view, this.counts()).text);
+  }
+  /** Queue and conflicts, each read on its own guard: a count is never worth a broken bar. */
+  counts() {
+    const read = (fn) => {
+      try {
+        return fn();
+      } catch {
+        return 0;
+      }
+    };
+    return {
+      waiting: read(() => this.plugin.sendQueue.sendQueueView()?.waitingCount ?? 0),
+      conflicts: read(() => this.plugin.conflicts.list.read().length)
+    };
   }
   /** Names the last editor of the open note in the status bar. */
   async refreshLastEdited() {
@@ -25444,7 +25496,7 @@ var ConfirmModal = class extends import_obsidian13.Modal {
 };
 
 // src/ui/onboarding-view.ts
-var import_obsidian22 = require("obsidian");
+var import_obsidian21 = require("obsidian");
 
 // src/runtime/handshake.ts
 function groupCode(code) {
@@ -25498,8 +25550,9 @@ function renderGuestWaitingScreen(content, model, actions = {}) {
     content.createDiv({ text: `Expires in ${view.expiryLabel}` }).addClass("havemind-hint");
   }
   content.createDiv({ text: view.liveNote }).addClass("havemind-hint");
-  const cancel = content.createEl("button", { text: "Cancel" });
-  cancel.onClickEvent(() => actions.onCancel?.());
+  const stop = content.createEl("button", { text: "Stop joining" });
+  stop.addClass("havemind-handshake-stop");
+  stop.onClickEvent(() => actions.onCancel?.());
 }
 
 // src/ui/screens/connect-form.ts
@@ -25557,16 +25610,14 @@ function buildPaneTabs(input) {
     {
       id: "status",
       label: "Status",
-      icon: "activity",
       ...input.attentionCount > 0 ? { count: input.attentionCount, needsAttention: true } : {}
     },
     // No counts on Activity or People (round 2, cut list): "12 today" and
     // "2 connected" are facts nobody can act on, and three competing numbers in
     // a 300px strip turn the one number that matters, the conflict count,
     // into noise. Counts in the strip went 3 → 1.
-    { id: "activity", label: "Activity", icon: "history" },
-    { id: "people", label: "People", icon: "users" },
-    { id: "connect", label: "Connect", icon: "link" }
+    { id: "activity", label: "Activity" },
+    { id: "people", label: "People" }
   ];
   const active = tabs.some((tab) => tab.id === input.active) ? input.active : "status";
   return { tabs, active };
@@ -25585,8 +25636,10 @@ function tabLabel(tab) {
   return parts.join(", ");
 }
 function renderPaneTabs(content, options) {
-  const strip = content.createDiv();
-  strip.addClass("havemind-tabs");
+  const row = content.createDiv();
+  row.addClass("havemind-tabs");
+  const strip = row.createDiv();
+  strip.addClass("havemind-tablist");
   strip.setAttribute("role", "tablist");
   const ids = options.view.tabs.map((tab) => tab.id);
   for (const [index, tab] of options.view.tabs.entries()) {
@@ -25621,15 +25674,19 @@ function renderPaneTabs(content, options) {
     button.addClass("havemind-tab");
     if (active) button.addClass("is-active");
     if (tab.needsAttention === true) button.addClass("needs-attention");
-    const icon = button.createEl("span", { attr: DECORATIVE });
-    icon.addClass("havemind-tab-icon");
-    (0, import_obsidian14.setIcon)(icon, tab.icon);
     button.createEl("span", { text: tab.label }).addClass("havemind-tab-label");
     if (tab.count !== void 0) {
       button.createEl("span", { text: `${tab.count}` }).addClass("havemind-tab-count");
     }
     button.onClickEvent(() => options.onSelect(tab.id));
     if (active && options.focusActive === true) button.focus();
+  }
+  if (options.onMore !== void 0) {
+    const onMore = options.onMore;
+    const more = row.createEl("button", { attr: { "aria-label": "More options" } });
+    more.addClass("havemind-tabs-more");
+    (0, import_obsidian14.setIcon)(more, "more-horizontal");
+    more.onClickEvent((event) => onMore(event));
   }
 }
 
@@ -25661,7 +25718,8 @@ function renderConnectedBody(content, panel, composer, state, screens) {
       // Selection is the caller's business: it owns the repaint, and the
       // focus flag is set there too so the two cannot drift apart.
       onSelect: (id) => screens.onSelectTab(id, true),
-      ...focusActive ? { focusActive: true } : {}
+      ...focusActive ? { focusActive: true } : {},
+      ...screens.onMore === void 0 ? {} : { onMore: screens.onMore }
     });
   });
   const body = content.createDiv();
@@ -25722,28 +25780,198 @@ function buildHostView() {
   };
 }
 
+// src/runtime/initials.ts
+function letterWords(name) {
+  return name.split(/\s+/).map((word) => Array.from(word).filter((ch) => /\p{L}/u.test(ch)).join("")).filter((word) => word.length > 0);
+}
+function initialsFor(name) {
+  const words = letterWords(name);
+  if (words.length === 0) return "?";
+  return words.slice(0, 2).map((word) => Array.from(word)[0]?.toLocaleUpperCase() ?? "").join("");
+}
+function twoLetters(name) {
+  const first = letterWords(name)[0];
+  if (first === void 0) return "?";
+  const [head = "", second = ""] = Array.from(first);
+  return head.toLocaleUpperCase() + second.toLocaleLowerCase();
+}
+function groupBy2(members, key) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const member of members) {
+    const value = key(member);
+    groups.set(value, [...groups.get(value) ?? [], member]);
+  }
+  return groups;
+}
+function assignInitials(members) {
+  const result = /* @__PURE__ */ new Map();
+  const pending = [];
+  for (const [label, group] of groupBy2(members, (m) => initialsFor(m.name))) {
+    if (group.length === 1 && group[0] !== void 0) result.set(group[0].id, label);
+    else pending.push(...group);
+  }
+  for (const [label, group] of groupBy2(pending, (m) => twoLetters(m.name))) {
+    if (group.length === 1 && group[0] !== void 0) {
+      result.set(group[0].id, label);
+      continue;
+    }
+    const base = Array.from(label)[0] ?? "?";
+    group.forEach((member, index) => result.set(member.id, `${base}${index + 1}`));
+  }
+  return result;
+}
+
+// src/runtime/flower-model.ts
+var FLOWER_SEATS = 6;
+function coreFor(status) {
+  switch (status) {
+    case "syncing":
+    case "retrying":
+      return "syncing";
+    case "offline":
+    case "reconnect-required":
+    case "reset-required":
+    case "disconnected":
+      return "unreachable";
+    default:
+      return "alive";
+  }
+}
+var CORE_WORDS = {
+  alive: "Server connected.",
+  syncing: "Syncing with the server.",
+  unreachable: "Server out of reach."
+};
+function orderOthers(others, recent, conflicted) {
+  const rank = (member) => {
+    if (conflicted.has(member.displayName)) return -1;
+    const index = recent.indexOf(member.membershipId);
+    return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+  };
+  return others.map((member, index) => ({ member, index })).sort((a, b) => rank(a.member) - rank(b.member) || a.index - b.index).map(({ member }) => member);
+}
+function buildFlowerModel(input) {
+  const core = coreFor(input.status);
+  const self = input.members.find((member) => member.self);
+  const others = input.members.filter((member) => !member.self);
+  const initials = assignInitials(
+    others.map((member) => ({ id: member.membershipId, name: member.displayName }))
+  );
+  const conflictNames = new Set(
+    (input.conflictAuthors ?? []).filter((name) => name !== null)
+  );
+  const overflow = input.members.length > FLOWER_SEATS;
+  const shownOthers = overflow ? orderOthers(others, input.recentActorIds ?? [], conflictNames).slice(0, FLOWER_SEATS - 2) : others;
+  const seats = [];
+  const words = [];
+  const selfKind = core === "unreachable" ? "self-offline" : "member";
+  seats.push({ kind: selfKind, label: self === void 0 && input.members.length > 0 ? "" : "you" });
+  if (self !== void 0) {
+    words.push(`this device${selfKind === "self-offline" ? " (offline)" : ""}`);
+  }
+  for (const member of shownOthers) {
+    const conflict = conflictNames.has(member.displayName);
+    seats.push({ kind: conflict ? "conflict" : "member", label: initials.get(member.membershipId) ?? "?" });
+    words.push(conflict ? `${member.displayName} (conflict)` : member.displayName);
+  }
+  if (overflow) {
+    const hidden = input.members.length - shownOthers.length - (self === void 0 ? 0 : 1);
+    seats.push({ kind: "more", label: `+${hidden}` });
+    words.push(`${hidden} more`);
+  } else if ((input.pendingJoins ?? 0) > 0 && seats.length < FLOWER_SEATS) {
+    seats.push({ kind: "joining", label: "?" });
+  }
+  while (seats.length < FLOWER_SEATS) seats.push({ kind: "free", label: "" });
+  const description = input.members.length === 0 ? "Not connected yet." : `${CORE_WORDS[core]} ${input.members.length} ${input.members.length === 1 ? "device" : "devices"}: ${words.join(", ")}.`;
+  return { core, seats, description };
+}
+
+// src/ui/flower.ts
+var R = 22;
+var DIST = Math.sqrt(3) * R + 0.85 * R;
+var APOTHEM = R * 0.866;
+var WIDTH = Math.round(R * 9.2);
+var HEIGHT = Math.round(WIDTH * 0.94);
+var CX = WIDTH / 2;
+var CY = HEIGHT / 2;
+var fixed = (n) => n.toFixed(1);
+function hexPath(x, y, r) {
+  const points = Array.from({ length: 6 }, (_, i) => {
+    const a = Math.PI / 3 * i;
+    return `${fixed(x + r * Math.cos(a))} ${fixed(y + r * Math.sin(a))}`;
+  });
+  return `M${points.join("L")}Z`;
+}
+function splitPath(x, y, r) {
+  const k = 0.634 * r;
+  const h = 0.866 * r;
+  const points = [
+    [x + k, y - k],
+    [x + r, y],
+    [x + r / 2, y + h],
+    [x - r / 2, y + h],
+    [x - k, y + k]
+  ];
+  return `M${points.map(([px, py]) => `${fixed(px)} ${fixed(py)}`).join("L")}Z`;
+}
+function seatCentre(index) {
+  const angle = (-90 + 60 * index) * Math.PI / 180;
+  return { x: CX + DIST * Math.cos(angle), y: CY + DIST * Math.sin(angle), angle };
+}
+function spokePath(angle) {
+  const at = (k) => `${fixed(CX + k * Math.cos(angle))} ${fixed(CY + k * Math.sin(angle))}`;
+  return `M${at(APOTHEM + 4)}L${at(DIST - APOTHEM - 2)}`;
+}
+var HAS_SPOKE = /* @__PURE__ */ new Set(["member", "self-offline", "conflict", "joining"]);
+function renderFlower(parent, model) {
+  const svg = parent.createSvg("svg", {
+    cls: "havemind-flower",
+    attr: { viewBox: `0 0 ${WIDTH} ${HEIGHT}`, role: "img", "aria-label": model.description }
+  });
+  svg.addClass(`is-${model.core}`);
+  model.seats.forEach((seat, index) => {
+    if (!HAS_SPOKE.has(seat.kind)) return;
+    const spoke = svg.createSvg("path", { cls: "havemind-flower-spoke", attr: { d: spokePath(seatCentre(index).angle) } });
+    spoke.addClass(`is-${seat.kind}`);
+  });
+  svg.createSvg("path", { cls: "havemind-flower-pulse", attr: { d: hexPath(CX, CY, R + 2) } });
+  svg.createSvg("path", { cls: "havemind-flower-core", attr: { d: hexPath(CX, CY, R + 2) } });
+  svg.createSvg("circle", { cls: "havemind-flower-core-dot", attr: { cx: fixed(CX), cy: fixed(CY), r: "5" } });
+  model.seats.forEach((seat, index) => {
+    const { x, y } = seatCentre(index);
+    const cell = svg.createSvg("path", { cls: "havemind-flower-seat", attr: { d: hexPath(x, y, R) } });
+    cell.addClass(`is-${seat.kind}`);
+    if (seat.kind === "conflict") {
+      svg.createSvg("path", { cls: "havemind-flower-split", attr: { d: splitPath(x, y, R) } });
+    }
+    if (seat.label !== "") {
+      const text = svg.createSvg("text", {
+        cls: "havemind-flower-label",
+        attr: { x: fixed(x), y: fixed(y + 4), "text-anchor": "middle" }
+      });
+      text.addClass(`is-${seat.kind}`);
+      text.setText(seat.label);
+    }
+  });
+  return svg;
+}
+
 // src/ui/entry-chooser-section.ts
-var import_obsidian15 = require("obsidian");
 function renderEntryChooser(content, options) {
   const { model } = options;
   const head = content.createDiv();
   head.addClass("havemind-entry-head");
-  const mark = head.createEl("span", { attr: DECORATIVE });
-  mark.addClass("havemind-pane-mark");
-  (0, import_obsidian15.setIcon)(mark, "hexagon");
-  head.createEl("span", { text: model.heading, cls: "havemind-pane-title" });
-  content.createDiv({ text: model.subheading }).addClass("havemind-entry-subheading");
-  content.createDiv({ text: model.question }).addClass("havemind-hint");
+  renderFlower(head, buildFlowerModel({ members: [], status: "disconnected" }));
+  content.createDiv({ text: model.subheading }).addClass("havemind-entry-title");
   content.addClass("havemind-view-scrolls");
   const list = content.createDiv();
   list.addClass("havemind-entry-options");
-  for (const option of model.options) {
-    const row = list.createEl("button");
+  model.options.forEach((option, index) => {
+    const row = list.createEl("button", { text: option.title });
     row.addClass("havemind-entry-option");
-    row.createDiv({ text: option.title }).addClass("havemind-entry-option-title");
-    row.createDiv({ text: option.cost }).addClass("havemind-hint");
+    if (index === 0) row.addClass("mod-cta");
     row.onClickEvent(() => options.onChoose(option.id));
-  }
+  });
   content.createDiv({ text: model.footnote }).addClass("havemind-hint");
 }
 function renderHostPath(content, options) {
@@ -25751,7 +25979,7 @@ function renderHostPath(content, options) {
   const back = content.createEl("button", { text: "Back" });
   back.addClass("havemind-entry-back");
   back.onClickEvent(() => options.onBack());
-  content.createEl("h4", { text: model.heading });
+  content.createDiv({ text: model.heading }).addClass("havemind-entry-title");
   content.createDiv({ text: model.subheading }).addClass("havemind-entry-subheading");
   content.addClass("havemind-view-scrolls");
   const list = content.createDiv();
@@ -25844,9 +26072,6 @@ function renderTabBody(body, tab, panel, composer, screens) {
     case "activity":
       screens.renderActivity(body);
       return;
-    case "connect":
-      screens.renderConnect(body, panel);
-      return;
     case "people":
       screens.renderPeople(body, composer);
       return;
@@ -25925,21 +26150,56 @@ function buildActivityViewModel(records, options = {}) {
       revisionId: entry.revisionId,
       fileId: entry.fileId,
       label: `${entry.kind} \xB7 ${entry.path} \xB7 ${entry.actorLabel}`,
-      headline: `${entry.actorLabel} ${entry.kind}`,
+      headline: metaLine(entry),
       pathLabel: entry.path,
       timestamp: entry.timestamp,
       timeLabel: format(entry.timestamp),
       colorToken: entry.actorId === null ? INITIAL_IMPORT_COLOR_TOKEN : authorColorToken(entry.actorId),
-      canRestore: entry.canRestore
+      canRestore: entry.canRestore,
+      title: noteTitle(entry.path),
+      meta: metaLine(entry),
+      kind: entry.kind
     })
   );
   return { empty: rows.length === 0, rows };
 }
+var VERBS = {
+  edit: "edited",
+  create: "created it",
+  rename: "renamed it",
+  delete: "deleted it",
+  conflict: "kept both versions"
+};
+function metaLine(entry) {
+  if (entry.kind === "conflict") return "Both versions kept";
+  if (entry.actorId === null) return entry.actorLabel;
+  return `${entry.actorLabel} ${VERBS[entry.kind]}`;
+}
+function noteTitle(path) {
+  const name = path.split("/").pop() ?? path;
+  return name.endsWith(".md") ? name.slice(0, -3) : name;
+}
+var MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
+var twoDigits2 = (n) => n < 10 ? `0${n}` : String(n);
+function activityDayLabel(timestamp, now = Date.now()) {
+  const at = new Date(timestamp);
+  const today = new Date(now);
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(today) - startOfDay(at)) / 864e5);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return `${at.getDate()} ${MONTHS.slice(at.getMonth() * 3, at.getMonth() * 3 + 3)}`;
+}
+function clockLabel(timestamp) {
+  const at = new Date(timestamp);
+  return `${twoDigits2(at.getHours())}:${twoDigits2(at.getMinutes())}`;
+}
 
 // src/ui/activity-section.ts
-var EMPTY_ACTIVITY_TEXT = "No activity yet. Connect to a vault to see changes as they happen.";
+var EMPTY_ACTIVITY_TEXT = "No changes since Obsidian opened.";
 var DEFAULT_ACTIVITY_ROW_LIMIT = 60;
 function renderActivityRows(content, options) {
+  const now = options.now ?? Date.now();
   const model = buildActivityViewModel(options.feed, {
     formatTimestamp: formatActivityTime,
     limit: options.limit ?? DEFAULT_ACTIVITY_ROW_LIMIT
@@ -25949,18 +26209,22 @@ function renderActivityRows(content, options) {
     empty.addClass("havemind-empty");
     return 0;
   }
-  const rows = model.rows;
-  for (const row of rows) {
+  let day = "";
+  for (const row of model.rows) {
+    const rowDay = activityDayLabel(row.timestamp, now);
+    if (rowDay !== day) {
+      day = rowDay;
+      content.createDiv({ text: rowDay }).addClass("havemind-activity-day");
+    }
     const entry = content.createDiv();
     entry.addClass("havemind-activity-row");
+    entry.addClass(`is-${row.kind}`);
     const text = entry.createDiv();
     text.addClass("havemind-activity-main");
-    text.addClass("havemind-activity-copy");
-    text.createDiv({ text: row.headline }).addClass("havemind-activity-who");
-    const path = text.createDiv({ text: row.pathLabel });
-    path.addClass("havemind-hint");
-    path.addClass("havemind-activity-path");
-    entry.style.setProperty("--havemind-row-color", `var(${row.colorToken})`);
+    const title = text.createDiv({ text: row.title });
+    title.addClass("havemind-activity-title");
+    title.setAttribute("title", row.pathLabel);
+    text.createDiv({ text: row.meta }).addClass("havemind-activity-meta");
     const trail = entry.createDiv();
     trail.addClass("havemind-activity-trail");
     if (row.canRestore && options.onRestore) {
@@ -25968,8 +26232,7 @@ function renderActivityRows(content, options) {
       restore.addClass("havemind-activity-action");
       restore.onClickEvent(() => options.onRestore?.(row.revisionId));
     }
-    const time3 = trail.createEl("span", { text: row.timeLabel });
-    time3.addClass("havemind-activity-time");
+    trail.createEl("span", { text: clockLabel(row.timestamp) }).addClass("havemind-activity-time");
   }
   return model.rows.length;
 }
@@ -26011,7 +26274,6 @@ function renderGettingStarted(content, model) {
 
 // src/ui/roster-section.ts
 function renderRejoinRoster(content, roster, actions) {
-  content.createEl("h4", { text: "Members" });
   if (roster.empty) {
     const empty = content.createDiv({
       text: "No members yet. Approved devices appear here."
@@ -26019,23 +26281,17 @@ function renderRejoinRoster(content, roster, actions) {
     empty.addClass("havemind-empty");
     return;
   }
+  const ownerView = roster.rows.some((row) => row.self && row.role === "owner");
   for (const row of roster.rows) {
     const item = content.createDiv({ text: "" });
     item.addClass("havemind-roster-row");
-    const dot = item.createEl("span", { attr: DECORATIVE });
-    dot.addClass("havemind-roster-dot");
-    dot.style.setProperty(
-      "color",
-      row.self ? "var(--interactive-accent)" : `var(${row.colorToken})`
-    );
     const text = item.createDiv();
     text.addClass("havemind-roster-copy");
     text.createDiv({ text: row.displayName }).addClass("havemind-roster-name");
-    const meta3 = text.createDiv({
-      text: row.self ? `${row.role} \xB7 you` : row.role
-    });
-    meta3.addClass("havemind-hint");
+    const role = row.role === "owner" ? "Owner" : "Editor";
+    const meta3 = text.createDiv({ text: row.self ? `${role} \xB7 this device` : role });
     meta3.addClass("havemind-roster-meta");
+    if (!ownerView) continue;
     if (row.rejoinable && actions.onRejoin) {
       if (actions.waiting.has(row.membershipId)) {
         const status = item.createDiv({
@@ -26071,108 +26327,8 @@ function renderRejoinRoster(content, roster, actions) {
   }
 }
 
-// src/ui/screens/status-indicator.ts
-var import_obsidian16 = require("obsidian");
-function renderStatusIndicator(content, panel, actions = {}, includeRecovery = true) {
-  const row = content.createDiv({ text: "" });
-  row.addClass("havemind-status");
-  if (panel.spin) row.addClass("havemind-status-spin");
-  const isDotStatus = panel.status === "synced" || panel.status === "offline";
-  row.style.setProperty("color", `var(${panel.colorToken})`);
-  if (isDotStatus) {
-    const dot = row.createEl("span", { attr: DECORATIVE });
-    dot.addClass("havemind-status-dot");
-    if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
-  } else {
-    const icon = row.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian16.setIcon)(icon, panel.icon);
-  }
-  row.createEl("span", { text: ` ${panel.label}` });
-  const detail = content.createDiv();
-  detail.addClass("havemind-status-detail");
-  for (const part of panel.detail.split(" \xB7 ")) {
-    const line = detail.createEl("span");
-    line.addClass("havemind-status-line");
-    const lastSync = /^Last sync:\s*(.+)$/.exec(part);
-    if (lastSync?.[1] !== void 0) {
-      line.appendText("Last sync: ");
-      line.createEl("span", { text: lastSync[1] }).addClass("havemind-status-time");
-    } else {
-      line.setText(part);
-    }
-  }
-  if (includeRecovery && actions.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
-    const retry = content.createEl("button", { text: "Retry now" });
-    retry.addClass("mod-cta");
-    retry.addClass("havemind-retry");
-    retry.onClickEvent(() => actions.onRetry?.());
-  }
-  if (includeRecovery && actions.onReset !== void 0 && panel.status === "reset-required") {
-    const reset = content.createEl("button", {
-      text: "Reset connection",
-      attr: {
-        "aria-label": "Reset the stored Havemind connection and pair this device again"
-      }
-    });
-    reset.addClass("mod-warning");
-    reset.addClass("havemind-reset");
-    reset.onClickEvent(() => actions.onReset?.());
-  }
-}
-
-// src/ui/screens/connection-controls.ts
-function renderConnectionControls(content, panel, helpOpen, actions) {
-  renderStatusIndicator(content, panel, {}, false);
-  const state = content.createDiv();
-  state.addClass("havemind-connect-block");
-  if (panel.serverName !== void 0) {
-    const server = state.createDiv();
-    server.addClass("havemind-connect-row");
-    server.createEl("span", { text: "Server" }).addClass("havemind-connect-label");
-    server.createEl("span", { text: panel.serverName }).addClass("havemind-connect-value");
-  }
-  const actionBlock = content.createDiv();
-  actionBlock.addClass("havemind-connect-block");
-  if (actions.onSyncNow !== void 0) {
-    const sync = actionBlock.createEl("button", { text: "Sync now" });
-    sync.addClass("havemind-action-row");
-    sync.onClickEvent(() => actions.onSyncNow?.());
-  }
-  if (actions.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
-    const retry = actionBlock.createEl("button", { text: "Retry now" });
-    retry.addClass("havemind-action-row");
-    retry.onClickEvent(() => actions.onRetry?.());
-  }
-  if (actions.onReset !== void 0 && panel.status === "reset-required") {
-    const reset = actionBlock.createEl("button", { text: "Reset connection" });
-    reset.addClass("havemind-action-row");
-    reset.addClass("mod-warning");
-    reset.onClickEvent(() => actions.onReset?.());
-  }
-  const help = actionBlock.createEl("button", {
-    text: helpOpen ? "Hide getting started" : "Show getting started",
-    attr: { "aria-expanded": helpOpen ? "true" : "false" }
-  });
-  help.addClass("havemind-action-row");
-  help.addClass("mod-quiet");
-  help.onClickEvent(() => actions.onToggleHelp?.());
-  if (helpOpen) {
-    renderGettingStarted(actionBlock, buildGettingStartedViewModel());
-  }
-  if (actions.onDisconnect !== void 0) {
-    const exit = content.createDiv();
-    exit.addClass("havemind-connect-block");
-    const disconnect = exit.createEl("button", {
-      text: "Disconnect and change server"
-    });
-    disconnect.addClass("havemind-action-row");
-    disconnect.addClass("mod-warning");
-    disconnect.onClickEvent(() => actions.onDisconnect?.());
-  }
-}
-
 // src/ui/screens/invite-composer.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 
 // src/ui/screens/invitation-envelope.ts
 var COPY_FAILED = "Could not copy automatically. Select and copy the invitation manually.";
@@ -26220,12 +26376,12 @@ function renderInvitationEnvelope(content, model, actions) {
 }
 
 // src/ui/screens/pending-approval-row.ts
-var import_obsidian17 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 function renderPendingRow(content, entry, actions, codes = {}) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-pending-row");
   row.style.setProperty("color", "var(--text-accent)");
-  (0, import_obsidian17.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
+  (0, import_obsidian15.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
   row.createEl("span", {
     text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires ${entry.expiresAt}`
   });
@@ -26340,12 +26496,34 @@ function renderNotice(content, notice, kind) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-success)");
-  (0, import_obsidian18.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
+  (0, import_obsidian16.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
   row.createEl("span", { text: ` ${notice}` });
 }
 
 // src/ui/screens/people-tab.ts
+function renderPendingCards(body, actions) {
+  const now = actions.now ?? Date.now();
+  for (const entry of actions.pending ?? []) {
+    const left = Date.parse(entry.expiresAt) - now;
+    if (!(left > 0)) continue;
+    const name = entry.intendedMemberDisplayName;
+    const card = body.createDiv();
+    card.addClass("havemind-pending-card");
+    card.createDiv({ text: `${name ?? "A new device"} wants to join` }).addClass("havemind-pending-title");
+    const minutes = Math.max(1, Math.round(left / 6e4));
+    card.createDiv({ text: `As ${entry.intendedRole ?? "editor"} \xB7 expires in ${minutes} min` }).addClass("havemind-pending-meta");
+    if (actions.onOpenComposer !== void 0) {
+      const open = actions.onOpenComposer;
+      const enter = card.createEl("button", {
+        text: name === void 0 ? "Enter the code" : `Enter ${name}\u2019s code`
+      });
+      enter.addClass("mod-cta");
+      enter.onClickEvent(() => open());
+    }
+  }
+}
 function renderPeopleTab(body, composer, actions) {
+  if (composer === null) renderPendingCards(body, actions);
   renderSection(body, "roster", () => actions.renderRoster(body));
   if (composer !== null) {
     actions.renderComposer(body, composer);
@@ -26359,7 +26537,7 @@ function renderPeopleTab(body, composer, actions) {
 }
 
 // src/ui/conflict-section.ts
-var import_obsidian19 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 function renderConflictSection(content, copies, actions) {
   if (copies.length === 0) return;
   const block = renderAlarmBlock(content, "havemind-alarm-conflict");
@@ -26367,7 +26545,7 @@ function renderConflictSection(content, copies, actions) {
   header.addClass("havemind-conflict-header");
   const icon = header.createEl("span", { attr: DECORATIVE });
   icon.addClass("havemind-conflict-icon");
-  (0, import_obsidian19.setIcon)(icon, "git-merge");
+  (0, import_obsidian17.setIcon)(icon, "git-merge");
   header.createEl("span", {
     text: copies.length === 1 ? " 1 conflict" : ` ${copies.length} conflicts`
   });
@@ -26380,7 +26558,7 @@ function renderConflictSection(content, copies, actions) {
     row.createEl("span", { text: name }).addClass("havemind-conflict-note");
     if (copy.author !== null && copy.timestamp !== null) {
       row.createEl("span", {
-        text: ` \xB7 ${copy.author} \xB7 ${copy.timestamp}`
+        text: `${copy.author} \xB7 ${copy.timestamp}`
       }).addClass("havemind-conflict-meta");
     }
     if (copy.manualHint !== null) {
@@ -26453,15 +26631,164 @@ function renderSendQueue(content, source) {
   });
 }
 
+// src/ui/screens/status-indicator.ts
+var import_obsidian18 = require("obsidian");
+function renderStatusIndicator(content, panel, actions = {}, includeRecovery = true) {
+  const row = content.createDiv({ text: "" });
+  row.addClass("havemind-status");
+  if (panel.spin) row.addClass("havemind-status-spin");
+  const isDotStatus = panel.status === "synced" || panel.status === "offline";
+  row.style.setProperty("color", `var(${panel.colorToken})`);
+  if (isDotStatus) {
+    const dot = row.createEl("span", { attr: DECORATIVE });
+    dot.addClass("havemind-status-dot");
+    if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
+  } else {
+    const icon = row.createEl("span", { attr: DECORATIVE });
+    (0, import_obsidian18.setIcon)(icon, panel.icon);
+  }
+  row.createEl("span", { text: ` ${panel.label}` });
+  const detail = content.createDiv();
+  detail.addClass("havemind-status-detail");
+  for (const part of panel.detail.split(" \xB7 ")) {
+    const line = detail.createEl("span");
+    line.addClass("havemind-status-line");
+    const lastSync2 = /^Last sync:\s*(.+)$/.exec(part);
+    if (lastSync2?.[1] !== void 0) {
+      line.appendText("Last sync: ");
+      line.createEl("span", { text: lastSync2[1] }).addClass("havemind-status-time");
+    } else {
+      line.setText(part);
+    }
+  }
+  if (includeRecovery) renderRecoveryActions(content, panel, actions);
+}
+function renderRecoveryActions(content, panel, actions) {
+  if (actions.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
+    const retry = content.createEl("button", { text: "Retry now" });
+    retry.addClass("mod-cta");
+    retry.addClass("havemind-retry");
+    retry.onClickEvent(() => actions.onRetry?.());
+  }
+  if (actions.onReset !== void 0 && panel.status === "reset-required") {
+    const reset = content.createEl("button", {
+      text: "Reset connection",
+      attr: {
+        "aria-label": "Reset the stored Havemind connection and pair this device again"
+      }
+    });
+    reset.addClass("mod-warning");
+    reset.addClass("havemind-reset");
+    reset.onClickEvent(() => actions.onReset?.());
+  }
+}
+
+// src/runtime/status-hero.ts
+var TITLES = {
+  synced: "In sync",
+  syncing: "Syncing",
+  retrying: "Retrying",
+  offline: "Offline",
+  conflict: "Conflict",
+  deferred: "Waiting to apply",
+  "reconnect-required": "Reconnect required",
+  "reset-required": "Reset required",
+  disconnected: "Not connected"
+};
+var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+function lastSync(detail) {
+  for (const part of detail.split(" \xB7 ")) {
+    const match = /^Last sync:\s*(.+)$/.exec(part);
+    if (match?.[1] !== void 0) return match[1];
+  }
+  return null;
+}
+function devices(count) {
+  return count > 0 ? plural(count, "device", "devices") : null;
+}
+function statusHeroText(input) {
+  const title = TITLES[input.status];
+  switch (input.status) {
+    case "synced": {
+      const time3 = lastSync(input.detail);
+      const parts = [devices(input.deviceCount), time3 === null ? null : `last sync ${time3}`];
+      return { title, subline: parts.filter((p) => p !== null).join(" \xB7 ") };
+    }
+    case "syncing":
+      return { title, subline: devices(input.deviceCount) ?? "" };
+    case "offline":
+    case "retrying": {
+      const waiting = input.waitingCount > 0 ? ` ${plural(input.waitingCount, "change waits", "changes wait")} here.` : "";
+      return { title, subline: `This device can't reach the server.${waiting}` };
+    }
+    case "conflict":
+      return input.conflictCount > 0 ? { title, subline: `${plural(input.conflictCount, "note has", "notes have")} two versions.` } : { title, subline: input.detail };
+    default:
+      return { title, subline: input.detail };
+  }
+}
+
+// src/ui/screens/status-hero.ts
+function guarded(read, fallback) {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+function rosterMembers(options) {
+  return guarded(
+    () => (options.rejoinRosterProvider?.().rows ?? []).map((row) => ({
+      membershipId: row.membershipId,
+      displayName: row.displayName,
+      role: row.role,
+      self: row.self
+    })),
+    []
+  );
+}
+function renderStatusHero(target, panel, options, now = Date.now()) {
+  const members = rosterMembers(options);
+  const conflicts = guarded(() => options.conflictsProvider?.() ?? [], []);
+  const recentActorIds = guarded(
+    () => (options.activityFeedProvider?.() ?? []).flatMap(
+      (record2) => record2.actor.kind === "author" ? [record2.actor.actorId] : []
+    ),
+    []
+  );
+  const model = buildFlowerModel({
+    members,
+    status: panel.status,
+    conflictAuthors: conflicts.map((copy) => copy.author),
+    pendingJoins: guarded(
+      () => (options.pendingApprovalsProvider?.() ?? []).filter(
+        (entry) => Date.parse(entry.expiresAt) > now
+      ).length,
+      0
+    ),
+    recentActorIds
+  });
+  const text = statusHeroText({
+    status: panel.status,
+    detail: panel.detail,
+    deviceCount: members.length,
+    waitingCount: guarded(() => options.sendQueueProvider?.()?.waitingCount ?? 0, 0),
+    conflictCount: conflicts.length
+  });
+  const hero = target.createDiv();
+  hero.addClass("havemind-hero");
+  renderFlower(hero, model);
+  hero.createDiv({ text: text.title }).addClass("havemind-hero-title");
+  if (text.subline !== "") hero.createDiv({ text: text.subline }).addClass("havemind-hero-sub");
+  renderRecoveryActions(hero, panel, { onRetry: options.onRetry, onReset: options.onReset });
+}
+
 // src/ui/screens/tab-screens.ts
 function buildTabScreens(context) {
   const { options } = context;
   return {
     renderStatus: (target, panel) => {
-      renderStatusIndicator(target, panel, {
-        onRetry: options.onRetry,
-        onReset: options.onReset
-      });
+      renderStatusHero(target, panel, options);
       if (context.helpOpen) {
         renderGettingStarted(target, buildGettingStartedViewModel());
       }
@@ -26472,13 +26799,6 @@ function buildTabScreens(context) {
         ...options.onRestore ? { onRestore: options.onRestore } : {}
       });
     },
-    renderConnect: (target, panel) => renderConnectionControls(target, panel, context.helpOpen, {
-      onSyncNow: options.onSyncNow,
-      onRetry: options.onRetry,
-      onReset: options.onReset,
-      onDisconnect: options.onDisconnect,
-      onToggleHelp: context.onToggleHelp
-    }),
     renderPeople: (target, model) => renderPeopleTab(target, model, {
       renderRoster: (rosterTarget) => {
         const roster = options.rejoinRosterProvider?.();
@@ -26497,7 +26817,14 @@ function buildTabScreens(context) {
         onApprove: options.onApprove,
         onReject: options.onReject
       }),
-      onOpenComposer: options.onOpenComposer
+      onOpenComposer: options.onOpenComposer,
+      pending: (() => {
+        try {
+          return options.pendingApprovalsProvider?.() ?? [];
+        } catch {
+          return [];
+        }
+      })()
     })
   };
 }
@@ -26580,7 +26907,8 @@ function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
         }
       })
     ),
-    onSelectTab: callbacks.setActiveTab
+    onSelectTab: callbacks.setActiveTab,
+    onMore: context.onMore
   });
   return { focusTabOnRender: state.focusTabOnRender };
 }
@@ -26622,13 +26950,13 @@ var RepaintScheduler = class {
 };
 
 // src/ui/screens/guest-invalid.ts
-var import_obsidian20 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 function renderGuestInvalid(content, ownerName, actions) {
   const view = buildSpentInvitation(ownerName);
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-error)");
-  (0, import_obsidian20.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
+  (0, import_obsidian19.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
   row.createEl("span", { text: ` ${view.heading}` });
   content.createDiv({ text: view.explanation }).addClass("havemind-hint");
   actions.renderForm(content);
@@ -26653,144 +26981,43 @@ function readPaneState(options, entryChoice, draftToken) {
   return { panel, composer, state };
 }
 
-// src/ui/pane-header.ts
-var import_obsidian21 = require("obsidian");
-function renderPaneHeader(content, options) {
-  const strip = content.createDiv();
-  strip.addClass("havemind-pane-header");
-  const markWrap = strip.createDiv();
-  markWrap.addClass("havemind-pane-mark");
-  const mark = markWrap.createEl("span", { attr: DECORATIVE });
-  (0, import_obsidian21.setIcon)(mark, "hexagon");
-  if (options.alarmed === true) {
-    const dot = markWrap.createEl("span", {
-      attr: { title: "Needs attention" }
-    });
-    dot.addClass("havemind-pane-mark-dot");
-  }
-  strip.createEl("span", { text: options.title, cls: "havemind-pane-title" });
-  if (options.onInvite !== void 0) {
-    const invite = strip.createEl("button", {
-      attr: { "aria-label": "Invite someone" }
-    });
-    invite.addClass("havemind-header-action");
-    (0, import_obsidian21.setIcon)(invite, "user-plus");
-    invite.onClickEvent(() => options.onInvite?.());
-  }
-  const more = strip.createEl("button", {
-    attr: {
-      "aria-label": "More options",
-      "aria-expanded": options.menuOpen ? "true" : "false"
-    }
-  });
-  more.addClass("havemind-header-action");
-  more.addClass("havemind-pane-more");
-  (0, import_obsidian21.setIcon)(more, "more-horizontal");
-  more.onClickEvent(() => options.onToggleMenu());
-  if (!options.menuOpen) return;
-  const menu = content.createDiv();
-  menu.addClass("havemind-pane-menu");
-  let renderedAction = false;
-  for (const item of options.items) {
-    if (item.readOnly === true) {
-      if (renderedAction) {
-        menu.createDiv().addClass("havemind-pane-menu-sep");
-      }
-      menu.createDiv({ text: item.label }).addClass("havemind-pane-menu-note");
-      continue;
-    }
-    const entry = menu.createEl("button", { text: item.label });
-    entry.addClass("havemind-pane-menu-item");
-    entry.onClickEvent(() => item.onSelect());
-    renderedAction = true;
-  }
-}
-
 // src/ui/screens/header-menu.ts
+var import_obsidian20 = require("obsidian");
 function buildHeaderMenuItems(panel, helpOpen, actions) {
   if (panel.showForm) return [];
   const items = [];
-  if (actions.onSyncNow) {
-    items.push({
-      label: "Sync now",
-      onSelect: () => actions.onSelectSyncNow?.()
-    });
-  }
+  if (actions.onSyncNow) items.push({ label: "Sync now", onSelect: actions.onSyncNow });
   items.push({
     label: helpOpen ? "Hide getting started" : "Show getting started",
-    onSelect: () => actions.onToggleHelp()
+    onSelect: actions.onToggleHelp
   });
   if (actions.onDisconnect) {
-    items.push({
-      label: "Disconnect",
-      onSelect: () => actions.onSelectDisconnect?.()
-    });
+    items.push({ label: "Disconnect\u2026", onSelect: actions.onDisconnect, warning: true });
   }
   if (actions.onReset) {
-    items.push({
-      label: "Reset connection",
-      onSelect: () => actions.onSelectReset?.()
-    });
-  }
-  if (panel.serverName !== void 0) {
-    items.push({
-      label: `Server: ${panel.serverName}`,
-      onSelect: () => {
-      },
-      readOnly: true
-    });
+    items.push({ label: "Reset connection\u2026", onSelect: actions.onReset, warning: true });
   }
   return items;
 }
-
-// src/ui/screens/pane-chrome.ts
-function renderPaneChrome(content, options) {
-  const { panel } = options;
-  renderPaneHeader(content, {
-    title: "Havemind",
-    menuOpen: options.menuOpen,
-    onToggleMenu: options.onToggleMenu,
-    items: options.items,
-    alarmed: options.alarmed,
-    // Only once connected, hence the `showForm` guard on each.
-    ...panel.showForm || options.onInvite === void 0 ? {} : { onInvite: options.onInvite }
-  });
+function fillPaneMenu(menu, items) {
+  for (const entry of items) {
+    menu.addItem((item) => {
+      item.setTitle(entry.label).setSection(entry.warning === true ? "danger" : "havemind").onClick(() => entry.onSelect());
+      if (entry.warning === true) item.setWarning(true);
+    });
+  }
 }
-function renderPaneChromeFor(content, panel, options, state, callbacks) {
-  const closeMenu = (run) => () => {
-    callbacks.setMenuOpen(false);
-    run?.();
-  };
-  renderPaneChrome(content, {
-    panel,
-    menuOpen: state.menuOpen,
-    alarmed: attentionCount(options) > 0,
-    items: buildHeaderMenuItems(panel, state.helpOpen, {
-      onSyncNow: options.onSyncNow,
-      onDisconnect: options.onDisconnect,
-      onReset: options.onReset,
-      onSelectSyncNow: closeMenu(options.onSyncNow),
-      onSelectDisconnect: closeMenu(options.onDisconnect),
-      onSelectReset: closeMenu(options.onReset),
-      onToggleHelp: () => {
-        callbacks.setHelpOpen(!state.helpOpen);
-        callbacks.setMenuOpen(false);
-        callbacks.repaint();
-      }
-    }),
-    onToggleMenu: () => {
-      callbacks.setMenuOpen(!state.menuOpen);
-      callbacks.repaint();
-    },
-    onInvite: options.onOpenComposer
-  });
+function showPaneMenu(event, items) {
+  const menu = new import_obsidian20.Menu();
+  fillPaneMenu(menu, items);
+  menu.showAtMouseEvent(event);
 }
 
 // src/ui/view-types.ts
 var HAVEMIND_ONBOARDING_VIEW = "havemind-onboarding";
 
 // src/ui/onboarding-view.ts
-var HavemindOnboardingView = class extends import_obsidian22.ItemView {
+var HavemindOnboardingView = class extends import_obsidian21.ItemView {
   constructor(leaf, options = {}) {
     super(leaf);
     __publicField(this, "options");
@@ -26807,8 +27034,6 @@ var HavemindOnboardingView = class extends import_obsidian22.ItemView {
      * behind a small help button so it is discoverable without nagging.
      */
     __publicField(this, "helpOpen", false);
-    /** Whether the header overflow menu is open. */
-    __publicField(this, "menuOpen", false);
     /** Which tab the connected pane is showing. */
     __publicField(this, "activeTab", "status");
     /**
@@ -26840,6 +27065,25 @@ var HavemindOnboardingView = class extends import_obsidian22.ItemView {
   }
   onOpen() {
     this.render();
+  }
+  /** The view header's More options, which is the only one a phone shows. */
+  onPaneMenu(menu, source) {
+    super.onPaneMenu(menu, source);
+    const panel = this.options.panelProvider?.();
+    if (source !== "more-options" || panel === void 0) return;
+    fillPaneMenu(menu, this.menuItems(panel));
+  }
+  menuItems(panel) {
+    return buildHeaderMenuItems(panel, this.helpOpen, {
+      onSyncNow: this.options.onSyncNow,
+      onDisconnect: this.options.onDisconnect,
+      onReset: this.options.onReset,
+      onToggleHelp: () => {
+        this.helpOpen = !this.helpOpen;
+        if (this.helpOpen) this.activeTab = "status";
+        this.render();
+      }
+    });
   }
   onClose() {
     this.repaints.stop();
@@ -26889,25 +27133,10 @@ var HavemindOnboardingView = class extends import_obsidian22.ItemView {
     }
     if (state.kind === "awaiting") {
       renderGuestWaitingScreen(content, state.waiting, {
-        onCancel: this.options.onDisconnect
+        onCancel: this.options.onCancelJoin ?? this.options.onDisconnect
       });
       return;
     }
-    renderPaneChromeFor(
-      content,
-      panel,
-      this.options,
-      { menuOpen: this.menuOpen, helpOpen: this.helpOpen },
-      {
-        setMenuOpen: (open) => {
-          this.menuOpen = open;
-        },
-        setHelpOpen: (open) => {
-          this.helpOpen = open;
-        },
-        repaint: () => this.render()
-      }
-    );
     const { focusTabOnRender } = renderConnectedBodyFor(
       content,
       panel,
@@ -26919,7 +27148,10 @@ var HavemindOnboardingView = class extends import_obsidian22.ItemView {
         entryChoice: this.entryChoice,
         helpOpen: this.helpOpen,
         activeTab: this.activeTab,
-        focusTabOnRender: this.focusTabOnRender
+        focusTabOnRender: this.focusTabOnRender,
+        // A phone shows Obsidian's view header and its More options, which
+        // `onPaneMenu` fills; a second button would be the old double header.
+        ...import_obsidian21.Platform.isPhone ? {} : { onMore: (event) => showPaneMenu(event, this.menuItems(panel)) }
       },
       {
         setEntryChoice: (choice) => {
@@ -26953,12 +27185,12 @@ var HavemindOnboardingView = class extends import_obsidian22.ItemView {
 };
 
 // src/ui/setting-tab.ts
-var import_obsidian23 = require("obsidian");
+var import_obsidian22 = require("obsidian");
 function formatMemberCount(count) {
   if (count === 0) return "No members recorded yet";
   return count === 1 ? "1 member" : `${count} members`;
 }
-var HavemindSettingTab = class extends import_obsidian23.PluginSettingTab {
+var HavemindSettingTab = class extends import_obsidian22.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     /**
@@ -26973,12 +27205,12 @@ var HavemindSettingTab = class extends import_obsidian23.PluginSettingTab {
     this.containerEl.empty();
     const plugin = this.havemind;
     const info = plugin.settingsInfo();
-    new import_obsidian23.Setting(this.containerEl).setName("Havemind").setHeading();
-    new import_obsidian23.Setting(this.containerEl).setName("Server").setDesc(info.server);
-    new import_obsidian23.Setting(this.containerEl).setName("Connection").setDesc(info.status);
-    new import_obsidian23.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
-    new import_obsidian23.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
-    new import_obsidian23.Setting(this.containerEl).setName("Actions").setHeading();
+    new import_obsidian22.Setting(this.containerEl).setName("Havemind").setHeading();
+    new import_obsidian22.Setting(this.containerEl).setName("Server").setDesc(info.server);
+    new import_obsidian22.Setting(this.containerEl).setName("Connection").setDesc(info.status);
+    new import_obsidian22.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
+    new import_obsidian22.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
+    new import_obsidian22.Setting(this.containerEl).setName("Actions").setHeading();
     this.renderActions(plugin, info);
     const refresh = this.containerEl.createEl("button", { text: "Refresh" });
     refresh.onClickEvent(() => this.display());
@@ -26990,18 +27222,18 @@ var HavemindSettingTab = class extends import_obsidian23.PluginSettingTab {
    */
   renderActions(plugin, info) {
     const actions = plugin.connectionActions();
-    new import_obsidian23.Setting(this.containerEl).setName("Havemind panel").setDesc(
+    new import_obsidian22.Setting(this.containerEl).setName("Havemind panel").setDesc(
       "Connect a device, invite a peer, resolve conflicts and inspect the send queue."
     ).addButton(
       (button) => button.setButtonText("Open Havemind panel").setCta().onClick(() => plugin.revealPanel())
     );
-    new import_obsidian23.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
+    new import_obsidian22.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
       (button) => button.setButtonText("Sync now").setDisabled(!info.connected).onClick(() => actions.syncNow())
     );
-    new import_obsidian23.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
+    new import_obsidian22.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
       (button) => button.setButtonText("Disconnect").setDisabled(!info.connected).onClick(() => actions.disconnect())
     );
-    new import_obsidian23.Setting(this.containerEl).setName("Reset connection").setDesc(
+    new import_obsidian22.Setting(this.containerEl).setName("Reset connection").setDesc(
       "Clear the stored pairing so this device can be paired again. No note is touched."
     ).addButton(
       (button) => button.setButtonText("Reset connection").onClick(() => actions.resetConnection())
@@ -27039,7 +27271,7 @@ var PluginViewRegistry = class {
 };
 
 // src/main.ts
-var HavemindPlugin = class extends import_obsidian24.Plugin {
+var HavemindPlugin = class extends import_obsidian23.Plugin {
   constructor() {
     super(...arguments);
     __publicField(this, "connection", null);
@@ -27117,7 +27349,7 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
         // A phone joins vaults, it does not run them: hosting needs Docker, a
         // terminal and a machine that stays awake. The entry chooser drops the
         // host branch there rather than walking the user to a dead end.
-        canHost: !import_obsidian24.Platform.isMobileApp,
+        canHost: !import_obsidian23.Platform.isMobileApp,
         // The activity feed is a tab of this pane (plans/007 Stage 0): the log
         // snapshot mapped through the roster, so each row shows the author's
         // display name and colour.
@@ -27134,6 +27366,7 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
           void this.syncNow();
         },
         composerProvider: () => this.invitations.connectionActive ? this.invitations.composerModel() : null,
+        pendingApprovalsProvider: () => this.invitations.pendingApprovals,
         guestWaitingProvider: () => this.awaitingApproval,
         guestInvalidProvider: () => this.guestInvitationInvalid,
         panelProvider: () => this.connectionPanel(),
@@ -27145,13 +27378,13 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
         recoveryRequiredProvider: () => this.syncState?.isRecoveryRequired() ?? false,
         onRetrySend: (revisionId) => {
           void this.sendQueue.retrySend(revisionId).catch(() => {
-            new import_obsidian24.Notice("Havemind: could not retry this queued change.");
+            new import_obsidian23.Notice("Havemind: could not retry this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
         onDiscardSend: (revisionId) => {
           void this.sendQueue.discardSend(revisionId).catch(() => {
-            new import_obsidian24.Notice("Havemind: could not discard this queued change.");
+            new import_obsidian23.Notice("Havemind: could not discard this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
@@ -27169,7 +27402,9 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
             this.views.refreshOnboardingNow();
           });
         },
-        onDisconnect: () => this.disconnect(),
+        onDisconnect: () => this.confirmDisconnect(),
+        // Stopping a join that has not been approved yet ends nothing worth asking about.
+        onCancelJoin: () => this.disconnect(),
         onRetry: () => {
           void this.retryConnection();
         },
@@ -27236,7 +27471,7 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
       this.connectionStatus = "offline";
       this.connectionError = "Havemind could not start syncing. Try reconnecting.";
       this.statusBar.setStatus(formatStatusBar({ status: "offline" }));
-      new import_obsidian24.Notice("Havemind: could not start syncing. Try reconnecting.");
+      new import_obsidian23.Notice("Havemind: could not start syncing. Try reconnecting.");
       this.views.refreshOnboarding();
     }
   }
@@ -27295,7 +27530,7 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
     const connection = this.connection;
     const state = this.syncState;
     if (connection?.revisionContent === void 0 || state === null) {
-      new import_obsidian24.Notice("Havemind: connect before restoring a revision.");
+      new import_obsidian23.Notice("Havemind: connect before restoring a revision.");
       return;
     }
     try {
@@ -27308,14 +27543,14 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
         revisionId
       );
       if (result.outcome === "unavailable") {
-        new import_obsidian24.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
+        new import_obsidian23.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
       } else if (result.outcome === "unchanged") {
-        new import_obsidian24.Notice(`Havemind: ${result.path} already has that text.`);
+        new import_obsidian23.Notice(`Havemind: ${result.path} already has that text.`);
       } else {
-        new import_obsidian24.Notice(`Havemind: restored ${result.path} to that version.`);
+        new import_obsidian23.Notice(`Havemind: restored ${result.path} to that version.`);
       }
     } catch (error51) {
-      new import_obsidian24.Notice(
+      new import_obsidian23.Notice(
         `Havemind: could not restore that version, ${errorMessage(error51)}`
       );
     }
@@ -27384,7 +27619,7 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
   async syncNow() {
     const connection = this.connection;
     if (connection === null) {
-      new import_obsidian24.Notice("Havemind: connect before syncing.");
+      new import_obsidian23.Notice("Havemind: connect before syncing.");
       return;
     }
     if (connection.syncNow !== void 0 && this.connectionStatus !== "reconnect-required") {
@@ -27482,6 +27717,21 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
     }
   }
   /**
+   * Every entry point to Disconnect asks first (plan 010): it stops syncing on
+   * this device, and the one-word menu item gave no hint of that.
+   */
+  confirmDisconnect() {
+    new ConfirmModal(this.app, {
+      title: "Disconnect this device?",
+      // The pane names the server nowhere else, and this is when it matters.
+      body: `Syncing${this.connection === null ? "" : ` with ${this.connection.serverName}`} stops here until you connect again. Your notes stay.`,
+      confirmLabel: "Disconnect",
+      onConfirm: () => {
+        this.disconnect();
+      }
+    }).open();
+  }
+  /**
    * U2: every entry point to Reset connection asks first. It wipes the pairing
    * and the sync state, and only the owner's approval brings the device back.
    */
@@ -27534,11 +27784,11 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
       this.lastSyncedAt = void 0;
       this.connectionError = void 0;
       this.statusBar.setStatus(formatStatusBar({ status: "disconnected" }));
-      new import_obsidian24.Notice(
+      new import_obsidian23.Notice(
         "Havemind: connection reset. Paste a new invitation or pairing token to connect."
       );
     } catch (error51) {
-      new import_obsidian24.Notice(`Havemind: could not reset the connection, ${errorMessage(error51)}`);
+      new import_obsidian23.Notice(`Havemind: could not reset the connection, ${errorMessage(error51)}`);
     } finally {
       this.resetInFlight = false;
       this.views.refreshOnboarding();
@@ -27567,7 +27817,7 @@ var HavemindPlugin = class extends import_obsidian24.Plugin {
         void this.syncNow();
       },
       disconnect: () => {
-        this.disconnect();
+        this.confirmDisconnect();
       },
       resetConnection: () => {
         this.confirmResetConnection();

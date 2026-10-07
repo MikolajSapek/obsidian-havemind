@@ -67,35 +67,25 @@
      themes.
      --------------------------------------------------------------------- */
 
-  /* Header strip */
-  --havemind-header-height: 38px;
-  --havemind-header-pad: 0 6px 0 10px;
-  --havemind-header-gap: 2px;
-  --havemind-mark-size: 24px;
-  --havemind-mark-radius: 6px;
-  --havemind-mark-icon: 15px;
-  --havemind-action-size: 26px;
-  --havemind-action-radius: 6px;
-  --havemind-action-icon: 15px;
-  --havemind-title-size: 13px;
-  --havemind-title-weight: 600;
-  --havemind-title-offset: 8px;
-
-  /* Alarm dot riding the hexagon mark */
-  --havemind-mark-dot-size: 6px;
-  --havemind-mark-dot-ring: 1.5px solid var(--background-secondary);
-
-  /* Tab strip */
-  --havemind-tab-height: 32px;
-  /* Coarse-pointer cell from the mobile handoff: 32px is comfortable under a
-     mouse and below the 44px minimum under a fingertip. */
-  --havemind-tab-height-touch: 52px;
-  --havemind-tab-label-size: 11.5px;
-  --havemind-tab-label-weight: 500;
+  /* Tab strip: three words and More options, no header above it (plan 010).
+     Obsidian's phone header is 44px, so the touch row matches it. */
+  --havemind-tab-height: 36px;
+  --havemind-tab-height-touch: 44px;
+  --havemind-tab-label-size: 13px;
+  --havemind-tab-label-weight: 400;
   --havemind-tab-active-weight: 600;
-  --havemind-tab-icon: 16px;
-  --havemind-tab-stack-pad: 7px 2px 6px;
   --havemind-tab-active-rule: 2px solid var(--interactive-accent);
+  --havemind-tab-gap: 18px;
+  --havemind-tabs-pad: 0 8px 0 16px;
+
+  /* Status tab: the flower, a word, one line (plan 010) */
+  --havemind-hero-pad: 44px 16px 16px;
+  --havemind-hero-gap: 6px;
+  --havemind-hero-flower-gap: 12px;
+  --havemind-hero-title-size: var(--font-ui-large);
+  --havemind-hero-title-weight: 600;
+  --havemind-hero-sub-size: var(--font-ui-small);
+  --havemind-flower-max: 202px;
 
   /* Status block */
   --havemind-status-size: 13.5px;
@@ -126,12 +116,46 @@
      reads as a decision rather than as more drift. */
   --havemind-roster-row-height: 44px;
   --havemind-roster-gap: 10px;
-  --havemind-roster-name-size: 12.5px;
-  --havemind-roster-meta-size: 11.5px;
+  --havemind-roster-name-size: var(--font-ui-small);
+  --havemind-roster-meta-size: var(--font-ui-smaller);
   --havemind-roster-row-pad: 4px 0;
   --havemind-activity-row-pad: 9px 0;
   --havemind-row-time-size: 11px;
   --havemind-dot-size: 8px;
+}
+
+/* =========================================================================
+   2a. Flower colour tokens
+   The flower is the one place the brand violet appears: the core is Hive
+   Violet, every member seat one lavender, initials tell people apart. All other
+   chrome takes Obsidian's theme variables (plan 010).
+   ========================================================================= */
+.theme-light,
+:root {
+  --havemind-flower-core: #8257e6;
+  --havemind-flower-seat: #d9ccfb;
+  --havemind-flower-ink: #2c1b66;
+  --havemind-flower-line: #8f72ea;
+  --havemind-flower-empty: #d0d0d0;
+  --havemind-flower-dot: #ffffff;
+}
+
+.theme-dark {
+  --havemind-flower-seat: #b69cf5;
+  --havemind-flower-ink: #1d1430;
+  --havemind-flower-line: #b69cf5;
+  --havemind-flower-empty: #4a4a4a;
+  --havemind-flower-dot: #f4f0ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --havemind-flower-seat: #b69cf5;
+    --havemind-flower-ink: #1d1430;
+    --havemind-flower-line: #b69cf5;
+    --havemind-flower-empty: #4a4a4a;
+    --havemind-flower-dot: #f4f0ff;
+  }
 }
 
 /* =========================================================================
@@ -243,15 +267,13 @@
 }
 
 /* Air between the top-level blocks of a view, the main lever of the redesign.
-   The pane chrome opts out: the header, the alarm block and the tab strip are
-   drawn flush against each other by design, and a blanket 16px between every
-   pair of siblings was pulling them apart into a loose stack. */
-.havemind-view > * + *:not(.havemind-pane-header):not(.havemind-tabs):not(.havemind-tab-body):not(.havemind-pane-menu):not(.havemind-alarm) {
+   The pane chrome opts out: the alarm block and the tab strip are drawn flush
+   against each other by design, and a blanket 16px between every pair of
+   siblings was pulling them apart into a loose stack. */
+.havemind-view > * + *:not(.havemind-tabs):not(.havemind-tab-body):not(.havemind-alarm) {
   margin-top: var(--havemind-gap);
 }
-.havemind-view > .havemind-pane-header + *,
-.havemind-view > .havemind-tabs + *,
-.havemind-view > .havemind-pane-menu + * {
+.havemind-view > .havemind-tabs + * {
   margin-top: 0;
 }
 
@@ -293,7 +315,7 @@
    still carries information the rows do not. */
 .havemind-view h4 {
   margin: 0 0 4px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   font-weight: var(--font-medium);
 }
@@ -337,26 +359,7 @@
 
 /* Connect uses rows rather than a second toolbar: every connection action is
    visible without competing with the status line. */
-.havemind-connect-block {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--background-modifier-border);
-}
-.havemind-connect-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-height: 26px;
-  padding: 3px 0;
-  font-size: 12px;
-}
-.havemind-connect-label { color: var(--text-faint); }
-.havemind-connect-value {
-  color: var(--text-normal);
-  font-family: var(--font-monospace);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
+
 .havemind-composer-title {
   display: flex;
   align-items: center;
@@ -378,35 +381,9 @@
   background: var(--background-modifier-hover);
   color: var(--text-normal);
 }
-.havemind-action-row,
-.havemind-view button.havemind-action-row {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: 32px;
-  padding: 4px 0;
-  border: none;
-  background: transparent;
-  box-shadow: none;
-  color: var(--interactive-accent);
-  font: 500 12px/1.5 var(--font-ui);
-  text-align: left;
-  cursor: pointer;
-}
-.havemind-action-row + .havemind-action-row {
-  border-top: 1px solid var(--background-modifier-border);
-}
-.havemind-view button.havemind-action-row:hover {
-  background: transparent;
-  color: var(--interactive-accent-hover);
-}
-.havemind-view button.havemind-action-row.mod-quiet { color: var(--text-muted); }
-.havemind-view button.havemind-action-row.mod-quiet:hover { color: var(--text-normal); }
-.havemind-view button.havemind-action-row.mod-warning { color: var(--text-muted); }
-.havemind-view button.havemind-action-row.mod-warning:hover { color: var(--text-error); }
 
 .havemind-empty {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--font-ui-small);
   line-height: 1.7;
 }
@@ -523,14 +500,6 @@
   }
 }
 
-/* The 6-digit verification phrase: the one place type goes large. */
-.havemind-verification-phrase {
-  font-family: var(--font-monospace);
-  font-size: 1.5em;
-  letter-spacing: 0.24em;
-  text-align: center;
-  padding: var(--size-4-2) 0;
-}
 
 /* =========================================================================
    5. Presence roster rows
@@ -560,14 +529,6 @@
   box-shadow: 0 0 0 12px var(--background-modifier-hover);
 }
 
-.havemind-roster-dot {
-  width: var(--havemind-status-dot-size);
-  height: var(--havemind-status-dot-size);
-  flex: none;
-  border-radius: 50%;
-  background: currentColor;
-}
-
 .havemind-roster-copy {
   flex: 1;
   min-width: 0;
@@ -578,10 +539,12 @@
 .havemind-roster-name {
   color: var(--text-normal);
   font-size: var(--havemind-roster-name-size);
+  font-weight: var(--font-semibold);
 }
 
+/* Muted, not faint: faint grey on the sidebar is under 3:1. */
 .havemind-roster-meta {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--havemind-roster-meta-size);
 }
 
@@ -629,103 +592,100 @@
 
 .havemind-rejoin-waiting {
   margin-left: auto;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--font-ui-smaller);
 }
 
+/* A device waiting for the owner, at the top of People (plan 010). */
+.havemind-pending-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--size-4-2);
+  margin-bottom: var(--size-4-3);
+  padding: var(--size-4-3);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+.havemind-pending-title { color: var(--text-normal); font-weight: var(--font-semibold); }
+.havemind-pending-meta { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+
 /* =========================================================================
-   6. Activity feed rows
-   A list, not cards: author dot + name + verb, path underneath, time and
-   Restore at the trailing edge.
+   6. Activity feed rows (plan 010)
+   Text only: a day header, then the note's name over who did what, with the
+   time and Restore at the trailing edge. No author colour.
    ========================================================================= */
+.havemind-activity-day {
+  padding: 14px 0 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 .havemind-activity-row {
   display: flex;
-  align-items: flex-start;
-  gap: 9px;
+  align-items: center;
+  gap: 8px;
   padding: var(--havemind-activity-row-pad);
   background: transparent;
   line-height: 1.45;
 }
 
-.havemind-activity-row + .havemind-activity-row {
-  border-top: 1px solid var(--havemind-hairline);
-}
-
 .havemind-activity-row:hover {
   background: var(--background-modifier-hover);
-  box-shadow: 0 0 0 12px var(--background-modifier-hover);
+  box-shadow: 0 0 0 8px var(--background-modifier-hover);
 }
 
-/* The author colour becomes a dot before the row rather than a left rule. */
-.havemind-activity-row::before {
-  content: '';
-  flex: none;
-  width: var(--havemind-dot-size);
-  height: var(--havemind-dot-size);
-  margin-top: 5px;
-  border-radius: 50%;
-  background: var(--havemind-row-color, var(--text-faint));
-}
-
-/* This is the only flexible column in a row. Without `min-width: 0`, a long
-   vault path uses its intrinsic width and pushes the timestamp and Restore
-   action out of the sidebar instead of wrapping inside the available space. */
-.havemind-activity-copy {
+/* The only flexible column. Without `min-width: 0`, a long name pushes the time
+   and Restore out of the sidebar instead of ellipsising. */
+.havemind-activity-main {
   flex: 1 1 0;
   min-width: 0;
-  overflow-wrap: anywhere;
 }
 
-.havemind-activity-who {
-  color: var(--text-normal);
-  font-size: var(--havemind-roster-name-size);
-}
-
-.havemind-activity-path {
-  display: block;
-  margin-top: 1px;
+.havemind-activity-title {
   overflow: hidden;
-  color: var(--text-faint);
-  font-size: var(--havemind-roster-meta-size);
-  text-align: left;
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
 }
+.havemind-activity-row.is-delete .havemind-activity-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.havemind-activity-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.havemind-activity-row.is-conflict .havemind-activity-meta { color: var(--text-error); }
 
 .havemind-activity-trail {
   display: flex;
   flex: none;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
+  align-items: center;
+  gap: 8px;
 }
 
+/* Restore shows on hover or keyboard focus under a mouse; a finger has no
+   hover, so on a touch screen it is always there. */
 .havemind-activity-action,
 .havemind-view button.havemind-activity-action {
   padding: 0;
   border: none;
   box-shadow: none;
   background: transparent;
-  color: var(--havemind-accent);
-  font-size: var(--havemind-row-time-size);
-  font-weight: 500;
-  opacity: 0.62;
+  color: var(--text-accent);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  opacity: 0;
   cursor: pointer;
 }
-
-.havemind-view button.havemind-activity-action:hover {
-  background: transparent;
-  text-decoration: underline;
-  opacity: 1;
-}
-
-.havemind-activity-row:hover .havemind-activity-action {
-  opacity: 1;
-}
+.havemind-activity-row:hover .havemind-activity-action,
+.havemind-activity-row:focus-within .havemind-activity-action { opacity: 1; }
 
 .havemind-activity-time {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--havemind-row-time-size);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -802,9 +762,7 @@
   justify-content: center;
   width: 1.4em;
   height: 1.4em;
-  border: 1px solid var(--havemind-accent);
-  border-radius: 50%;
-  color: var(--havemind-accent);
+  color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   font-weight: var(--font-medium);
   line-height: 1;
@@ -825,7 +783,6 @@
 .havemind-view a.havemind-step-link:hover {
   text-decoration: underline;
 }
-
 
 /* =========================================================================
    8. Owner "Create connection" panel
@@ -877,11 +834,55 @@
   font-variant-numeric: tabular-nums;
 }
 
-.havemind-status-bar .svg-icon {
-  width: 12px;
-  height: 12px;
-  color: var(--havemind-accent);
-  stroke-width: 1.9;
+/* The smallest flower (plan 010): one hexagon, the same alphabet as the pane.
+   Filled when in sync, a pulsing ring while syncing, dashed when out of
+   reach, split on a conflict, a red outline when the pairing needs repair.
+   The words beside it stay: colour and shape are never the only signal. */
+.havemind-status-glyph {
+  display: block;
+  width: 16px;
+  height: 14px;
+  overflow: visible;
+}
+.havemind-status-glyph-hex { fill: var(--havemind-flower-core); }
+.havemind-status-glyph-ring {
+  fill: none;
+  stroke: var(--havemind-flower-line);
+  stroke-width: 1.6;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.havemind-status-glyph-split {
+  fill: var(--color-red);
+  display: none;
+}
+.havemind-status-glyph.is-syncing .havemind-status-glyph-ring,
+.havemind-status-glyph.is-retrying .havemind-status-glyph-ring {
+  animation: havemind-flower-pulse 1.6s ease-out infinite;
+}
+.havemind-status-glyph.is-offline .havemind-status-glyph-hex {
+  fill: none;
+  stroke: var(--havemind-flower-line);
+  stroke-width: 2.6;
+  stroke-dasharray: 4 3;
+  animation: havemind-flower-march 1.6s linear infinite;
+}
+.havemind-status-glyph.is-conflict .havemind-status-glyph-split { display: block; }
+.havemind-status-glyph.is-reconnect-required .havemind-status-glyph-hex,
+.havemind-status-glyph.is-reset-required .havemind-status-glyph-hex {
+  fill: none;
+  stroke: var(--text-error);
+  stroke-width: 2.6;
+}
+.havemind-status-glyph.is-disconnected .havemind-status-glyph-hex {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2.2;
+  stroke-dasharray: 3 3;
+}
+@media (prefers-reduced-motion: reduce) {
+  .havemind-status-glyph * { animation: none !important; }
 }
 
 /* =========================================================================
@@ -984,7 +985,7 @@
 }
 
 .havemind-conflict-meta {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--havemind-roster-meta-size);
 }
 
@@ -1016,6 +1017,11 @@
 .havemind-conflict-modal-meta {
   margin-bottom: var(--size-4-3);
   color: var(--havemind-quiet);
+  font-size: var(--font-ui-smaller);
+}
+
+.havemind-conflict-legend {
+  color: var(--text-muted);
   font-size: var(--font-ui-smaller);
 }
 
@@ -1071,99 +1077,6 @@
    number is one the test cannot see, and unseen numbers are what drifted.
    ========================================================================= */
 
-.havemind-pane-header {
-  display: flex;
-  align-items: center;
-  gap: var(--havemind-header-gap);
-  height: var(--havemind-header-height);
-  padding: var(--havemind-header-pad);
-  flex: none;
-  background: var(--background-secondary);
-}
-
-.havemind-pane-title {
-  flex: 1;
-  min-width: 0;
-  margin-left: var(--havemind-title-offset);
-  font-weight: var(--havemind-title-weight);
-  font-size: var(--havemind-title-size);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  letter-spacing: 0.005em;
-}
-
-.havemind-pane-more,
-.havemind-view button.havemind-pane-more {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: none;
-  box-shadow: none;
-  background: none;
-  color: var(--text-faint);
-  cursor: pointer;
-}
-.havemind-view button.havemind-pane-more:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
-}
-
-/* The overflow menu floats over the pane instead of pushing it down. Rendered
-   in flow it added its own height to the column, so opening it shoved the tabs
-   and the content out of view, a menu is a temporary layer, not a section. */
-.havemind-pane-menu {
-  position: absolute;
-  top: 36px;
-  right: 6px;
-  z-index: var(--layer-popover, 30);
-  min-width: 184px;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--havemind-hairline);
-  gap: 1px;
-  border-radius: 8px;
-  padding: 5px;
-  background: var(--background-secondary-alt);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-}
-/* `position` is declared once on `.havemind-view` in section 3; the container
-   query lives on `.workspace-leaf-content` above it. */
-.havemind-pane-menu-item,
-.havemind-view button.havemind-pane-menu-item {
-  text-align: left;
-  background: none;
-  box-shadow: none;
-  border: none;
-  border-radius: 6px;
-  padding: 6px 8px;
-  color: var(--text-normal);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.havemind-view button.havemind-pane-menu-item:hover {
-  background: var(--background-modifier-hover);
-}
-/* The server address: present for reference, never interactive. */
-.havemind-pane-menu-note {
-  padding: 6px 8px 4px;
-  color: var(--text-faint);
-  font-family: var(--font-monospace);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-
-.havemind-pane-menu-sep {
-  height: 1px;
-  margin: 4px 0;
-  background: var(--havemind-hairline);
-}
-
 /* The status word's own size and gap are set once, on `.havemind-status` in
    section 4. They were re-stated here at higher specificity, which meant the
    sheet carried two answers for one number. */
@@ -1175,17 +1088,46 @@
 
 /* =========================================================================
    Tab strip
-   Equal-width tabs: they are the plugin's table of contents, and a strip where
-   one tab is twice its neighbour reads as a toolbar with a favourite rather
-   than a set of peers. `flex: 1 1 0` with `min-width: 0` gives every tab the
-   same share and lets a long label ellipsise instead of pushing the strip.
+   Three words in a row, the open one underlined in the theme accent (plan 010).
+   No icons: a word is clearer, and the strip has room for all three.
    ========================================================================= */
 .havemind-tabs {
   flex: none;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  padding: var(--havemind-tabs-pad);
   background: var(--background-secondary);
   border-bottom: 1px solid var(--havemind-hairline);
+}
+
+.havemind-tablist {
+  display: flex;
+  min-width: 0;
+  gap: var(--havemind-tab-gap);
+}
+
+/* Desktop only: Obsidian hides the view header there, so the strip carries the
+   pane's More options; a phone uses the view header's own. */
+.havemind-tabs-more,
+.havemind-view button.havemind-tabs-more {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-s);
+  box-shadow: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.havemind-view button.havemind-tabs-more:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
 }
 
 /* The design sizes a tab by height, not by padding. Padding was the drift:
@@ -1231,7 +1173,7 @@
 
 /* The handoff keeps labels in one compact row at every practical sidebar
    width. Icons take over only below 250px, where words would truncate. */
-.havemind-tab-icon { display: none; }
+
 .havemind-tab-label {
   max-width: 100%;
   overflow: hidden;
@@ -1240,7 +1182,7 @@
 }
 /* Tabular figures so a changing count never shifts the tab under the cursor. */
 .havemind-tab-count {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
@@ -1265,18 +1207,20 @@
      states its own height here. */
   .havemind-view button.havemind-tab {
     height: var(--havemind-tab-height-touch);
+    font-size: var(--font-ui-medium);
+  }
+  /* A finger has no hover, so Restore is always there on a touch screen. */
+  .havemind-view button.havemind-activity-action { opacity: 1; }
+  /* A tablet keeps More options in the strip; give it a finger-sized target. */
+  .havemind-view button.havemind-tabs-more {
+    width: var(--havemind-tab-height-touch);
+    height: var(--havemind-tab-height-touch);
   }
   /* The last row has to clear the home indicator. `max()` keeps the designed
      16px wherever there is no inset. */
   .havemind-tab-body {
     padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
-}
-
-@container havemind-pane (max-width: 249px) {
-  .havemind-tab-label { display: none; }
-  .havemind-tab-icon { display: flex; }
-  .havemind-tab-icon .svg-icon { width: 17px; height: 17px; }
 }
 
 .havemind-tab-body { padding: var(--havemind-body-pad); background: var(--background-primary); }
@@ -1286,7 +1230,11 @@
 .havemind-view > .havemind-status,
 .havemind-view > .havemind-status-detail,
 .havemind-view > .havemind-hint,
+.havemind-view > .havemind-handshake-lead,
+.havemind-view > .havemind-handshake-code,
+.havemind-view > .havemind-handshake-warning,
 .havemind-view > .havemind-entry-head,
+.havemind-view > .havemind-entry-title,
 .havemind-view > .havemind-entry-subheading,
 .havemind-view > .havemind-entry-options,
 .havemind-view > .havemind-host-steps,
@@ -1321,79 +1269,6 @@
   padding-bottom: var(--havemind-first-run-pad);
 }
 
-/* No margin under the header: the alarm block and the tab strip both sit flush
-   against it by design, and each sets its own inner padding. This rule once
-   said `12px` while two other rules in this file said `0` for the same
-   selector, the winner was whichever came last, which is not a decision. */
-
-/* View actions live in the header (round 2, Q1). Two rows of icons was one row
-   too many; Obsidian already has a place for view actions, and moving them here
-   costs no new chrome. 26px targets, 4px apart. */
-.havemind-header-action,
-.havemind-view button.havemind-header-action {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--havemind-action-size);
-  height: var(--havemind-action-size);
-  padding: 0;
-  border: none;
-  box-shadow: none;
-  border-radius: var(--havemind-action-radius);
-  background: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: background-color 90ms ease-out, color 90ms ease-out;
-}
-.havemind-view button.havemind-header-action:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
-}
-
-.havemind-header-action .svg-icon {
-  width: var(--havemind-action-icon);
-  height: var(--havemind-action-icon);
-  stroke-width: 1.75;
-}
-
-.havemind-pane-more .svg-icon {
-  fill: currentColor;
-  stroke: none;
-}
-/* Pressed is carried by aria-pressed as well as this fill. */
-.havemind-view button.havemind-header-action.is-on {
-  background: rgba(var(--color-accent-rgb), 0.16);
-  color: var(--interactive-accent);
-}
-
-/* A dot on the mark itself, so a collapsed or backgrounded pane still signals.
-   Paired with the alarm block below and a title attribute, never colour
-   alone. */
-.havemind-pane-mark {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: var(--havemind-mark-size);
-  height: var(--havemind-mark-size);
-  border-radius: var(--havemind-mark-radius);
-  background: none;
-  color: var(--havemind-accent);
-}
-.havemind-pane-mark .svg-icon { width: var(--havemind-mark-icon); height: var(--havemind-mark-icon); stroke-width: 1.7; }
-.havemind-pane-mark-dot {
-  position: absolute;
-  top: -1px;
-  right: -1px;
-  width: var(--havemind-mark-dot-size);
-  height: var(--havemind-mark-dot-size);
-  border-radius: 50%;
-  background: var(--text-error);
-  border: var(--havemind-mark-dot-ring);
-}
-
 .havemind-status-detail {
   display: flex;
   flex-direction: column;
@@ -1401,9 +1276,8 @@
   text-wrap: pretty;
 }
 
-
 @media (prefers-reduced-motion: reduce) {
-  .havemind-header-action,
+  
   .havemind-tab,
   .havemind-activity-action { transition: none; }
 }
@@ -1439,15 +1313,28 @@
    used to need a 10px gap because it was a bare row floating in the column. */
 .havemind-view > .havemind-alarm { margin: 0; }
 
-
 /* =========================================================================
-   The entry chooser (design 1d)
-   Stacked rows, not side-by-side cards: at 300px a card is 140px and both
-   titles wrap, which turns a two-word choice into a puzzle.
+   The entry chooser (design 1d, plan 010)
+   The empty flower, one sentence, then one primary way in and a quieter one.
    ========================================================================= */
 
-.havemind-entry-head { display: flex; align-items: center; gap: 7px; }
-.havemind-entry-subheading { color: var(--havemind-quiet); margin-bottom: var(--havemind-gap); }
+.havemind-entry-head {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--size-4-8);
+}
+.havemind-entry-title {
+  color: var(--text-normal);
+  font-size: var(--havemind-hero-title-size);
+  font-weight: var(--havemind-hero-title-weight);
+  line-height: var(--line-height-tight);
+}
+/* On the chooser the title sits under the flower, centred like the Status tab. */
+.havemind-entry-head + .havemind-entry-title {
+  margin-bottom: var(--havemind-gap);
+  text-align: center;
+}
+.havemind-entry-subheading { color: var(--text-muted); margin-bottom: var(--havemind-gap); }
 
 .havemind-entry-options {
   display: flex;
@@ -1462,36 +1349,48 @@
 .havemind-view button.havemind-entry-option {
   display: block;
   width: 100%;
-  text-align: left;
-  padding: 10px 12px;
-  border: 1px solid var(--havemind-hairline);
-  border-radius: 6px;
+  padding: 7px 12px;
+  border: none;
+  border-radius: var(--button-radius, var(--radius-s));
+  box-shadow: none;
   background: none;
-  color: var(--text-normal);
+  color: var(--text-accent);
   font: inherit;
+  font-weight: var(--font-medium);
+  text-align: center;
   cursor: pointer;
-  /* Obsidian gives every <button> a fixed height and `white-space: nowrap`.
-     Both are wrong here: this button holds two lines (title + cost), so the
-     fixed height clipped the second line behind the next card and nowrap ran
-     the text past the pane's right edge. Height comes from the content, and
-     the cost line wraps. */
+  /* Obsidian gives every <button> a fixed height and `white-space: nowrap`;
+     a long title on a narrow pane has to wrap instead of running past the
+     edge, so the height comes from the content. */
   height: auto;
   min-height: 0;
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.havemind-entry-option:hover { background: var(--background-modifier-hover); }
-.havemind-entry-option-title { font-weight: 500; margin-bottom: 2px; }
+/* The chooser is centred, so its closing hint is too. */
+.havemind-entry-options + .havemind-hint { text-align: center; }
 
-.havemind-entry-back {
-  background: none;
+/* The first way in is the primary action in the theme accent. */
+.havemind-view button.havemind-entry-option.mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.havemind-view button.havemind-entry-option:hover { background: var(--background-modifier-hover); }
+.havemind-view button.havemind-entry-option.mod-cta:hover { background: var(--interactive-accent-hover); }
+
+.havemind-entry-back,
+.havemind-view button.havemind-entry-back {
+  display: block;
+  padding: var(--size-4-2) 0;
   border: none;
-  padding: 0 0 8px;
-  color: var(--havemind-quiet);
+  box-shadow: none;
+  background: none;
+  color: var(--text-accent);
   font: inherit;
+  text-align: left;
   cursor: pointer;
 }
-.havemind-entry-back:hover { color: var(--text-normal); }
+.havemind-view button.havemind-entry-back:hover { color: var(--interactive-accent-hover); }
 
 .havemind-host-steps { margin: var(--havemind-gap) 0; }
 /* A command is rendered as code, not prose: prose invites paraphrase, and a
@@ -1515,15 +1414,21 @@
    to tell you what to do with them.
    ========================================================================= */
 
-.havemind-handshake-lead { margin-bottom: var(--havemind-gap); }
+.havemind-handshake-lead {
+  margin-bottom: var(--havemind-gap);
+  color: var(--text-normal);
+  font-size: var(--havemind-hero-title-size);
+  font-weight: var(--havemind-hero-title-weight);
+  line-height: var(--line-height-tight);
+}
 
 .havemind-handshake-code {
   display: flex;
   gap: 14px;
   justify-content: center;
-  margin: 6px 0 var(--havemind-gap);
+  margin: var(--size-4-6) 0 var(--havemind-gap);
   font-family: var(--font-monospace);
-  font-size: 34px;
+  font-size: 40px;
   font-weight: 600;
   letter-spacing: 0.06em;
   color: var(--text-normal);
@@ -1536,6 +1441,17 @@
   font-size: 0.9em;
   margin-bottom: var(--havemind-gap);
 }
+
+.havemind-handshake-stop,
+.havemind-view button.havemind-handshake-stop {
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.havemind-view button.havemind-handshake-stop:hover { color: var(--text-normal); }
 
 /* =========================================================================
    Urgency (design 1a / 1g)
@@ -1578,4 +1494,104 @@
 
 .havemind-alarm-rows {
   padding: 0 11px 8px;
+}
+
+/* =========================================================================
+   The Status tab and the flower (plan 010)
+   The flower is drawn by `ui/flower.ts` as geometry only; every colour, dash
+   and animation is here, keyed on the state classes it sets.
+   ========================================================================= */
+.havemind-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--havemind-hero-gap);
+  padding: var(--havemind-hero-pad);
+  text-align: center;
+}
+.havemind-hero-title {
+  color: var(--text-normal);
+  font-size: var(--havemind-hero-title-size);
+  font-weight: var(--havemind-hero-title-weight);
+  line-height: var(--line-height-tight);
+}
+.havemind-hero-sub {
+  color: var(--text-muted);
+  font-size: var(--havemind-hero-sub-size);
+}
+
+.havemind-flower {
+  display: block;
+  width: 100%;
+  max-width: var(--havemind-flower-max);
+  height: auto;
+  margin-bottom: var(--havemind-hero-flower-gap);
+  overflow: visible;
+}
+.havemind-flower-core { fill: var(--havemind-flower-core); }
+.havemind-flower-core-dot { fill: var(--havemind-flower-dot); }
+.havemind-flower.is-unreachable .havemind-flower-core {
+  fill: none;
+  stroke: var(--havemind-flower-core);
+  stroke-width: 2.4;
+  stroke-dasharray: 5 4;
+  stroke-linejoin: round;
+  animation: havemind-flower-march 1.6s linear infinite;
+}
+.havemind-flower.is-unreachable .havemind-flower-core-dot { display: none; }
+.havemind-flower-pulse {
+  fill: none;
+  stroke: var(--havemind-flower-line);
+  stroke-width: 1.5;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.havemind-flower.is-syncing .havemind-flower-pulse {
+  animation: havemind-flower-pulse 1.6s ease-out infinite;
+}
+.havemind-flower-spoke {
+  fill: none;
+  stroke: var(--havemind-flower-line);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+.havemind-flower-spoke.is-self-offline,
+.havemind-flower-spoke.is-joining { stroke-dasharray: 2 4; }
+.havemind-flower-seat { fill: var(--havemind-flower-seat); }
+.havemind-flower-seat.is-free {
+  fill: none;
+  stroke: var(--havemind-flower-empty);
+  stroke-width: 1.5;
+}
+.havemind-flower-seat.is-self-offline,
+.havemind-flower-seat.is-joining {
+  fill: none;
+  stroke: var(--havemind-flower-line);
+  stroke-width: 2.4;
+  stroke-dasharray: 5 4;
+  stroke-linejoin: round;
+  animation: havemind-flower-march 1.6s linear infinite;
+}
+.havemind-flower-seat.is-more { fill: var(--background-modifier-border); }
+.havemind-flower-split { fill: var(--color-red); }
+.havemind-flower-label {
+  fill: var(--havemind-flower-ink);
+  font-family: var(--font-interface);
+  font-size: 11px;
+  font-weight: 700;
+}
+.havemind-flower-label.is-self-offline,
+.havemind-flower-label.is-more { fill: var(--text-normal); }
+.havemind-flower-label.is-joining { fill: var(--text-accent); }
+
+@keyframes havemind-flower-march {
+  to { stroke-dashoffset: -18; }
+}
+@keyframes havemind-flower-pulse {
+  0% { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(2); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .havemind-flower * { animation: none !important; }
 }
