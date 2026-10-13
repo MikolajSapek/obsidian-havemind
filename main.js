@@ -27157,9 +27157,9 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
         helpOpen: this.helpOpen,
         activeTab: this.activeTab,
         focusTabOnRender: this.focusTabOnRender,
-        // A phone shows Obsidian's view header and its More options, which
-        // `onPaneMenu` fills; a second button would be the old double header.
-        ...import_obsidian21.Platform.isPhone ? {} : { onMore: (event) => showPaneMenu(event, this.menuItems(panel)) }
+        // Every platform draws its own: on a phone the pane opens in the
+        // sidebar drawer, which shows no view header to carry Obsidian's.
+        onMore: (event) => showPaneMenu(event, this.menuItems(panel))
       },
       {
         setEntryChoice: (choice) => {
