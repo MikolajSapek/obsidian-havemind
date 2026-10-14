@@ -268,6 +268,26 @@ var ActivityLog = class {
       listener();
     }
   }
+  /**
+   * Brings back rows saved by an earlier session. A row recorded in this
+   * session wins over a stored one with the same revisionId; the result is
+   * oldest first and capped like `record`.
+   */
+  restore(stored) {
+    const current = new Set(this.entries.map((entry) => entry.revisionId));
+    const merged = [...stored.filter((entry) => !current.has(entry.revisionId)), ...this.entries].map((entry, index) => ({ entry, index })).sort((a, b) => a.entry.timestamp - b.entry.timestamp || a.index - b.index).map(({ entry }) => entry);
+    this.entries = merged.slice(Math.max(0, merged.length - this.maxEntries));
+    for (const listener of this.listeners) {
+      listener();
+    }
+  }
+  /** Empties the feed, as Disconnect does, and notifies subscribers. */
+  clear() {
+    this.entries = [];
+    for (const listener of this.listeners) {
+      listener();
+    }
+  }
   /** All recorded entries in insertion order (oldest first). */
   snapshot() {
     return [...this.entries];
@@ -16379,6 +16399,15 @@ var IndexedDbClientStore = class {
       (store) => store.put(value, key)
     );
   }
+  /** The saved Activity feed (plan 011, 1.1), or undefined when absent. */
+  async getActivityRecord(key) {
+    assertStorageKey(key);
+    return this.runTransaction("activity", "readonly", (store) => store.get(key));
+  }
+  async putActivityRecord(key, value) {
+    assertStorageKey(key);
+    await this.runTransaction("activity", "readwrite", (store) => store.put(value, key));
+  }
   /** Remove one history record; a no-op when absent. */
   async deleteHistoryRecord(key) {
     assertStorageKey(key);
@@ -16704,6 +16733,12 @@ function createPersistedRevisionHistoryStore(plugin, scope) {
       "Havemind: revision history store unavailable; each connection reads the full history."
     ),
     scope
+  );
+}
+function openActivityRecords(plugin) {
+  return openClientStoreLazily(
+    plugin,
+    "Havemind: activity store unavailable; the feed resets when Obsidian restarts."
   );
 }
 function openClientStoreLazily(plugin, unavailableWarning) {
@@ -23580,7 +23615,11 @@ async function connectAsInvitee(plugin, envelope, options) {
     options.report(
       `Ask the owner to approve this phrase: ${pending.verificationPhrase}. Waiting\u2026`
     );
-    options.onPendingApproval?.(pending.verificationPhrase);
+    options.onPendingApproval?.({
+      verificationPhrase: pending.verificationPhrase,
+      ownerName: pending.inviterDisplayName,
+      expiresAt: pending.expiresAt
+    });
   }
   const state = await driveToConnected({
     controller: onboarding,
@@ -25501,6 +25540,88 @@ var ConfirmModal = class extends import_obsidian13.Modal {
 // src/ui/onboarding-view.ts
 var import_obsidian21 = require("obsidian");
 
+// src/activity/activity.ts
+function actorLabel(actor) {
+  return actor.kind === "initial-import" ? "Initial import" : actor.displayName;
+}
+function buildActivityFeed(records) {
+  return records.map(
+    (record2) => ({
+      revisionId: record2.revisionId,
+      fileId: record2.fileId,
+      path: record2.path,
+      kind: record2.kind,
+      actorLabel: actorLabel(record2.actor),
+      actorId: record2.actor.kind === "author" ? record2.actor.actorId : null,
+      timestamp: record2.timestamp,
+      canRestore: record2.content !== null
+    })
+  ).sort((left, right) => {
+    if (left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+    return left.revisionId < right.revisionId ? 1 : -1;
+  });
+}
+
+// src/runtime/activity-render.ts
+function defaultFormatTimestamp2(timestamp) {
+  return new Date(timestamp).toISOString();
+}
+function buildActivityViewModel(records, options = {}) {
+  const format = options.formatTimestamp ?? defaultFormatTimestamp2;
+  const ordered = buildActivityFeed(records);
+  const visible = options.limit === void 0 ? ordered : ordered.slice(0, options.limit);
+  const rows = visible.map(
+    (entry) => ({
+      revisionId: entry.revisionId,
+      fileId: entry.fileId,
+      label: `${entry.kind} \xB7 ${entry.path} \xB7 ${entry.actorLabel}`,
+      headline: metaLine(entry),
+      pathLabel: entry.path,
+      timestamp: entry.timestamp,
+      timeLabel: format(entry.timestamp),
+      colorToken: entry.actorId === null ? INITIAL_IMPORT_COLOR_TOKEN : authorColorToken(entry.actorId),
+      canRestore: entry.canRestore,
+      title: noteTitle(entry.path),
+      meta: metaLine(entry),
+      kind: entry.kind
+    })
+  );
+  return { empty: rows.length === 0, rows };
+}
+var VERBS = {
+  edit: "edited",
+  create: "created it",
+  rename: "renamed it",
+  delete: "deleted it",
+  conflict: "kept both versions"
+};
+function metaLine(entry) {
+  if (entry.kind === "conflict") return "Both versions kept";
+  if (entry.actorId === null) return entry.actorLabel;
+  return `${entry.actorLabel} ${VERBS[entry.kind]}`;
+}
+function noteTitle(path) {
+  const name = path.split("/").pop() ?? path;
+  return name.endsWith(".md") ? name.slice(0, -3) : name;
+}
+var MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
+var twoDigits2 = (n) => n < 10 ? `0${n}` : String(n);
+function activityDayLabel(timestamp, now = Date.now()) {
+  const at = new Date(timestamp);
+  const today = new Date(now);
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(today) - startOfDay(at)) / 864e5);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return `${at.getDate()} ${MONTHS.slice(at.getMonth() * 3, at.getMonth() * 3 + 3)}`;
+}
+function clockLabel(timestamp) {
+  const at = new Date(timestamp);
+  return `${twoDigits2(at.getHours())}:${twoDigits2(at.getMinutes())}`;
+}
+
 // src/runtime/handshake.ts
 function groupCode(code) {
   if (/^\d{6}$/.test(code)) {
@@ -25508,20 +25629,12 @@ function groupCode(code) {
   }
   return [code];
 }
-function formatExpiry(expiresAt, now) {
-  const remaining = Math.floor((expiresAt - now) / 1e3);
-  if (!Number.isFinite(remaining) || remaining <= 0) return null;
-  const minutes = Math.floor(remaining / 60);
-  const seconds = remaining % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
 function buildGuestHandshake(input) {
-  const instruction = input.ownerName === void 0 ? "Read these six digits out loud to the person who invited you." : `Read these six digits out loud to ${input.ownerName}, who invited you.`;
+  const instruction = input.ownerName === void 0 || input.ownerName.trim() === "" ? "Read these six digits out loud to the person who invited you." : `Read these six digits out loud to ${input.ownerName}, who invited you.`;
   return {
     code: groupCode(input.code),
     instruction,
     mismatchWarning: "They will see the same six digits and confirm they match. If they don't match, stop, someone else is trying to join.",
-    expiryLabel: input.expiresAt !== void 0 && input.now !== void 0 ? formatExpiry(input.expiresAt, input.now) : null,
     liveNote: "This screen updates itself."
   };
 }
@@ -25549,8 +25662,8 @@ function renderGuestWaitingScreen(content, model, actions = {}) {
     digits.createEl("span", { text: group });
   }
   content.createDiv({ text: view.mismatchWarning }).addClass("havemind-handshake-warning");
-  if (view.expiryLabel !== null) {
-    content.createDiv({ text: `Expires in ${view.expiryLabel}` }).addClass("havemind-hint");
+  if (model.expiresAt !== void 0) {
+    content.createDiv({ text: `Expires at ${clockLabel(Date.parse(model.expiresAt))}` }).addClass("havemind-hint");
   }
   content.createDiv({ text: view.liveNote }).addClass("havemind-hint");
   const stop = content.createEl("button", { text: "Stop joining" });
@@ -26123,90 +26236,8 @@ function buildGettingStartedViewModel() {
   };
 }
 
-// src/activity/activity.ts
-function actorLabel(actor) {
-  return actor.kind === "initial-import" ? "Initial import" : actor.displayName;
-}
-function buildActivityFeed(records) {
-  return records.map(
-    (record2) => ({
-      revisionId: record2.revisionId,
-      fileId: record2.fileId,
-      path: record2.path,
-      kind: record2.kind,
-      actorLabel: actorLabel(record2.actor),
-      actorId: record2.actor.kind === "author" ? record2.actor.actorId : null,
-      timestamp: record2.timestamp,
-      canRestore: record2.content !== null
-    })
-  ).sort((left, right) => {
-    if (left.timestamp !== right.timestamp) {
-      return right.timestamp - left.timestamp;
-    }
-    return left.revisionId < right.revisionId ? 1 : -1;
-  });
-}
-
-// src/runtime/activity-render.ts
-function defaultFormatTimestamp2(timestamp) {
-  return new Date(timestamp).toISOString();
-}
-function buildActivityViewModel(records, options = {}) {
-  const format = options.formatTimestamp ?? defaultFormatTimestamp2;
-  const ordered = buildActivityFeed(records);
-  const visible = options.limit === void 0 ? ordered : ordered.slice(0, options.limit);
-  const rows = visible.map(
-    (entry) => ({
-      revisionId: entry.revisionId,
-      fileId: entry.fileId,
-      label: `${entry.kind} \xB7 ${entry.path} \xB7 ${entry.actorLabel}`,
-      headline: metaLine(entry),
-      pathLabel: entry.path,
-      timestamp: entry.timestamp,
-      timeLabel: format(entry.timestamp),
-      colorToken: entry.actorId === null ? INITIAL_IMPORT_COLOR_TOKEN : authorColorToken(entry.actorId),
-      canRestore: entry.canRestore,
-      title: noteTitle(entry.path),
-      meta: metaLine(entry),
-      kind: entry.kind
-    })
-  );
-  return { empty: rows.length === 0, rows };
-}
-var VERBS = {
-  edit: "edited",
-  create: "created it",
-  rename: "renamed it",
-  delete: "deleted it",
-  conflict: "kept both versions"
-};
-function metaLine(entry) {
-  if (entry.kind === "conflict") return "Both versions kept";
-  if (entry.actorId === null) return entry.actorLabel;
-  return `${entry.actorLabel} ${VERBS[entry.kind]}`;
-}
-function noteTitle(path) {
-  const name = path.split("/").pop() ?? path;
-  return name.endsWith(".md") ? name.slice(0, -3) : name;
-}
-var MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
-var twoDigits2 = (n) => n < 10 ? `0${n}` : String(n);
-function activityDayLabel(timestamp, now = Date.now()) {
-  const at = new Date(timestamp);
-  const today = new Date(now);
-  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const days = Math.round((startOfDay(today) - startOfDay(at)) / 864e5);
-  if (days === 0) return "Today";
-  if (days === 1) return "Yesterday";
-  return `${at.getDate()} ${MONTHS.slice(at.getMonth() * 3, at.getMonth() * 3 + 3)}`;
-}
-function clockLabel(timestamp) {
-  const at = new Date(timestamp);
-  return `${twoDigits2(at.getHours())}:${twoDigits2(at.getMinutes())}`;
-}
-
 // src/ui/activity-section.ts
-var EMPTY_ACTIVITY_TEXT = "No changes since Obsidian opened.";
+var EMPTY_ACTIVITY_TEXT = "No changes yet.";
 var DEFAULT_ACTIVITY_ROW_LIMIT = 60;
 function renderActivityRows(content, options) {
   const now = options.now ?? Date.now();
@@ -26380,7 +26411,7 @@ function renderInvitationEnvelope(content, model, actions) {
       () => copyStatus.setText(COPY_FAILED)
     );
   });
-  content.createDiv({ text: `Expires: ${model.invitation.expiresAt}` }).addClass("havemind-hint");
+  content.createDiv({ text: `Expires at ${clockLabel(Date.parse(model.invitation.expiresAt))}` }).addClass("havemind-hint");
   const dismiss = content.createEl("button", { text: "Done" });
   dismiss.onClickEvent(() => actions.onDismiss?.());
 }
@@ -26393,7 +26424,7 @@ function renderPendingRow(content, entry, actions, codes = {}) {
   row.style.setProperty("color", "var(--text-accent)");
   (0, import_obsidian15.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
   row.createEl("span", {
-    text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires ${entry.expiresAt}`
+    text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires at ${clockLabel(Date.parse(entry.expiresAt))}`
   });
   const phraseId = `havemind-approve-${entry.invitationId}`;
   row.createEl("label", {
@@ -27198,6 +27229,72 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
   /** Renders the rejoin-aware roster with its owner actions from the options. */
 };
 
+// src/runtime/activity-persistence.ts
+var KEY = "feed";
+var SAVE_DELAY_MS = 500;
+var FORMAT2 = 1;
+var KINDS = /* @__PURE__ */ new Set(["create", "edit", "rename", "delete", "conflict"]);
+function isAuthor(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const kind = value.kind;
+  if (kind === "member") return typeof value.membershipId === "string";
+  return kind === "remote" || kind === "initial-import";
+}
+function isEntry(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const e = value;
+  return typeof e.revisionId === "string" && typeof e.fileId === "string" && typeof e.path === "string" && typeof e.kind === "string" && KINDS.has(e.kind) && isAuthor(e.author) && typeof e.timestamp === "number" && Number.isFinite(e.timestamp) && typeof e.hasContent === "boolean";
+}
+function storedEntries(value) {
+  if (typeof value !== "object" || value === null) return [];
+  const record2 = value;
+  if (record2.format !== FORMAT2 || !Array.isArray(record2.entries)) return [];
+  return record2.entries.filter(isEntry);
+}
+function persistActivity(log, openRecords) {
+  let disposed = false;
+  let unsubscribe = () => void 0;
+  let flush = () => void 0;
+  let warned = false;
+  void (async () => {
+    const records = await openRecords().catch(() => null);
+    if (records === null || disposed) return;
+    try {
+      log.restore(storedEntries(await records.getActivityRecord(KEY)));
+    } catch {
+    }
+    if (disposed) return;
+    const write = () => {
+      records.putActivityRecord(KEY, { format: FORMAT2, entries: log.snapshot() }).catch(() => {
+        if (warned) return;
+        warned = true;
+        console.warn("Havemind: could not save the activity feed; it will reset when Obsidian restarts.");
+      });
+    };
+    let timer = null;
+    const save = () => {
+      if (timer !== null) return;
+      timer = setTimeout(() => {
+        timer = null;
+        write();
+      }, SAVE_DELAY_MS);
+    };
+    flush = () => {
+      if (timer === null) return;
+      clearTimeout(timer);
+      timer = null;
+      write();
+    };
+    unsubscribe = log.subscribe(save);
+    if (log.snapshot().length > 0) save();
+  })();
+  return () => {
+    disposed = true;
+    unsubscribe();
+    flush();
+  };
+}
+
 // src/ui/setting-tab.ts
 var import_obsidian22 = require("obsidian");
 function formatMemberCount(count) {
@@ -27318,6 +27415,8 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
     __publicField(this, "activityLog", new ActivityLog());
     /** Disposer for the activityLog subscription set up in onload(); torn down in onunload(). */
     __publicField(this, "activityLogUnsubscribe", null);
+    /** Stops saving the feed; null until a connection exists (plan 011, 1.1). */
+    __publicField(this, "activityPersistence", null);
     /**
      * Monotonic counter bumped each time a live connection is (re-)established
      * (`startConnection`/`connectFromInput` assign a handle). The invitee rejoin
@@ -27475,6 +27574,8 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
     this.syncState = null;
     this.activityLogUnsubscribe?.();
     this.activityLogUnsubscribe = null;
+    this.activityPersistence?.();
+    this.activityPersistence = null;
   }
   /** Starts sync without allowing startup failures to escape UI/event callbacks. */
   async startConnection() {
@@ -27506,6 +27607,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
         return;
       }
       this.connection = handle;
+      this.startActivityPersistence();
       this.syncState = handle.state ?? null;
       this.connectGeneration += 1;
       this.people.adoptSelfMembership(this.connection);
@@ -27586,9 +27688,9 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
         hooks: this.activityHooks(),
         // Durably record the waiting state so a pane reopen resumes the waiting
         // screen (with the code) instead of a blank paste form.
-        onPendingApproval: (verificationPhrase) => {
+        onPendingApproval: (waiting) => {
           if (attempt.signal.aborted || this.unloaded) return;
-          this.awaitingApproval = { verificationPhrase };
+          this.awaitingApproval = waiting;
           this.views.refreshOnboardingNow();
         },
         // The owner rejected the device or the attempt cap was reached: leave the
@@ -27611,6 +27713,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
         this.awaitingApproval = null;
         this.guestInvitationInvalid = false;
         this.connection = handle;
+        this.startActivityPersistence();
         this.syncState = handle.state ?? null;
         this.connectGeneration += 1;
         this.people.adoptSelfMembership(handle);
@@ -27654,6 +27757,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
     this.connectionError = void 0;
     this.awaitingApproval = null;
     this.guestInvitationInvalid = false;
+    this.activityLog.clear();
     this.statusBar.setStatus(formatStatusBar({ status: "disconnected" }));
     this.views.refreshOnboardingNow();
   }
@@ -27782,6 +27886,8 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
       this.connection?.stop();
       this.connection = null;
       this.syncState = null;
+      this.activityPersistence?.();
+      this.activityPersistence = null;
       await resetHavemindConnectionState(this);
       forgetSharedAccessProvider(this);
       this.people.rosterMembers = [];
@@ -27866,6 +27972,15 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
    * an existing leaf, so asking twice focuses the pane rather than opening a
    * second copy of it.
    */
+  /**
+   * Keeps the Activity feed across restarts, from the first connection on.
+   * Not at load: opening the client database mints a client id, which a
+   * device that never paired must not have yet.
+   */
+  startActivityPersistence() {
+    if (this.activityPersistence !== null) return;
+    this.activityPersistence = persistActivity(this.activityLog, openActivityRecords(this));
+  }
   async openPane(tab) {
     const existingLeaf = this.app.workspace.getLeavesOfType(HAVEMIND_ONBOARDING_VIEW)[0];
     const leaf = existingLeaf ?? this.app.workspace.getRightLeaf(false);
