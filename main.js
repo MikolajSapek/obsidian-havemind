@@ -25894,7 +25894,7 @@ function renderConnectForm(content, draft, live, onConnect) {
   const tokenInput = labelledField(
     content,
     "havemind-connect-token",
-    "Invitation or owner pairing token",
+    "Invitation, or the line from the installer",
     "textarea",
     { placeholder: "v1.\u2026 or hm_pt_\u2026@https://\u2026", value: draft.token }
   );
@@ -25905,7 +25905,7 @@ function renderConnectForm(content, draft, live, onConnect) {
     "input",
     {
       type: "text",
-      placeholder: "https://your-server.example (not needed for hm_pt_\u2026@ codes)",
+      placeholder: "Leave empty for the installer line",
       value: draft.server
     }
   );
