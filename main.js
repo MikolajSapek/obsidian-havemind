@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => HavemindPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian25 = require("obsidian");
+var import_obsidian24 = require("obsidian");
 
 // src/runtime/is-record.ts
 function isRecord(value) {
@@ -24215,7 +24215,7 @@ function browserClipboardCopyDeps() {
 }
 
 // src/plugin/note-history.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // src/activity/activity.ts
 function actorLabel(actor) {
@@ -24313,10 +24313,50 @@ function buildNoteHistory(events, roster, now = Date.now()) {
 }
 
 // src/ui/note-history-modal.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian6 = require("obsidian");
+
+// src/runtime/diff-collapse.ts
+var CONTEXT = 3;
+function collapseUnchanged(diff, context = CONTEXT) {
+  const keep = diff.map(() => false);
+  diff.forEach((line, index2) => {
+    if (line.type === "context") return;
+    for (let k = Math.max(0, index2 - context); k <= Math.min(diff.length - 1, index2 + context); k += 1) keep[k] = true;
+  });
+  const rows = [];
+  let index = 0;
+  while (index < diff.length) {
+    if (keep[index]) {
+      rows.push(diff[index]);
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < diff.length && !keep[end]) end += 1;
+    if (end - index > 1) rows.push({ type: "gap", count: end - index });
+    else rows.push(diff[index]);
+    index = end;
+  }
+  return rows;
+}
+
+// src/ui/diff-view.ts
+function renderDiff(container, diff) {
+  const box = container.createDiv();
+  box.addClass("havemind-conflict-diff");
+  for (const row of collapseUnchanged(diff)) {
+    if (row.type === "gap") {
+      box.createDiv({ text: `\u2026 ${row.count} unchanged lines` }).addClass("havemind-conflict-gap");
+      continue;
+    }
+    const prefix = row.type === "added" ? "+ " : row.type === "removed" ? "- " : "  ";
+    const line = box.createDiv({ text: `${prefix}${row.text}` });
+    line.addClass("havemind-conflict-line");
+    line.addClass(`havemind-conflict-line-${row.type}`);
+  }
+}
 
 // src/ui/primitives.ts
-var import_obsidian6 = require("obsidian");
 function prefersReducedMotion() {
   return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -24326,11 +24366,7 @@ function formatActivityTime(timestamp) {
   return date5.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 function renderViewTitle(content, text) {
-  const heading = content.createEl("h3", { text });
-  heading.addClass("havemind-view-title");
-  const icon = heading.createEl("span", { attr: DECORATIVE });
-  icon.addClass("havemind-title-icon");
-  (0, import_obsidian6.setIcon)(icon, "hexagon");
+  content.createEl("h3", { text }).addClass("havemind-view-title");
 }
 function labelledField(parent, id, label, tag, options = {}) {
   parent.createEl("label", { text: label, attr: { for: id } });
@@ -24404,10 +24440,14 @@ function renderNoteHistory(container, deps) {
   list.addClass("havemind-history-list");
   const detail = container.createDiv();
   detail.addClass("havemind-history-detail");
+  const items = [];
   for (const row of deps.rows) {
     const item = list.createEl("button", { text: `${row.author} \xB7 ${row.when}` });
     item.addClass("havemind-history-row");
+    items.push(item);
     item.onClickEvent(() => {
+      for (const other of items) other.removeClass("is-active");
+      item.addClass("is-active");
       void showVersion(detail, row.revisionId, deps);
     });
   }
@@ -24418,7 +24458,8 @@ async function showVersion(detail, revisionId, deps) {
   let now;
   try {
     [version2, now] = await Promise.all([deps.loadVersion(revisionId), deps.currentText()]);
-  } catch {
+  } catch (error51) {
+    console.warn("Havemind: could not load a version for the note history", error51);
     detail.createDiv({ text: "Could not load this version. Check the connection and try again." }).addClass("havemind-hint");
     return;
   }
@@ -24426,19 +24467,9 @@ async function showVersion(detail, revisionId, deps) {
     detail.createDiv({ text: "This version has no text to show: it is a deletion or an attachment." }).addClass("havemind-hint");
     return;
   }
-  const diff = computeLineDiff(now, version2.content);
-  if (diff === null) {
-    detail.createDiv({ text: "The difference is too large to show here." }).addClass("havemind-hint");
-  } else {
-    detail.createDiv({ text: "\u2212 now \xB7 + this version" }).addClass("havemind-conflict-legend");
-    const box = detail.createDiv();
-    box.addClass("havemind-conflict-diff");
-    for (const line of diff) {
-      const prefix = line.type === "added" ? "+ " : line.type === "removed" ? "- " : "  ";
-      const row = box.createDiv({ text: `${prefix}${line.text}` });
-      row.addClass("havemind-conflict-line");
-      row.addClass(`havemind-conflict-line-${line.type}`);
-    }
+  if (version2.content === now) {
+    detail.createDiv({ text: "This version is the same as the note now." }).addClass("havemind-hint");
+    return;
   }
   armedButton(
     detail,
@@ -24447,8 +24478,15 @@ async function showVersion(detail, revisionId, deps) {
     "havemind-history-restore",
     () => deps.onRestore(revisionId)
   );
+  const diff = computeLineDiff(now, version2.content);
+  if (diff === null) {
+    detail.createDiv({ text: "The difference is too large to show here." }).addClass("havemind-hint");
+    return;
+  }
+  detail.createDiv({ text: "\u2212 now \xB7 + this version" }).addClass("havemind-conflict-legend");
+  renderDiff(detail, diff);
 }
-var NoteHistoryModal = class extends import_obsidian7.Modal {
+var NoteHistoryModal = class extends import_obsidian6.Modal {
   constructor(app, deps) {
     super(app);
     __publicField(this, "deps", deps);
@@ -24486,8 +24524,9 @@ async function open(plugin, note, fileId) {
   let events;
   try {
     events = await connection.noteEvents(fileId);
-  } catch {
-    new import_obsidian8.Notice("Havemind: could not load this note's history. Check the connection and try again.");
+  } catch (error51) {
+    console.warn("Havemind: could not load a note's history", error51);
+    new import_obsidian7.Notice("Havemind: could not load this note's history. Check the connection and try again.");
     return;
   }
   const vault = plugin.app;
@@ -24582,7 +24621,7 @@ function registerCommands(plugin) {
 }
 
 // src/plugin/conflicts.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 
 // src/runtime/conflict-cache.ts
 var CachedConflictList = class {
@@ -24668,7 +24707,7 @@ var RerunGuard = class {
 };
 
 // src/ui/conflict-modal.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 function buildConflictModalModel(copy, diff, options = {}) {
   return {
     title: copy.noteName ?? copy.copyName,
@@ -24705,14 +24744,7 @@ function renderConflictModalBody(container, model, actions) {
       text: `\u2212 your version \xB7 + ${model.author ?? "the other version"}`
     });
     legend.addClass("havemind-conflict-legend");
-    const diffBox = container.createDiv({ text: "" });
-    diffBox.addClass("havemind-conflict-diff");
-    for (const line of model.diff) {
-      const prefix = line.type === "added" ? "+ " : line.type === "removed" ? "- " : "  ";
-      const row = diffBox.createDiv({ text: `${prefix}${line.text}` });
-      row.addClass("havemind-conflict-line");
-      row.addClass(`havemind-conflict-line-${line.type}`);
-    }
+    renderDiff(container, model.diff);
   }
   const buttons = container.createDiv({ text: "" });
   buttons.addClass("havemind-conflict-buttons");
@@ -24739,7 +24771,7 @@ function renderConflictModalBody(container, model, actions) {
   keepBoth.addClass("mod-cta");
   keepBoth.onClickEvent(() => actions.onKeepBoth());
 }
-var ConflictResolveModal = class extends import_obsidian9.Modal {
+var ConflictResolveModal = class extends import_obsidian8.Modal {
   constructor(app, model, actions) {
     super(app);
     __publicField(this, "model");
@@ -24826,7 +24858,7 @@ var Conflicts = class {
     try {
       return await this.openConflictModalOnce(copyPath);
     } catch {
-      new import_obsidian10.Notice("Havemind: could not open this conflict. Try again.");
+      new import_obsidian9.Notice("Havemind: could not open this conflict. Try again.");
       this.plugin.views.refreshOnboarding();
       return null;
     }
@@ -24856,16 +24888,16 @@ var Conflicts = class {
       void resolver.resolve(copy, action).then(
         (outcome) => {
           if (outcome === "vanished") {
-            new import_obsidian10.Notice("This conflict was already auto-resolved.");
+            new import_obsidian9.Notice("This conflict was already auto-resolved.");
           }
           if (outcome === "target-missing") {
-            new import_obsidian10.Notice("The note was moved or deleted, so the conflict copy was kept.");
+            new import_obsidian9.Notice("The note was moved or deleted, so the conflict copy was kept.");
           }
           modal2.close();
           this.plugin.views.refreshOnboarding();
         },
         () => {
-          new import_obsidian10.Notice("Havemind: could not resolve this conflict. Try again.");
+          new import_obsidian9.Notice("Havemind: could not resolve this conflict. Try again.");
           this.plugin.views.refreshOnboarding();
         }
       );
@@ -24894,7 +24926,7 @@ var Conflicts = class {
     this.conflictSweepTimer = globalThis.setTimeout(() => {
       this.conflictSweepTimer = null;
       void this.runConflictSweep().catch(() => {
-        new import_obsidian10.Notice("Havemind: automatic conflict repair could not finish.");
+        new import_obsidian9.Notice("Havemind: automatic conflict repair could not finish.");
         this.plugin.views.refreshOnboarding();
       });
     }, CONFLICT_SWEEP_DEBOUNCE_MS);
@@ -24926,7 +24958,7 @@ var Conflicts = class {
       fileIdForCopy: (path) => state.fileIdForConflictCopy(path),
       ancestorFor: async (copyPath, fileId, targetPath) => await this.plugin.connection?.conflictAncestor?.(copyPath, fileId, targetPath) ?? null,
       notify: (message) => {
-        new import_obsidian10.Notice(`Havemind: ${message}`);
+        new import_obsidian9.Notice(`Havemind: ${message}`);
       }
     });
     this.plugin.views.refreshOnboarding();
@@ -25123,7 +25155,7 @@ var Invitations = class {
 };
 
 // src/plugin/people.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // src/runtime/roster.ts
 function upsertRosterMember(roster, member) {
@@ -25226,7 +25258,7 @@ var People = class {
       role: self.role,
       self: true
     }).catch(() => {
-      new import_obsidian11.Notice("Havemind: could not save this device in the member roster.");
+      new import_obsidian10.Notice("Havemind: could not save this device in the member roster.");
       this.plugin.views.refreshOnboarding();
     });
   }
@@ -25292,13 +25324,13 @@ var People = class {
     try {
       const waiting = await requestRejoinGrantForOwner(this.plugin, { membershipId });
       if (waiting === null) {
-        new import_obsidian11.Notice("Havemind: connect as the vault owner before rejoining a member.");
+        new import_obsidian10.Notice("Havemind: connect as the vault owner before rejoining a member.");
         return;
       }
       this.rejoinWaiting = /* @__PURE__ */ new Set([...this.rejoinWaiting, membershipId]);
       this.plugin.views.refreshOnboardingNow();
     } catch (error51) {
-      new import_obsidian11.Notice(`Havemind: could not request rejoin, ${errorMessage(error51)}`);
+      new import_obsidian10.Notice(`Havemind: could not request rejoin, ${errorMessage(error51)}`);
     }
   }
   /**
@@ -25318,7 +25350,7 @@ var People = class {
     try {
       const removed = await revokeMembershipForOwner(this.plugin, { membershipId });
       if (removed === null) {
-        new import_obsidian11.Notice(
+        new import_obsidian10.Notice(
           "Havemind: connect as the vault owner before removing a member."
         );
         return;
@@ -25327,16 +25359,16 @@ var People = class {
       this.rejoinWaiting = new Set(
         [...this.rejoinWaiting].filter((id) => id !== membershipId)
       );
-      new import_obsidian11.Notice(`Removed ${displayName} from the vault.`);
+      new import_obsidian10.Notice(`Removed ${displayName} from the vault.`);
       this.plugin.views.refreshOnboardingNow();
     } catch (error51) {
-      new import_obsidian11.Notice(`Havemind: could not remove member, ${errorMessage(error51)}`);
+      new import_obsidian10.Notice(`Havemind: could not remove member, ${errorMessage(error51)}`);
     }
   }
 };
 
 // src/plugin/rejoin.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 var InviteeRejoin = class {
   constructor(plugin) {
     __publicField(this, "plugin", plugin);
@@ -25423,7 +25455,7 @@ var InviteeRejoin = class {
     this.disarmRejoin();
     this.plugin.connectionError = "Rejoin failed, the server rejected the automatic rejoin. Reconnect manually to resume syncing.";
     this.plugin.statusBar.setStatus(formatStatusBar({ status: "reconnect-required" }));
-    new import_obsidian12.Notice(
+    new import_obsidian11.Notice(
       "Havemind: rejoin failed. Reconnect manually to resume syncing."
     );
     this.plugin.views.refreshOnboarding();
@@ -25451,7 +25483,7 @@ var InviteeRejoin = class {
 };
 
 // src/plugin/send-queue.ts
-var import_obsidian13 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 
 // src/runtime/send-queue-status.ts
 var DEFAULT_STALE_THRESHOLD_MS = 3e4;
@@ -25571,7 +25603,7 @@ var SendQueue = class {
       return;
     }
     if (fallback.kind === "discard-dead-letter") {
-      new import_obsidian13.Notice(fallback.notice);
+      new import_obsidian12.Notice(fallback.notice);
       await this.plugin.syncState?.discardQuarantined(revisionId);
     }
     this.plugin.views.refreshOnboarding();
@@ -25597,7 +25629,7 @@ var SendQueue = class {
   async retryFromDisk(revisionId, path, options) {
     const outcome = this.plugin.connection?.retryFailedCommit?.(path);
     const effect = planRetryFromDisk(outcome, path, options.discardOnRetrigger);
-    if (effect.notice !== null) new import_obsidian13.Notice(effect.notice);
+    if (effect.notice !== null) new import_obsidian12.Notice(effect.notice);
     if (effect.discard) await this.plugin.syncState?.discardQuarantined(revisionId);
     this.plugin.views.refreshOnboardingNow();
   }
@@ -25606,10 +25638,10 @@ var SendQueue = class {
     try {
       const done = await this.plugin.connection?.retryParked?.(revisionId) ?? false;
       if (!done) {
-        new import_obsidian13.Notice("Havemind: the note is open with unsaved changes, or you are not connected. Try again later.");
+        new import_obsidian12.Notice("Havemind: the note is open with unsaved changes, or you are not connected. Try again later.");
       }
     } catch (error51) {
-      new import_obsidian13.Notice(
+      new import_obsidian12.Notice(
         `Havemind: still cannot apply this change, ${errorMessage(error51)}`
       );
     }
@@ -25647,7 +25679,7 @@ var SendQueue = class {
     this.notifiedQuarantineIds = new Set(next);
     for (const item of fresh) {
       const label = item.path ?? item.fileId;
-      new import_obsidian13.Notice(
+      new import_obsidian12.Notice(
         `A change to ${label} could not be sent, see the Havemind panel.`
       );
     }
@@ -25655,7 +25687,7 @@ var SendQueue = class {
 };
 
 // src/plugin/status-bar.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 var HEXAGON = "M24 12L19 20.7H9L4 12L9 3.3H19Z";
 var SPLIT = "M20.3 5.7L24 12L19 20.7H9L7.7 18.3Z";
 var StatusBar = class {
@@ -25750,8 +25782,8 @@ var StatusBar = class {
 };
 
 // src/ui/confirm-modal.ts
-var import_obsidian15 = require("obsidian");
-var ConfirmModal = class extends import_obsidian15.Modal {
+var import_obsidian14 = require("obsidian");
+var ConfirmModal = class extends import_obsidian14.Modal {
   constructor(app, options) {
     super(app);
     __publicField(this, "options");
@@ -25778,7 +25810,7 @@ var ConfirmModal = class extends import_obsidian15.Modal {
 };
 
 // src/ui/onboarding-view.ts
-var import_obsidian23 = require("obsidian");
+var import_obsidian22 = require("obsidian");
 
 // src/runtime/handshake.ts
 function groupCode(code) {
@@ -25898,7 +25930,7 @@ function buildPaneTabs(input) {
 }
 
 // src/ui/pane-tabs-section.ts
-var import_obsidian16 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 var PANE_TABPANEL_ID = "havemind-tabpanel";
 function paneTabDomId(id) {
   return `havemind-tab-${id}`;
@@ -25959,7 +25991,7 @@ function renderPaneTabs(content, options) {
     const onMore = options.onMore;
     const more = row.createEl("button", { attr: { "aria-label": "More options" } });
     more.addClass("havemind-tabs-more");
-    (0, import_obsidian16.setIcon)(more, "more-horizontal");
+    (0, import_obsidian15.setIcon)(more, "more-horizontal");
     more.onClickEvent((event) => onMore(event));
   }
 }
@@ -26527,7 +26559,7 @@ function renderRejoinRoster(content, roster, actions) {
 }
 
 // src/ui/screens/invite-composer.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 
 // src/ui/screens/invitation-envelope.ts
 var COPY_FAILED = "Could not copy automatically. Select and copy the invitation manually.";
@@ -26575,12 +26607,12 @@ function renderInvitationEnvelope(content, model, actions) {
 }
 
 // src/ui/screens/pending-approval-row.ts
-var import_obsidian17 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 function renderPendingRow(content, entry, actions, codes = {}) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-pending-row");
   row.style.setProperty("color", "var(--text-accent)");
-  (0, import_obsidian17.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
+  (0, import_obsidian16.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
   row.createEl("span", {
     text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires at ${clockLabel(Date.parse(entry.expiresAt))}`
   });
@@ -26695,7 +26727,7 @@ function renderNotice(content, notice, kind) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-success)");
-  (0, import_obsidian18.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
+  (0, import_obsidian17.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
   row.createEl("span", { text: ` ${notice}` });
 }
 
@@ -26736,7 +26768,7 @@ function renderPeopleTab(body, composer, actions) {
 }
 
 // src/ui/conflict-section.ts
-var import_obsidian19 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 function renderConflictSection(content, copies, actions) {
   if (copies.length === 0) return;
   const block = renderAlarmBlock(content, "havemind-alarm-conflict");
@@ -26744,7 +26776,7 @@ function renderConflictSection(content, copies, actions) {
   header.addClass("havemind-conflict-header");
   const icon = header.createEl("span", { attr: DECORATIVE });
   icon.addClass("havemind-conflict-icon");
-  (0, import_obsidian19.setIcon)(icon, "git-merge");
+  (0, import_obsidian18.setIcon)(icon, "git-merge");
   header.createEl("span", {
     text: copies.length === 1 ? " 1 conflict" : ` ${copies.length} conflicts`
   });
@@ -26831,7 +26863,7 @@ function renderSendQueue(content, source) {
 }
 
 // src/ui/screens/status-indicator.ts
-var import_obsidian20 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 function renderStatusIndicator(content, panel, actions = {}, includeRecovery = true) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
@@ -26844,7 +26876,7 @@ function renderStatusIndicator(content, panel, actions = {}, includeRecovery = t
     if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
   } else {
     const icon = row.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian20.setIcon)(icon, panel.icon);
+    (0, import_obsidian19.setIcon)(icon, panel.icon);
   }
   row.createEl("span", { text: ` ${panel.label}` });
   const detail = content.createDiv();
@@ -27149,13 +27181,13 @@ var RepaintScheduler = class {
 };
 
 // src/ui/screens/guest-invalid.ts
-var import_obsidian21 = require("obsidian");
+var import_obsidian20 = require("obsidian");
 function renderGuestInvalid(content, ownerName, actions) {
   const view = buildSpentInvitation(ownerName);
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-error)");
-  (0, import_obsidian21.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
+  (0, import_obsidian20.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
   row.createEl("span", { text: ` ${view.heading}` });
   content.createDiv({ text: view.explanation }).addClass("havemind-hint");
   actions.renderForm(content);
@@ -27181,7 +27213,7 @@ function readPaneState(options, entryChoice, draftToken) {
 }
 
 // src/ui/screens/header-menu.ts
-var import_obsidian22 = require("obsidian");
+var import_obsidian21 = require("obsidian");
 function buildHeaderMenuItems(panel, helpOpen, actions) {
   if (panel.showForm) return [];
   const items = [];
@@ -27207,7 +27239,7 @@ function fillPaneMenu(menu, items) {
   }
 }
 function showPaneMenu(event, items) {
-  const menu = new import_obsidian22.Menu();
+  const menu = new import_obsidian21.Menu();
   fillPaneMenu(menu, items);
   menu.showAtMouseEvent(event);
 }
@@ -27216,7 +27248,7 @@ function showPaneMenu(event, items) {
 var HAVEMIND_ONBOARDING_VIEW = "havemind-onboarding";
 
 // src/ui/onboarding-view.ts
-var HavemindOnboardingView = class extends import_obsidian23.ItemView {
+var HavemindOnboardingView = class extends import_obsidian22.ItemView {
   constructor(leaf, options = {}) {
     super(leaf);
     __publicField(this, "options");
@@ -27454,12 +27486,12 @@ function persistActivity(log, openRecords) {
 }
 
 // src/ui/setting-tab.ts
-var import_obsidian24 = require("obsidian");
+var import_obsidian23 = require("obsidian");
 function formatMemberCount(count) {
   if (count === 0) return "No members recorded yet";
   return count === 1 ? "1 member" : `${count} members`;
 }
-var HavemindSettingTab = class extends import_obsidian24.PluginSettingTab {
+var HavemindSettingTab = class extends import_obsidian23.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     /**
@@ -27474,12 +27506,12 @@ var HavemindSettingTab = class extends import_obsidian24.PluginSettingTab {
     this.containerEl.empty();
     const plugin = this.havemind;
     const info = plugin.settingsInfo();
-    new import_obsidian24.Setting(this.containerEl).setName("Havemind").setHeading();
-    new import_obsidian24.Setting(this.containerEl).setName("Server").setDesc(info.server);
-    new import_obsidian24.Setting(this.containerEl).setName("Connection").setDesc(info.status);
-    new import_obsidian24.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
-    new import_obsidian24.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
-    new import_obsidian24.Setting(this.containerEl).setName("Actions").setHeading();
+    new import_obsidian23.Setting(this.containerEl).setName("Havemind").setHeading();
+    new import_obsidian23.Setting(this.containerEl).setName("Server").setDesc(info.server);
+    new import_obsidian23.Setting(this.containerEl).setName("Connection").setDesc(info.status);
+    new import_obsidian23.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
+    new import_obsidian23.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
+    new import_obsidian23.Setting(this.containerEl).setName("Actions").setHeading();
     this.renderActions(plugin, info);
     const refresh = this.containerEl.createEl("button", { text: "Refresh" });
     refresh.onClickEvent(() => this.display());
@@ -27491,18 +27523,18 @@ var HavemindSettingTab = class extends import_obsidian24.PluginSettingTab {
    */
   renderActions(plugin, info) {
     const actions = plugin.connectionActions();
-    new import_obsidian24.Setting(this.containerEl).setName("Havemind panel").setDesc(
+    new import_obsidian23.Setting(this.containerEl).setName("Havemind panel").setDesc(
       "Connect a device, invite a peer, resolve conflicts and inspect the send queue."
     ).addButton(
       (button) => button.setButtonText("Open Havemind panel").setCta().onClick(() => plugin.revealPanel())
     );
-    new import_obsidian24.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
+    new import_obsidian23.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
       (button) => button.setButtonText("Sync now").setDisabled(!info.connected).onClick(() => actions.syncNow())
     );
-    new import_obsidian24.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
+    new import_obsidian23.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
       (button) => button.setButtonText("Disconnect").setDisabled(!info.connected).onClick(() => actions.disconnect())
     );
-    new import_obsidian24.Setting(this.containerEl).setName("Reset connection").setDesc(
+    new import_obsidian23.Setting(this.containerEl).setName("Reset connection").setDesc(
       "Clear the stored pairing so this device can be paired again. No note is touched."
     ).addButton(
       (button) => button.setButtonText("Reset connection").onClick(() => actions.resetConnection())
@@ -27540,7 +27572,7 @@ var PluginViewRegistry = class {
 };
 
 // src/main.ts
-var HavemindPlugin = class extends import_obsidian25.Plugin {
+var HavemindPlugin = class extends import_obsidian24.Plugin {
   constructor() {
     super(...arguments);
     __publicField(this, "connection", null);
@@ -27620,7 +27652,7 @@ var HavemindPlugin = class extends import_obsidian25.Plugin {
         // A phone joins vaults, it does not run them: hosting needs Docker, a
         // terminal and a machine that stays awake. The entry chooser drops the
         // host branch there rather than walking the user to a dead end.
-        canHost: !import_obsidian25.Platform.isMobileApp,
+        canHost: !import_obsidian24.Platform.isMobileApp,
         // The activity feed is a tab of this pane (plans/007 Stage 0): the log
         // snapshot mapped through the roster, so each row shows the author's
         // display name and colour.
@@ -27649,13 +27681,13 @@ var HavemindPlugin = class extends import_obsidian25.Plugin {
         recoveryRequiredProvider: () => this.syncState?.isRecoveryRequired() ?? false,
         onRetrySend: (revisionId) => {
           void this.sendQueue.retrySend(revisionId).catch(() => {
-            new import_obsidian25.Notice("Havemind: could not retry this queued change.");
+            new import_obsidian24.Notice("Havemind: could not retry this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
         onDiscardSend: (revisionId) => {
           void this.sendQueue.discardSend(revisionId).catch(() => {
-            new import_obsidian25.Notice("Havemind: could not discard this queued change.");
+            new import_obsidian24.Notice("Havemind: could not discard this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
@@ -27744,7 +27776,7 @@ var HavemindPlugin = class extends import_obsidian25.Plugin {
       this.connectionStatus = "offline";
       this.connectionError = "Havemind could not start syncing. Try reconnecting.";
       this.statusBar.setStatus(formatStatusBar({ status: "offline" }));
-      new import_obsidian25.Notice("Havemind: could not start syncing. Try reconnecting.");
+      new import_obsidian24.Notice("Havemind: could not start syncing. Try reconnecting.");
       this.views.refreshOnboarding();
     }
   }
@@ -27804,7 +27836,7 @@ var HavemindPlugin = class extends import_obsidian25.Plugin {
     const connection = this.connection;
     const state = this.syncState;
     if (connection?.revisionContent === void 0 || state === null) {
-      new import_obsidian25.Notice("Havemind: connect before restoring a revision.");
+      new import_obsidian24.Notice("Havemind: connect before restoring a revision.");
       return;
     }
     try {
@@ -27817,14 +27849,14 @@ var HavemindPlugin = class extends import_obsidian25.Plugin {
         revisionId
       );
       if (result.outcome === "unavailable") {
-        new import_obsidian25.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
+        new import_obsidian24.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
       } else if (result.outcome === "unchanged") {
-        new import_obsidian25.Notice(`Havemind: ${result.path} already has that text.`);
+        new import_obsidian24.Notice(`Havemind: ${result.path} already has that text.`);
       } else {
-        new import_obsidian25.Notice(`Havemind: restored ${result.path} to that version.`);
+        new import_obsidian24.Notice(`Havemind: restored ${result.path} to that version.`);
       }
     } catch (error51) {
-      new import_obsidian25.Notice(
+      new import_obsidian24.Notice(
         `Havemind: could not restore that version, ${errorMessage(error51)}`
       );
     }
@@ -27894,7 +27926,7 @@ var HavemindPlugin = class extends import_obsidian25.Plugin {
   async syncNow() {
     const connection = this.connection;
     if (connection === null) {
-      new import_obsidian25.Notice("Havemind: connect before syncing.");
+      new import_obsidian24.Notice("Havemind: connect before syncing.");
       return;
     }
     if (connection.syncNow !== void 0 && this.connectionStatus !== "reconnect-required") {
@@ -28062,11 +28094,11 @@ var HavemindPlugin = class extends import_obsidian25.Plugin {
       this.lastSyncedAt = void 0;
       this.connectionError = void 0;
       this.statusBar.setStatus(formatStatusBar({ status: "disconnected" }));
-      new import_obsidian25.Notice(
+      new import_obsidian24.Notice(
         "Havemind: connection reset. Paste a new invitation or pairing token to connect."
       );
     } catch (error51) {
-      new import_obsidian25.Notice(`Havemind: could not reset the connection, ${errorMessage(error51)}`);
+      new import_obsidian24.Notice(`Havemind: could not reset the connection, ${errorMessage(error51)}`);
     } finally {
       this.resetInFlight = false;
       this.views.refreshOnboarding();
