@@ -17,20 +17,23 @@ you own passes the changes around and remembers who wrote what.
 Built for people. If you also run Claude, MCP or another local agent in that
 vault, its edits land in the same history.
 
-**Version 1.8.2, desktop and mobile.** A two-week pilot on two devices lost no
+**Version 1.10.1, desktop and mobile.** AI agents join your vault with one click: background workers, in yellow, each with a task note. A two-week pilot on two devices lost no
 data, including through three real incidents.
 
 There is no end-to-end encryption. Your server stores the vault in plaintext,
 so whoever runs that machine can read it. Read the
 [security model](#security-model) before you connect a vault you care about.
 
-**Self-hosting your own instance?** See
-[docs/self-hosting.md](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md) for the full zero-to-working
-guide (Docker Compose + Tailscale, tailnet-only).
+**Self-hosting your own instance?** One command sets it up, see
+[docs/install.md](https://github.com/MikolajSapek/havemind/blob/main/docs/install.md); the manual guide is
+[docs/self-hosting.md](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md).
 
-**Connecting Claude or an AI agent?** See
-[docs/using-with-ai-agents.md](https://github.com/MikolajSapek/havemind/blob/main/docs/using-with-ai-agents.md) for the
-requirements and the steps.
+**New here?** The [tutorial](https://github.com/MikolajSapek/havemind/blob/main/docs/tutorial.md) goes from zero to a shared
+vault with five AI agents, step by step, with screenshots.
+
+**AI agents as members?** Background agents (inbox sorter, daily summary and
+more) join your vault in yellow, each with a task note: see
+[docs/agents.md](https://github.com/MikolajSapek/havemind/blob/main/docs/agents.md).
 
 ## Install
 
@@ -49,38 +52,31 @@ Two paths, depending on whether you are the one running the server.
 
 ### You are hosting
 
-1. **Install Tailscale** on the machine that will run the server, and log in.
-   Everyone who syncs joins the same tailnet; that is the whole access
-   boundary, and nothing is exposed to the public internet.
-2. **Configure and start the server.** From a checkout of this repository,
-   `cp deploy/.env.example deploy/.env` and set `HAVEMIND_API_BASE_URL` to the
-   HTTPS tailnet URL you will use in step 3; it is baked into the server's
-   discovery document, so it has to be right before the first start. Before
-   running Compose, complete the [server preparation](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md#server-preparation):
-   give uid 1000 ownership of the
-   data volume and backup directory. Then run
-   `docker compose -f deploy/compose.yaml up -d --build`. You need Docker
-   Engine with the Compose v2 plugin.
-3. **Put Tailscale in front of it** with `tailscale serve`, so the other
-   devices on your tailnet can reach it. Full commands are in the
-   [self-hosting guide](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md).
-4. **Create your account.** Run `setup` inside the container, once:
+1. **Set up Tailscale.** Make a free account, turn on MagicDNS and HTTPS
+   certificates in its admin console, and install the app on your laptop and
+   phone. Everyone who syncs joins the same tailnet; nothing is exposed to the
+   public internet.
+2. **Run one command** on the machine that will be the server (Linux:
+   Debian, Ubuntu or Raspberry Pi OS; or a Mac that stays awake):
 
    ```bash
-   docker compose -f deploy/compose.yaml exec havemind-server \
-     node apps/server/bin/havemind.js setup --owner "Your Name" --vault "My Vault"
+   curl -fsSL https://github.com/MikolajSapek/havemind/releases/latest/download/install.sh | bash
    ```
 
-   It prints a single-use pairing token (`hm_pt_...`).
-5. **Connect the plugin.** Open the Havemind pane in Obsidian, choose
-   **I'll run the server**, then **I've done this, connect**, and enter your
-   server's full address (`https://something.tailnet-name.ts.net`) together
-   with that pairing token. The Status tab says **In sync** when it is working.
-6. **Invite the other person.** People tab, then Invite someone. Send them the
+   It asks before installing Docker or Tailscale, starts the server inside
+   your tailnet, and ends with one line, `hm_pt_...@https://...`.
+3. **Connect the plugin.** Open the Havemind pane in Obsidian, choose
+   **I'll run the server**, then **I've done this, connect**, and paste that
+   line. The Status tab says **In sync** when it is working.
+4. **Invite the other person.** People tab, then Invite someone. Send them the
    invitation; it works once.
-7. **Approve their device.** They read a 6-digit code aloud to you, you type
+5. **Approve their device.** They read a 6-digit code aloud to you, you type
    it in. Three attempts. That handshake is what binds their identity, so do
    it by voice, never by message.
+
+Every step, with what you will see, is in [docs/install.md](https://github.com/MikolajSapek/havemind/blob/main/docs/install.md).
+To build and run the server by hand instead, see
+[docs/self-hosting.md](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md).
 
 The long version, including backups and multiple vaults, is in
 [docs/self-hosting.md](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md).
@@ -145,7 +141,12 @@ The long version, including backups and multiple vaults, is in
 </p>
 
 <p align="center">
+  <img src="docs/images/05-agents-status-framed.png" alt="The Status tab with AI agents: you in violet, five agents in yellow with pixel icons, around a green server" width="100%">
+</p>
+
+<p align="center">
   <img src="docs/images/04-mobile-framed.png" alt="The Havemind pane on an iPhone: the flower with a green core, and In sync" width="49%">
+  <img src="docs/images/11-mobile-activity.png" alt="Activity on an iPhone: Inbox sorter, an AI agent, filed a note a person had just written" width="49%">
 </p>
 
 ## What it will not do
@@ -181,6 +182,11 @@ quota, and sweeps orphaned blobs at startup. Non-root, read-only, capabilities
 dropped.
 
 ## Security model
+
+**AI agents** (optional) are the one exception to "nothing leaves your
+server": a running agent sends the notes people changed, and the vault's note
+paths, to the model provider the owner picked. With a local Ollama nothing
+leaves. See [docs/agents.md](https://github.com/MikolajSapek/havemind/blob/main/docs/agents.md).
 
 Security here rests on Tailscale, not on encryption inside the app. The server
 answers only on your private tailnet, never the public internet, and Tailscale
@@ -228,8 +234,10 @@ which is why this section exists.
 
 **If you are running it**
 
+- [Tutorial](https://github.com/MikolajSapek/havemind/blob/main/docs/tutorial.md), zero to a shared vault with AI agents
 - [Self-hosting guide](https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md), zero to working server
 - [Current limitations](https://github.com/MikolajSapek/havemind/blob/main/docs/pilot/known-limitations.md), the caveats that bite
+- [AI agents as members](https://github.com/MikolajSapek/havemind/blob/main/docs/agents.md), background agents with task notes
 - [Using it with AI agents](https://github.com/MikolajSapek/havemind/blob/main/docs/using-with-ai-agents.md)
 
 **If you are working on it**
