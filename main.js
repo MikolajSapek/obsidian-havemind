@@ -5,9 +5,9 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __export = (target, all) => {
+var __export = (target2, all) => {
   for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
+    __defProp(target2, name, { get: all[name], enumerable: true });
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => HavemindPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian23 = require("obsidian");
+var import_obsidian25 = require("obsidian");
 
 // src/runtime/is-record.ts
 function isRecord(value) {
@@ -1761,8 +1761,8 @@ function defineLazy(object2, key, getter) {
 function objectClone(obj) {
   return Object.create(Object.getPrototypeOf(obj), Object.getOwnPropertyDescriptors(obj));
 }
-function assignProp(target, prop, value) {
-  Object.defineProperty(target, prop, {
+function assignProp(target2, prop, value) {
+  Object.defineProperty(target2, prop, {
     value,
     writable: true,
     enumerable: true,
@@ -1945,35 +1945,35 @@ function normalizeParams(_params) {
   return params;
 }
 function createTransparentProxy(getter) {
-  let target;
+  let target2;
   return new Proxy({}, {
     get(_, prop, receiver) {
-      target ?? (target = getter());
-      return Reflect.get(target, prop, receiver);
+      target2 ?? (target2 = getter());
+      return Reflect.get(target2, prop, receiver);
     },
     set(_, prop, value, receiver) {
-      target ?? (target = getter());
-      return Reflect.set(target, prop, value, receiver);
+      target2 ?? (target2 = getter());
+      return Reflect.set(target2, prop, value, receiver);
     },
     has(_, prop) {
-      target ?? (target = getter());
-      return Reflect.has(target, prop);
+      target2 ?? (target2 = getter());
+      return Reflect.has(target2, prop);
     },
     deleteProperty(_, prop) {
-      target ?? (target = getter());
-      return Reflect.deleteProperty(target, prop);
+      target2 ?? (target2 = getter());
+      return Reflect.deleteProperty(target2, prop);
     },
     ownKeys(_) {
-      target ?? (target = getter());
-      return Reflect.ownKeys(target);
+      target2 ?? (target2 = getter());
+      return Reflect.ownKeys(target2);
     },
     getOwnPropertyDescriptor(_, prop) {
-      target ?? (target = getter());
-      return Reflect.getOwnPropertyDescriptor(target, prop);
+      target2 ?? (target2 = getter());
+      return Reflect.getOwnPropertyDescriptor(target2, prop);
     },
     defineProperty(_, prop, descriptor) {
-      target ?? (target = getter());
-      return Reflect.defineProperty(target, prop, descriptor);
+      target2 ?? (target2 = getter());
+      return Reflect.defineProperty(target2, prop, descriptor);
     }
   });
 }
@@ -12425,15 +12425,15 @@ function _stringFormat(Class2, format, fnOrRegex, _params = {}) {
 
 // ../../node_modules/zod/v4/core/to-json-schema.js
 function initializeContext(params) {
-  let target = params?.target ?? "draft-2020-12";
-  if (target === "draft-4")
-    target = "draft-04";
-  if (target === "draft-7")
-    target = "draft-07";
+  let target2 = params?.target ?? "draft-2020-12";
+  if (target2 === "draft-4")
+    target2 = "draft-04";
+  if (target2 === "draft-7")
+    target2 = "draft-07";
   return {
     processors: params.processors ?? {},
     metadataRegistry: params?.metadata ?? globalRegistry,
-    target,
+    target: target2,
     unrepresentable: params?.unrepresentable ?? "throw",
     override: params?.override ?? (() => {
     }),
@@ -12775,8 +12775,8 @@ var createToJSONSchemaMethod = (schema, processors = {}) => (params) => {
   return finalize(ctx, schema);
 };
 var createStandardJSONSchemaMethod = (schema, io, processors = {}) => (params) => {
-  const { libraryOptions, target } = params ?? {};
-  const ctx = initializeContext({ ...libraryOptions ?? {}, target, io, processors });
+  const { libraryOptions, target: target2 } = params ?? {};
+  const ctx = initializeContext({ ...libraryOptions ?? {}, target: target2, io, processors });
   process(schema, ctx);
   extractDefs(ctx, schema);
   return finalize(ctx, schema);
@@ -13835,8 +13835,8 @@ var ZodType = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
     catch(params) {
       return _catch2(this, params);
     },
-    pipe(target) {
-      return pipe(this, target);
+    pipe(target2) {
+      return pipe(this, target2);
     },
     readonly() {
       return readonly(this);
@@ -16122,7 +16122,7 @@ function createConfigApplyReloader(options) {
 
 // src/runtime/revision-history-store.ts
 var MAX_HISTORY_SEGMENTS = 64;
-var FORMAT = 1;
+var FORMAT = 2;
 var KEY_PREFIX = "revision-history";
 function createRevisionHistoryStore(openRecords, scope) {
   const metaKey = `${KEY_PREFIX}|${scope.vaultId}`;
@@ -16764,15 +16764,15 @@ function openClientStoreLazily(plugin, unavailableWarning) {
 }
 
 // src/runtime/adapters/scheduler-hooks.ts
-function createSchedulerHooks(plugin, target = window, visibility) {
+function createSchedulerHooks(plugin, target2 = window, visibility) {
   return {
     onFocus(run) {
-      target.addEventListener("focus", run);
-      return () => target.removeEventListener("focus", run);
+      target2.addEventListener("focus", run);
+      return () => target2.removeEventListener("focus", run);
     },
     onOnline(run) {
-      target.addEventListener("online", run);
-      return () => target.removeEventListener("online", run);
+      target2.addEventListener("online", run);
+      return () => target2.removeEventListener("online", run);
     },
     onVisible(run) {
       const source = visibility ?? (typeof document === "undefined" ? void 0 : document);
@@ -17360,7 +17360,7 @@ var RevisionHistory = class {
     await this.persist();
   }
   async pullAll() {
-    let target = null;
+    let target2 = null;
     do {
       const anchor = this.unconfirmed ? this.ordered[this.cursor - 1] : void 0;
       const page = await this.options.transport.pull(anchor === void 0 ? this.cursor : this.cursor - 1);
@@ -17373,14 +17373,14 @@ var RevisionHistory = class {
         this.unconfirmed = false;
       }
       this.epoch = epoch;
-      target ?? (target = page.cursor);
+      target2 ?? (target2 = page.cursor);
       for (const event of page.events) {
         if (event.serverSequence <= this.cursor) continue;
         if (event.serverSequence !== this.cursor + 1) throw new Error("Revision history has a gap.");
         this.append(event);
       }
-      if (page.events.length === 0 && this.cursor < target) throw new Error("Revision history is incomplete.");
-    } while (this.cursor < target);
+      if (page.events.length === 0 && this.cursor < target2) throw new Error("Revision history is incomplete.");
+    } while (this.cursor < target2);
   }
   append(event) {
     this.accepted.set(event.revision.revisionId, event);
@@ -17492,10 +17492,11 @@ function parseStoredHistory(value) {
 }
 function parseStoredEvent(raw) {
   if (!isRecord(raw) || !Number.isSafeInteger(raw.serverSequence) || !isRecord(raw.revision)) return null;
-  const { revisionId, fileId, contentHash, parentRevisionIds, authorMembershipId } = raw.revision;
+  const { revisionId, fileId, contentHash, parentRevisionIds, authorMembershipId, acceptedAt } = raw.revision;
   if (typeof revisionId !== "string" || typeof fileId !== "string" || typeof contentHash !== "string") return null;
   if (parentRevisionIds !== void 0 && !(Array.isArray(parentRevisionIds) && parentRevisionIds.every((id) => typeof id === "string"))) return null;
   if (authorMembershipId !== void 0 && typeof authorMembershipId !== "string") return null;
+  if (acceptedAt !== void 0 && typeof acceptedAt !== "string") return null;
   return {
     serverSequence: raw.serverSequence,
     revision: {
@@ -17503,7 +17504,8 @@ function parseStoredEvent(raw) {
       fileId,
       contentHash,
       ...parentRevisionIds === void 0 ? {} : { parentRevisionIds },
-      ...authorMembershipId === void 0 ? {} : { authorMembershipId }
+      ...authorMembershipId === void 0 ? {} : { authorMembershipId },
+      ...acceptedAt === void 0 ? {} : { acceptedAt }
     }
   };
 }
@@ -18000,8 +18002,8 @@ var VaultApplyAdapter = class {
     const lastWriterWins = resolvesLastWriterWins(decoded.path);
     if (decoded.operation === "delete") {
       if (this.files.fileIdAtPath(decoded.path) !== fileId) return "applied";
-      const target = classifyVaultPath(decoded.path);
-      const onDisk2 = lastWriterWins ? null : await this.read(target.eligible ? target.kind : "markdown", decoded.path);
+      const target2 = classifyVaultPath(decoded.path);
+      const onDisk2 = lastWriterWins ? null : await this.read(target2.eligible ? target2.kind : "markdown", decoded.path);
       if (onDisk2 !== null && await this.holdsLocalEdit(fileId, event, onDisk2)) {
         return this.writeConflict(event, decoded);
       }
@@ -18222,13 +18224,13 @@ var VaultApplyAdapter = class {
    */
   async writeConflict(event, decoded) {
     const existing = this.files.conflictArtifactPathFor(event.revision.revisionId);
-    const target = existing ?? await this.buildConflictPath(event, decoded);
+    const target2 = existing ?? await this.buildConflictPath(event, decoded);
     const content = incomingContent(decoded);
-    await (typeof content === "string" ? this.files.writeConflictArtifact(target, content) : this.files.writeBinaryConflictArtifact(target, content));
+    await (typeof content === "string" ? this.files.writeConflictArtifact(target2, content) : this.files.writeBinaryConflictArtifact(target2, content));
     if (existing === null) {
       await this.files.recordConflictArtifactPath(
         event.revision.revisionId,
-        target,
+        target2,
         event.revision.fileId
       );
       this.onConflictWritten?.();
@@ -22843,6 +22845,7 @@ function parsePullResponse(response) {
     const rawParents = raw.receipt.parentRevisionIds;
     const parentRevisionIds = Array.isArray(rawParents) && rawParents.every((parent) => typeof parent === "string") ? rawParents : void 0;
     const authorMembershipId = typeof raw.receipt.memberId === "string" ? raw.receipt.memberId : void 0;
+    const acceptedAt = typeof raw.receipt.serverTime === "string" ? raw.receipt.serverTime : void 0;
     return {
       serverSequence: raw.serverSequence,
       revision: {
@@ -22850,7 +22853,8 @@ function parsePullResponse(response) {
         fileId: raw.fileId,
         contentHash: raw.receipt.blobHash,
         ...parentRevisionIds === void 0 ? {} : { parentRevisionIds },
-        ...authorMembershipId === void 0 ? {} : { authorMembershipId }
+        ...authorMembershipId === void 0 ? {} : { authorMembershipId },
+        ...acceptedAt === void 0 ? {} : { acceptedAt }
       }
     };
   });
@@ -23365,6 +23369,7 @@ function buildSyncController(plugin, connection, wiring) {
     state,
     initializeProducer: (producer, vault2) => bootstrapIdentities({ history, state, producer, vault: vault2 }),
     lastAuthor: async (fileId) => newestAuthor(await history.heads(fileId)),
+    noteEvents: async (fileId) => [...(await history.graph(fileId)).values()],
     retryParked: (revisionId) => runner.retryParked(revisionId),
     // The Activity feed's Restore reads a revision's text from the history.
     revisionContent: async (revisionId) => {
@@ -23418,7 +23423,7 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
   const producerSync = createRemoteApplyProducerSync(() => producerRef.current);
   const fileApplyLock = new KeyedMutex();
   let producer = null;
-  const { controller, state, initializeProducer, conflictAncestor, revisionContent, lastAuthor, retryParked } = buildSyncController(
+  const { controller, state, initializeProducer, conflictAncestor, revisionContent, lastAuthor, noteEvents, retryParked } = buildSyncController(
     plugin,
     {
       apiBaseUrl: resolvers.apiBaseUrl,
@@ -23488,6 +23493,7 @@ async function startSyncLoop(plugin, connection, onStatus, extras = {}) {
     conflictAncestor,
     revisionContent,
     lastAuthor,
+    noteEvents,
     retryParked,
     readRoster: (selfMembershipId) => fetchVaultMembers({
       apiBaseUrl: connection.apiBaseUrl,
@@ -24208,6 +24214,317 @@ function browserClipboardCopyDeps() {
   };
 }
 
+// src/plugin/note-history.ts
+var import_obsidian8 = require("obsidian");
+
+// src/activity/activity.ts
+function actorLabel(actor) {
+  return actor.kind === "initial-import" ? "Initial import" : actor.displayName;
+}
+function buildActivityFeed(records) {
+  return records.map(
+    (record2) => ({
+      revisionId: record2.revisionId,
+      fileId: record2.fileId,
+      path: record2.path,
+      kind: record2.kind,
+      actorLabel: actorLabel(record2.actor),
+      actorId: record2.actor.kind === "author" ? record2.actor.actorId : null,
+      timestamp: record2.timestamp,
+      canRestore: record2.content !== null
+    })
+  ).sort((left, right) => {
+    if (left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+    return left.revisionId < right.revisionId ? 1 : -1;
+  });
+}
+
+// src/runtime/activity-render.ts
+function defaultFormatTimestamp2(timestamp) {
+  return new Date(timestamp).toISOString();
+}
+function buildActivityViewModel(records, options = {}) {
+  const format = options.formatTimestamp ?? defaultFormatTimestamp2;
+  const ordered = buildActivityFeed(records);
+  const visible = options.limit === void 0 ? ordered : ordered.slice(0, options.limit);
+  const rows = visible.map(
+    (entry) => ({
+      revisionId: entry.revisionId,
+      fileId: entry.fileId,
+      label: `${entry.kind} \xB7 ${entry.path} \xB7 ${entry.actorLabel}`,
+      headline: metaLine(entry),
+      pathLabel: entry.path,
+      timestamp: entry.timestamp,
+      timeLabel: format(entry.timestamp),
+      colorToken: entry.actorId === null ? INITIAL_IMPORT_COLOR_TOKEN : authorColorToken(entry.actorId),
+      canRestore: entry.canRestore,
+      title: noteTitle(entry.path),
+      meta: metaLine(entry),
+      kind: entry.kind
+    })
+  );
+  return { empty: rows.length === 0, rows };
+}
+var VERBS = {
+  edit: "edited",
+  create: "created it",
+  rename: "renamed it",
+  delete: "deleted it",
+  conflict: "kept both versions"
+};
+function metaLine(entry) {
+  if (entry.kind === "conflict") return "Both versions kept";
+  if (entry.actorId === null) return entry.actorLabel;
+  return `${entry.actorLabel} ${VERBS[entry.kind]}`;
+}
+function noteTitle(path) {
+  const name = path.split("/").pop() ?? path;
+  return name.endsWith(".md") ? name.slice(0, -3) : name;
+}
+var MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
+var twoDigits2 = (n) => n < 10 ? `0${n}` : String(n);
+function activityDayLabel(timestamp, now = Date.now()) {
+  const at = new Date(timestamp);
+  const today = new Date(now);
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(today) - startOfDay(at)) / 864e5);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return `${at.getDate()} ${MONTHS.slice(at.getMonth() * 3, at.getMonth() * 3 + 3)}`;
+}
+function clockLabel(timestamp) {
+  const at = new Date(timestamp);
+  return `${twoDigits2(at.getHours())}:${twoDigits2(at.getMinutes())}`;
+}
+
+// src/runtime/note-history.ts
+function buildNoteHistory(events, roster, now = Date.now()) {
+  const names = new Map(roster.map((member) => [member.membershipId, member.displayName]));
+  return events.filter((event) => event.serverSequence > 0).sort((a, b) => b.serverSequence - a.serverSequence).map(({ revision }) => {
+    const at = revision.acceptedAt === void 0 ? Number.NaN : Date.parse(revision.acceptedAt);
+    return {
+      revisionId: revision.revisionId,
+      author: names.get(revision.authorMembershipId ?? "") ?? "Unknown author",
+      when: Number.isFinite(at) ? `${activityDayLabel(at, now)} ${clockLabel(at)}` : "Time not recorded"
+    };
+  });
+}
+
+// src/ui/note-history-modal.ts
+var import_obsidian7 = require("obsidian");
+
+// src/ui/primitives.ts
+var import_obsidian6 = require("obsidian");
+function prefersReducedMotion() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+var DECORATIVE = { "aria-hidden": "true" };
+function formatActivityTime(timestamp) {
+  const date5 = new Date(timestamp);
+  return date5.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function renderViewTitle(content, text) {
+  const heading = content.createEl("h3", { text });
+  heading.addClass("havemind-view-title");
+  const icon = heading.createEl("span", { attr: DECORATIVE });
+  icon.addClass("havemind-title-icon");
+  (0, import_obsidian6.setIcon)(icon, "hexagon");
+}
+function labelledField(parent, id, label, tag, options = {}) {
+  parent.createEl("label", { text: label, attr: { for: id } });
+  const field = parent.createEl(tag, {
+    attr: { id },
+    ...options.type !== void 0 ? { type: options.type } : {},
+    ...options.placeholder !== void 0 ? { placeholder: options.placeholder } : {},
+    ...options.value !== void 0 ? { value: options.value } : {}
+  });
+  return field;
+}
+function renderFormStatus(parent) {
+  const status = parent.createDiv({ text: "" });
+  status.addClass("havemind-form-status");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  return status;
+}
+function renderAlarmBlock(content, variant) {
+  const block = content.createDiv();
+  block.addClass("havemind-alarm");
+  block.addClass(variant);
+  return block;
+}
+function safeRead(name, read, fallback) {
+  if (read === void 0) return fallback;
+  try {
+    return read();
+  } catch (error51) {
+    console.error(`Havemind: the "${name}" provider failed`, error51);
+    return fallback;
+  }
+}
+function renderSection(content, name, render) {
+  try {
+    render();
+  } catch (error51) {
+    console.error(`Havemind: the "${name}" panel section failed to render`, error51);
+    const fallback = content.createDiv({ text: "Section unavailable" });
+    fallback.addClass("havemind-section-error");
+  }
+}
+function armedButton(parent, label, confirmLabel, cls, onConfirm) {
+  let armed = false;
+  let executed = false;
+  const button = parent.createEl("button", { text: label });
+  button.addClass(cls);
+  button.onClickEvent(() => {
+    if (executed) return;
+    if (!armed) {
+      armed = true;
+      button.setText(confirmLabel);
+      button.addClass("havemind-conflict-action-armed");
+      return;
+    }
+    executed = true;
+    onConfirm();
+  });
+}
+
+// src/ui/note-history-modal.ts
+function renderNoteHistory(container, deps) {
+  container.addClass("havemind-history");
+  renderViewTitle(container, `History of ${deps.title}`);
+  if (deps.rows.length === 0) {
+    container.createDiv({ text: "No synced versions of this note yet." }).addClass("havemind-hint");
+    return;
+  }
+  container.createDiv({ text: "Times are when each version reached the server." }).addClass("havemind-hint");
+  const list = container.createDiv();
+  list.addClass("havemind-history-list");
+  const detail = container.createDiv();
+  detail.addClass("havemind-history-detail");
+  for (const row of deps.rows) {
+    const item = list.createEl("button", { text: `${row.author} \xB7 ${row.when}` });
+    item.addClass("havemind-history-row");
+    item.onClickEvent(() => {
+      void showVersion(detail, row.revisionId, deps);
+    });
+  }
+}
+async function showVersion(detail, revisionId, deps) {
+  detail.empty();
+  let version2;
+  let now;
+  try {
+    [version2, now] = await Promise.all([deps.loadVersion(revisionId), deps.currentText()]);
+  } catch {
+    detail.createDiv({ text: "Could not load this version. Check the connection and try again." }).addClass("havemind-hint");
+    return;
+  }
+  if (version2 === null) {
+    detail.createDiv({ text: "This version has no text to show: it is a deletion or an attachment." }).addClass("havemind-hint");
+    return;
+  }
+  const diff = computeLineDiff(now, version2.content);
+  if (diff === null) {
+    detail.createDiv({ text: "The difference is too large to show here." }).addClass("havemind-hint");
+  } else {
+    detail.createDiv({ text: "\u2212 now \xB7 + this version" }).addClass("havemind-conflict-legend");
+    const box = detail.createDiv();
+    box.addClass("havemind-conflict-diff");
+    for (const line of diff) {
+      const prefix = line.type === "added" ? "+ " : line.type === "removed" ? "- " : "  ";
+      const row = box.createDiv({ text: `${prefix}${line.text}` });
+      row.addClass("havemind-conflict-line");
+      row.addClass(`havemind-conflict-line-${line.type}`);
+    }
+  }
+  armedButton(
+    detail,
+    "Restore this version",
+    "Confirm restore",
+    "havemind-history-restore",
+    () => deps.onRestore(revisionId)
+  );
+}
+var NoteHistoryModal = class extends import_obsidian7.Modal {
+  constructor(app, deps) {
+    super(app);
+    __publicField(this, "deps", deps);
+  }
+  onOpen() {
+    renderNoteHistory(this.contentEl, {
+      ...this.deps,
+      onRestore: (revisionId) => {
+        this.deps.onRestore(revisionId);
+        this.close();
+      }
+    });
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+// src/plugin/note-history.ts
+function target(plugin, file2) {
+  if (file2 === null || file2 === void 0 || file2.extension !== "md") return null;
+  const connection = plugin.connection;
+  if (connection?.noteEvents === void 0 || connection.revisionContent === void 0) return null;
+  const fileId = plugin.syncState?.fileIdAtPath(file2.path) ?? null;
+  return fileId === null ? null : { note: file2, fileId };
+}
+function activeNote(plugin) {
+  const workspace = plugin.app.workspace;
+  return workspace.getActiveFile?.() ?? null;
+}
+async function open(plugin, note, fileId) {
+  const connection = plugin.connection;
+  if (connection?.noteEvents === void 0 || connection.revisionContent === void 0) return;
+  const loadVersion = connection.revisionContent;
+  let events;
+  try {
+    events = await connection.noteEvents(fileId);
+  } catch {
+    new import_obsidian8.Notice("Havemind: could not load this note's history. Check the connection and try again.");
+    return;
+  }
+  const vault = plugin.app;
+  new NoteHistoryModal(plugin.app, {
+    title: note.basename ?? note.path,
+    rows: buildNoteHistory(events, plugin.people.rosterMembers),
+    loadVersion,
+    currentText: () => vault.vault.read(note),
+    onRestore: (revisionId) => {
+      void plugin.handleRestore(revisionId);
+    }
+  }).open();
+}
+function registerNoteHistory(plugin) {
+  plugin.addCommand({
+    id: "note-history",
+    name: "Show history of this note",
+    checkCallback: (checking) => {
+      const found = target(plugin, activeNote(plugin));
+      if (found === null) return false;
+      if (!checking) void open(plugin, found.note, found.fileId);
+      return true;
+    }
+  });
+  const workspace = plugin.app.workspace;
+  const ref = workspace.on("file-menu", (menu, file2) => {
+    const found = target(plugin, file2);
+    if (found === null) return;
+    menu.addItem((item) => {
+      item.setTitle("Show history of this note").setIcon("history").onClick(() => {
+        void open(plugin, found.note, found.fileId);
+      });
+    });
+  });
+  if (ref !== void 0 && ref !== null) plugin.registerEvent(ref);
+}
+
 // src/plugin/commands.ts
 function registerCommands(plugin) {
   plugin.addCommand({
@@ -24258,13 +24575,14 @@ function registerCommands(plugin) {
       actions.resetConnection();
     }
   });
+  registerNoteHistory(plugin);
   plugin.addRibbonIcon("hexagon", "Open Havemind", () => {
     void plugin.openPane();
   });
 }
 
 // src/plugin/conflicts.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // src/runtime/conflict-cache.ts
 var CachedConflictList = class {
@@ -24350,85 +24668,7 @@ var RerunGuard = class {
 };
 
 // src/ui/conflict-modal.ts
-var import_obsidian7 = require("obsidian");
-
-// src/ui/primitives.ts
-var import_obsidian6 = require("obsidian");
-function prefersReducedMotion() {
-  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-var DECORATIVE = { "aria-hidden": "true" };
-function formatActivityTime(timestamp) {
-  const date5 = new Date(timestamp);
-  return date5.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-function renderViewTitle(content, text) {
-  const heading = content.createEl("h3", { text });
-  heading.addClass("havemind-view-title");
-  const icon = heading.createEl("span", { attr: DECORATIVE });
-  icon.addClass("havemind-title-icon");
-  (0, import_obsidian6.setIcon)(icon, "hexagon");
-}
-function labelledField(parent, id, label, tag, options = {}) {
-  parent.createEl("label", { text: label, attr: { for: id } });
-  const field = parent.createEl(tag, {
-    attr: { id },
-    ...options.type !== void 0 ? { type: options.type } : {},
-    ...options.placeholder !== void 0 ? { placeholder: options.placeholder } : {},
-    ...options.value !== void 0 ? { value: options.value } : {}
-  });
-  return field;
-}
-function renderFormStatus(parent) {
-  const status = parent.createDiv({ text: "" });
-  status.addClass("havemind-form-status");
-  status.setAttribute("role", "status");
-  status.setAttribute("aria-live", "polite");
-  return status;
-}
-function renderAlarmBlock(content, variant) {
-  const block = content.createDiv();
-  block.addClass("havemind-alarm");
-  block.addClass(variant);
-  return block;
-}
-function safeRead(name, read, fallback) {
-  if (read === void 0) return fallback;
-  try {
-    return read();
-  } catch (error51) {
-    console.error(`Havemind: the "${name}" provider failed`, error51);
-    return fallback;
-  }
-}
-function renderSection(content, name, render) {
-  try {
-    render();
-  } catch (error51) {
-    console.error(`Havemind: the "${name}" panel section failed to render`, error51);
-    const fallback = content.createDiv({ text: "Section unavailable" });
-    fallback.addClass("havemind-section-error");
-  }
-}
-function armedButton(parent, label, confirmLabel, cls, onConfirm) {
-  let armed = false;
-  let executed = false;
-  const button = parent.createEl("button", { text: label });
-  button.addClass(cls);
-  button.onClickEvent(() => {
-    if (executed) return;
-    if (!armed) {
-      armed = true;
-      button.setText(confirmLabel);
-      button.addClass("havemind-conflict-action-armed");
-      return;
-    }
-    executed = true;
-    onConfirm();
-  });
-}
-
-// src/ui/conflict-modal.ts
+var import_obsidian9 = require("obsidian");
 function buildConflictModalModel(copy, diff, options = {}) {
   return {
     title: copy.noteName ?? copy.copyName,
@@ -24499,7 +24739,7 @@ function renderConflictModalBody(container, model, actions) {
   keepBoth.addClass("mod-cta");
   keepBoth.onClickEvent(() => actions.onKeepBoth());
 }
-var ConflictResolveModal = class extends import_obsidian7.Modal {
+var ConflictResolveModal = class extends import_obsidian9.Modal {
   constructor(app, model, actions) {
     super(app);
     __publicField(this, "model");
@@ -24586,7 +24826,7 @@ var Conflicts = class {
     try {
       return await this.openConflictModalOnce(copyPath);
     } catch {
-      new import_obsidian8.Notice("Havemind: could not open this conflict. Try again.");
+      new import_obsidian10.Notice("Havemind: could not open this conflict. Try again.");
       this.plugin.views.refreshOnboarding();
       return null;
     }
@@ -24616,16 +24856,16 @@ var Conflicts = class {
       void resolver.resolve(copy, action).then(
         (outcome) => {
           if (outcome === "vanished") {
-            new import_obsidian8.Notice("This conflict was already auto-resolved.");
+            new import_obsidian10.Notice("This conflict was already auto-resolved.");
           }
           if (outcome === "target-missing") {
-            new import_obsidian8.Notice("The note was moved or deleted, so the conflict copy was kept.");
+            new import_obsidian10.Notice("The note was moved or deleted, so the conflict copy was kept.");
           }
           modal2.close();
           this.plugin.views.refreshOnboarding();
         },
         () => {
-          new import_obsidian8.Notice("Havemind: could not resolve this conflict. Try again.");
+          new import_obsidian10.Notice("Havemind: could not resolve this conflict. Try again.");
           this.plugin.views.refreshOnboarding();
         }
       );
@@ -24654,7 +24894,7 @@ var Conflicts = class {
     this.conflictSweepTimer = globalThis.setTimeout(() => {
       this.conflictSweepTimer = null;
       void this.runConflictSweep().catch(() => {
-        new import_obsidian8.Notice("Havemind: automatic conflict repair could not finish.");
+        new import_obsidian10.Notice("Havemind: automatic conflict repair could not finish.");
         this.plugin.views.refreshOnboarding();
       });
     }, CONFLICT_SWEEP_DEBOUNCE_MS);
@@ -24686,7 +24926,7 @@ var Conflicts = class {
       fileIdForCopy: (path) => state.fileIdForConflictCopy(path),
       ancestorFor: async (copyPath, fileId, targetPath) => await this.plugin.connection?.conflictAncestor?.(copyPath, fileId, targetPath) ?? null,
       notify: (message) => {
-        new import_obsidian8.Notice(`Havemind: ${message}`);
+        new import_obsidian10.Notice(`Havemind: ${message}`);
       }
     });
     this.plugin.views.refreshOnboarding();
@@ -24883,7 +25123,7 @@ var Invitations = class {
 };
 
 // src/plugin/people.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // src/runtime/roster.ts
 function upsertRosterMember(roster, member) {
@@ -24986,7 +25226,7 @@ var People = class {
       role: self.role,
       self: true
     }).catch(() => {
-      new import_obsidian9.Notice("Havemind: could not save this device in the member roster.");
+      new import_obsidian11.Notice("Havemind: could not save this device in the member roster.");
       this.plugin.views.refreshOnboarding();
     });
   }
@@ -25052,13 +25292,13 @@ var People = class {
     try {
       const waiting = await requestRejoinGrantForOwner(this.plugin, { membershipId });
       if (waiting === null) {
-        new import_obsidian9.Notice("Havemind: connect as the vault owner before rejoining a member.");
+        new import_obsidian11.Notice("Havemind: connect as the vault owner before rejoining a member.");
         return;
       }
       this.rejoinWaiting = /* @__PURE__ */ new Set([...this.rejoinWaiting, membershipId]);
       this.plugin.views.refreshOnboardingNow();
     } catch (error51) {
-      new import_obsidian9.Notice(`Havemind: could not request rejoin, ${errorMessage(error51)}`);
+      new import_obsidian11.Notice(`Havemind: could not request rejoin, ${errorMessage(error51)}`);
     }
   }
   /**
@@ -25078,7 +25318,7 @@ var People = class {
     try {
       const removed = await revokeMembershipForOwner(this.plugin, { membershipId });
       if (removed === null) {
-        new import_obsidian9.Notice(
+        new import_obsidian11.Notice(
           "Havemind: connect as the vault owner before removing a member."
         );
         return;
@@ -25087,16 +25327,16 @@ var People = class {
       this.rejoinWaiting = new Set(
         [...this.rejoinWaiting].filter((id) => id !== membershipId)
       );
-      new import_obsidian9.Notice(`Removed ${displayName} from the vault.`);
+      new import_obsidian11.Notice(`Removed ${displayName} from the vault.`);
       this.plugin.views.refreshOnboardingNow();
     } catch (error51) {
-      new import_obsidian9.Notice(`Havemind: could not remove member, ${errorMessage(error51)}`);
+      new import_obsidian11.Notice(`Havemind: could not remove member, ${errorMessage(error51)}`);
     }
   }
 };
 
 // src/plugin/rejoin.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 var InviteeRejoin = class {
   constructor(plugin) {
     __publicField(this, "plugin", plugin);
@@ -25183,7 +25423,7 @@ var InviteeRejoin = class {
     this.disarmRejoin();
     this.plugin.connectionError = "Rejoin failed, the server rejected the automatic rejoin. Reconnect manually to resume syncing.";
     this.plugin.statusBar.setStatus(formatStatusBar({ status: "reconnect-required" }));
-    new import_obsidian10.Notice(
+    new import_obsidian12.Notice(
       "Havemind: rejoin failed. Reconnect manually to resume syncing."
     );
     this.plugin.views.refreshOnboarding();
@@ -25211,7 +25451,7 @@ var InviteeRejoin = class {
 };
 
 // src/plugin/send-queue.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/runtime/send-queue-status.ts
 var DEFAULT_STALE_THRESHOLD_MS = 3e4;
@@ -25331,7 +25571,7 @@ var SendQueue = class {
       return;
     }
     if (fallback.kind === "discard-dead-letter") {
-      new import_obsidian11.Notice(fallback.notice);
+      new import_obsidian13.Notice(fallback.notice);
       await this.plugin.syncState?.discardQuarantined(revisionId);
     }
     this.plugin.views.refreshOnboarding();
@@ -25357,7 +25597,7 @@ var SendQueue = class {
   async retryFromDisk(revisionId, path, options) {
     const outcome = this.plugin.connection?.retryFailedCommit?.(path);
     const effect = planRetryFromDisk(outcome, path, options.discardOnRetrigger);
-    if (effect.notice !== null) new import_obsidian11.Notice(effect.notice);
+    if (effect.notice !== null) new import_obsidian13.Notice(effect.notice);
     if (effect.discard) await this.plugin.syncState?.discardQuarantined(revisionId);
     this.plugin.views.refreshOnboardingNow();
   }
@@ -25366,10 +25606,10 @@ var SendQueue = class {
     try {
       const done = await this.plugin.connection?.retryParked?.(revisionId) ?? false;
       if (!done) {
-        new import_obsidian11.Notice("Havemind: the note is open with unsaved changes, or you are not connected. Try again later.");
+        new import_obsidian13.Notice("Havemind: the note is open with unsaved changes, or you are not connected. Try again later.");
       }
     } catch (error51) {
-      new import_obsidian11.Notice(
+      new import_obsidian13.Notice(
         `Havemind: still cannot apply this change, ${errorMessage(error51)}`
       );
     }
@@ -25407,7 +25647,7 @@ var SendQueue = class {
     this.notifiedQuarantineIds = new Set(next);
     for (const item of fresh) {
       const label = item.path ?? item.fileId;
-      new import_obsidian11.Notice(
+      new import_obsidian13.Notice(
         `A change to ${label} could not be sent, see the Havemind panel.`
       );
     }
@@ -25415,7 +25655,7 @@ var SendQueue = class {
 };
 
 // src/plugin/status-bar.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 var HEXAGON = "M24 12L19 20.7H9L4 12L9 3.3H19Z";
 var SPLIT = "M20.3 5.7L24 12L19 20.7H9L7.7 18.3Z";
 var StatusBar = class {
@@ -25510,8 +25750,8 @@ var StatusBar = class {
 };
 
 // src/ui/confirm-modal.ts
-var import_obsidian13 = require("obsidian");
-var ConfirmModal = class extends import_obsidian13.Modal {
+var import_obsidian15 = require("obsidian");
+var ConfirmModal = class extends import_obsidian15.Modal {
   constructor(app, options) {
     super(app);
     __publicField(this, "options");
@@ -25538,89 +25778,7 @@ var ConfirmModal = class extends import_obsidian13.Modal {
 };
 
 // src/ui/onboarding-view.ts
-var import_obsidian21 = require("obsidian");
-
-// src/activity/activity.ts
-function actorLabel(actor) {
-  return actor.kind === "initial-import" ? "Initial import" : actor.displayName;
-}
-function buildActivityFeed(records) {
-  return records.map(
-    (record2) => ({
-      revisionId: record2.revisionId,
-      fileId: record2.fileId,
-      path: record2.path,
-      kind: record2.kind,
-      actorLabel: actorLabel(record2.actor),
-      actorId: record2.actor.kind === "author" ? record2.actor.actorId : null,
-      timestamp: record2.timestamp,
-      canRestore: record2.content !== null
-    })
-  ).sort((left, right) => {
-    if (left.timestamp !== right.timestamp) {
-      return right.timestamp - left.timestamp;
-    }
-    return left.revisionId < right.revisionId ? 1 : -1;
-  });
-}
-
-// src/runtime/activity-render.ts
-function defaultFormatTimestamp2(timestamp) {
-  return new Date(timestamp).toISOString();
-}
-function buildActivityViewModel(records, options = {}) {
-  const format = options.formatTimestamp ?? defaultFormatTimestamp2;
-  const ordered = buildActivityFeed(records);
-  const visible = options.limit === void 0 ? ordered : ordered.slice(0, options.limit);
-  const rows = visible.map(
-    (entry) => ({
-      revisionId: entry.revisionId,
-      fileId: entry.fileId,
-      label: `${entry.kind} \xB7 ${entry.path} \xB7 ${entry.actorLabel}`,
-      headline: metaLine(entry),
-      pathLabel: entry.path,
-      timestamp: entry.timestamp,
-      timeLabel: format(entry.timestamp),
-      colorToken: entry.actorId === null ? INITIAL_IMPORT_COLOR_TOKEN : authorColorToken(entry.actorId),
-      canRestore: entry.canRestore,
-      title: noteTitle(entry.path),
-      meta: metaLine(entry),
-      kind: entry.kind
-    })
-  );
-  return { empty: rows.length === 0, rows };
-}
-var VERBS = {
-  edit: "edited",
-  create: "created it",
-  rename: "renamed it",
-  delete: "deleted it",
-  conflict: "kept both versions"
-};
-function metaLine(entry) {
-  if (entry.kind === "conflict") return "Both versions kept";
-  if (entry.actorId === null) return entry.actorLabel;
-  return `${entry.actorLabel} ${VERBS[entry.kind]}`;
-}
-function noteTitle(path) {
-  const name = path.split("/").pop() ?? path;
-  return name.endsWith(".md") ? name.slice(0, -3) : name;
-}
-var MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
-var twoDigits2 = (n) => n < 10 ? `0${n}` : String(n);
-function activityDayLabel(timestamp, now = Date.now()) {
-  const at = new Date(timestamp);
-  const today = new Date(now);
-  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const days = Math.round((startOfDay(today) - startOfDay(at)) / 864e5);
-  if (days === 0) return "Today";
-  if (days === 1) return "Yesterday";
-  return `${at.getDate()} ${MONTHS.slice(at.getMonth() * 3, at.getMonth() * 3 + 3)}`;
-}
-function clockLabel(timestamp) {
-  const at = new Date(timestamp);
-  return `${twoDigits2(at.getHours())}:${twoDigits2(at.getMinutes())}`;
-}
+var import_obsidian23 = require("obsidian");
 
 // src/runtime/handshake.ts
 function groupCode(code) {
@@ -25740,7 +25898,7 @@ function buildPaneTabs(input) {
 }
 
 // src/ui/pane-tabs-section.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 var PANE_TABPANEL_ID = "havemind-tabpanel";
 function paneTabDomId(id) {
   return `havemind-tab-${id}`;
@@ -25801,7 +25959,7 @@ function renderPaneTabs(content, options) {
     const onMore = options.onMore;
     const more = row.createEl("button", { attr: { "aria-label": "More options" } });
     more.addClass("havemind-tabs-more");
-    (0, import_obsidian14.setIcon)(more, "more-horizontal");
+    (0, import_obsidian16.setIcon)(more, "more-horizontal");
     more.onClickEvent((event) => onMore(event));
   }
 }
@@ -26369,7 +26527,7 @@ function renderRejoinRoster(content, roster, actions) {
 }
 
 // src/ui/screens/invite-composer.ts
-var import_obsidian16 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 
 // src/ui/screens/invitation-envelope.ts
 var COPY_FAILED = "Could not copy automatically. Select and copy the invitation manually.";
@@ -26417,12 +26575,12 @@ function renderInvitationEnvelope(content, model, actions) {
 }
 
 // src/ui/screens/pending-approval-row.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 function renderPendingRow(content, entry, actions, codes = {}) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-pending-row");
   row.style.setProperty("color", "var(--text-accent)");
-  (0, import_obsidian15.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
+  (0, import_obsidian17.setIcon)(row.createEl("span", { attr: DECORATIVE }), "user-round-check");
   row.createEl("span", {
     text: ` ${entry.intendedMemberDisplayName ?? "Pending device"} \xB7 expires at ${clockLabel(Date.parse(entry.expiresAt))}`
   });
@@ -26537,7 +26695,7 @@ function renderNotice(content, notice, kind) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-success)");
-  (0, import_obsidian16.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
+  (0, import_obsidian18.setIcon)(row.createEl("span", { attr: DECORATIVE }), "check-circle");
   row.createEl("span", { text: ` ${notice}` });
 }
 
@@ -26554,12 +26712,12 @@ function renderPendingCards(body, actions) {
     const minutes = Math.max(1, Math.round(left / 6e4));
     card.createDiv({ text: `As ${entry.intendedRole ?? "editor"} \xB7 expires in ${minutes} min` }).addClass("havemind-pending-meta");
     if (actions.onOpenComposer !== void 0) {
-      const open = actions.onOpenComposer;
+      const open2 = actions.onOpenComposer;
       const enter = card.createEl("button", {
         text: name === void 0 ? "Enter the code" : `Enter ${name}\u2019s code`
       });
       enter.addClass("mod-cta");
-      enter.onClickEvent(() => open());
+      enter.onClickEvent(() => open2());
     }
   }
 }
@@ -26571,14 +26729,14 @@ function renderPeopleTab(body, composer, actions) {
     return;
   }
   if (actions.onOpenComposer !== void 0) {
-    const open = body.createEl("button", { text: "Invite someone" });
-    open.addClass("havemind-invite-cta");
-    open.onClickEvent(() => actions.onOpenComposer?.());
+    const open2 = body.createEl("button", { text: "Invite someone" });
+    open2.addClass("havemind-invite-cta");
+    open2.onClickEvent(() => actions.onOpenComposer?.());
   }
 }
 
 // src/ui/conflict-section.ts
-var import_obsidian17 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 function renderConflictSection(content, copies, actions) {
   if (copies.length === 0) return;
   const block = renderAlarmBlock(content, "havemind-alarm-conflict");
@@ -26586,7 +26744,7 @@ function renderConflictSection(content, copies, actions) {
   header.addClass("havemind-conflict-header");
   const icon = header.createEl("span", { attr: DECORATIVE });
   icon.addClass("havemind-conflict-icon");
-  (0, import_obsidian17.setIcon)(icon, "git-merge");
+  (0, import_obsidian19.setIcon)(icon, "git-merge");
   header.createEl("span", {
     text: copies.length === 1 ? " 1 conflict" : ` ${copies.length} conflicts`
   });
@@ -26673,7 +26831,7 @@ function renderSendQueue(content, source) {
 }
 
 // src/ui/screens/status-indicator.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian20 = require("obsidian");
 function renderStatusIndicator(content, panel, actions = {}, includeRecovery = true) {
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
@@ -26686,7 +26844,7 @@ function renderStatusIndicator(content, panel, actions = {}, includeRecovery = t
     if (panel.status === "offline") dot.addClass("havemind-status-dot-idle");
   } else {
     const icon = row.createEl("span", { attr: DECORATIVE });
-    (0, import_obsidian18.setIcon)(icon, panel.icon);
+    (0, import_obsidian20.setIcon)(icon, panel.icon);
   }
   row.createEl("span", { text: ` ${panel.label}` });
   const detail = content.createDiv();
@@ -26788,7 +26946,7 @@ function rosterMembers(options) {
     []
   );
 }
-function renderStatusHero(target, panel, options, now = Date.now()) {
+function renderStatusHero(target2, panel, options, now = Date.now()) {
   const members = rosterMembers(options);
   const conflicts = guarded(() => options.conflictsProvider?.() ?? [], []);
   const recentActorIds = guarded(
@@ -26816,7 +26974,7 @@ function renderStatusHero(target, panel, options, now = Date.now()) {
     waitingCount: guarded(() => options.sendQueueProvider?.()?.waitingCount ?? 0, 0),
     conflictCount: conflicts.length
   });
-  const hero = target.createDiv();
+  const hero = target2.createDiv();
   hero.addClass("havemind-hero");
   renderFlower(hero, model);
   hero.createDiv({ text: text.title }).addClass("havemind-hero-title");
@@ -26828,19 +26986,19 @@ function renderStatusHero(target, panel, options, now = Date.now()) {
 function buildTabScreens(context) {
   const { options } = context;
   return {
-    renderStatus: (target, panel) => {
-      renderStatusHero(target, panel, options);
+    renderStatus: (target2, panel) => {
+      renderStatusHero(target2, panel, options);
       if (context.helpOpen) {
-        renderGettingStarted(target, buildGettingStartedViewModel());
+        renderGettingStarted(target2, buildGettingStartedViewModel());
       }
     },
-    renderActivity: (target) => {
-      renderActivityRows(target, {
+    renderActivity: (target2) => {
+      renderActivityRows(target2, {
         feed: options.activityFeedProvider?.() ?? [],
         ...options.onRestore ? { onRestore: options.onRestore } : {}
       });
     },
-    renderPeople: (target, model) => renderPeopleTab(target, model, {
+    renderPeople: (target2, model) => renderPeopleTab(target2, model, {
       renderRoster: (rosterTarget) => {
         const roster = options.rejoinRosterProvider?.();
         if (roster === void 0) return;
@@ -26871,17 +27029,17 @@ function buildTabScreens(context) {
 }
 function buildBodyRenderers(options) {
   return {
-    renderIndicator: (target, panel) => renderStatusIndicator(target, panel, {
+    renderIndicator: (target2, panel) => renderStatusIndicator(target2, panel, {
       onRetry: options.onRetry,
       onReset: options.onReset
     }),
-    renderSendQueue: (target) => renderSendQueue(target, {
+    renderSendQueue: (target2) => renderSendQueue(target2, {
       recoveryRequired: options.recoveryRequiredProvider?.() ?? false,
       view: options.sendQueueProvider?.() ?? null,
       onRetry: options.onRetrySend,
       onDiscard: options.onDiscardSend
     }),
-    renderConflicts: (target) => renderConflicts(target, {
+    renderConflicts: (target2) => renderConflicts(target2, {
       copies: options.conflictsProvider?.() ?? [],
       onResolve: options.onResolveConflict
     })
@@ -26907,8 +27065,8 @@ function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
   };
   renderConnectedBody(content, panel, composer, state, {
     ...buildBodyRenderers(options),
-    renderEntryPath: (target) => renderEntryPath(
-      target,
+    renderEntryPath: (target2) => renderEntryPath(
+      target2,
       {
         entryChoice: context.entryChoice,
         draftToken: context.draft.token,
@@ -26928,12 +27086,12 @@ function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
     // a second call could answer differently, leaving the strip and the body
     // describing different states. An open composer selects People rather than
     // a tab of its own (round 2, Q3).
-    paneTabs: (open) => buildPaneTabs({
-      active: open ? "people" : context.activeTab,
+    paneTabs: (open2) => buildPaneTabs({
+      active: open2 ? "people" : context.activeTab,
       attentionCount: attentionCount(options)
     }),
-    renderTabBody: (target, tab, p, c) => renderTabBody(
-      target,
+    renderTabBody: (target2, tab, p, c) => renderTabBody(
+      target2,
       tab,
       p,
       c,
@@ -26991,13 +27149,13 @@ var RepaintScheduler = class {
 };
 
 // src/ui/screens/guest-invalid.ts
-var import_obsidian19 = require("obsidian");
+var import_obsidian21 = require("obsidian");
 function renderGuestInvalid(content, ownerName, actions) {
   const view = buildSpentInvitation(ownerName);
   const row = content.createDiv({ text: "" });
   row.addClass("havemind-status");
   row.style.setProperty("color", "var(--text-error)");
-  (0, import_obsidian19.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
+  (0, import_obsidian21.setIcon)(row.createEl("span", { attr: DECORATIVE }), "alert-triangle");
   row.createEl("span", { text: ` ${view.heading}` });
   content.createDiv({ text: view.explanation }).addClass("havemind-hint");
   actions.renderForm(content);
@@ -27023,7 +27181,7 @@ function readPaneState(options, entryChoice, draftToken) {
 }
 
 // src/ui/screens/header-menu.ts
-var import_obsidian20 = require("obsidian");
+var import_obsidian22 = require("obsidian");
 function buildHeaderMenuItems(panel, helpOpen, actions) {
   if (panel.showForm) return [];
   const items = [];
@@ -27049,7 +27207,7 @@ function fillPaneMenu(menu, items) {
   }
 }
 function showPaneMenu(event, items) {
-  const menu = new import_obsidian20.Menu();
+  const menu = new import_obsidian22.Menu();
   fillPaneMenu(menu, items);
   menu.showAtMouseEvent(event);
 }
@@ -27058,7 +27216,7 @@ function showPaneMenu(event, items) {
 var HAVEMIND_ONBOARDING_VIEW = "havemind-onboarding";
 
 // src/ui/onboarding-view.ts
-var HavemindOnboardingView = class extends import_obsidian21.ItemView {
+var HavemindOnboardingView = class extends import_obsidian23.ItemView {
   constructor(leaf, options = {}) {
     super(leaf);
     __publicField(this, "options");
@@ -27172,7 +27330,7 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
     );
     if (state.kind === "invalid") {
       renderGuestInvalid(content, this.options.guestWaitingProvider?.()?.ownerName, {
-        renderForm: (target) => renderConnectForm(target, this.draft, this.liveInputs, this.options.onConnect)
+        renderForm: (target2) => renderConnectForm(target2, this.draft, this.liveInputs, this.options.onConnect)
       });
       return;
     }
@@ -27203,8 +27361,8 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
           this.entryChoice = choice;
           this.render();
         },
-        setHelpOpen: (open) => {
-          this.helpOpen = open;
+        setHelpOpen: (open2) => {
+          this.helpOpen = open2;
         },
         setActiveTab: (id, viaKeyboard) => {
           this.activeTab = id;
@@ -27296,12 +27454,12 @@ function persistActivity(log, openRecords) {
 }
 
 // src/ui/setting-tab.ts
-var import_obsidian22 = require("obsidian");
+var import_obsidian24 = require("obsidian");
 function formatMemberCount(count) {
   if (count === 0) return "No members recorded yet";
   return count === 1 ? "1 member" : `${count} members`;
 }
-var HavemindSettingTab = class extends import_obsidian22.PluginSettingTab {
+var HavemindSettingTab = class extends import_obsidian24.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     /**
@@ -27316,12 +27474,12 @@ var HavemindSettingTab = class extends import_obsidian22.PluginSettingTab {
     this.containerEl.empty();
     const plugin = this.havemind;
     const info = plugin.settingsInfo();
-    new import_obsidian22.Setting(this.containerEl).setName("Havemind").setHeading();
-    new import_obsidian22.Setting(this.containerEl).setName("Server").setDesc(info.server);
-    new import_obsidian22.Setting(this.containerEl).setName("Connection").setDesc(info.status);
-    new import_obsidian22.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
-    new import_obsidian22.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
-    new import_obsidian22.Setting(this.containerEl).setName("Actions").setHeading();
+    new import_obsidian24.Setting(this.containerEl).setName("Havemind").setHeading();
+    new import_obsidian24.Setting(this.containerEl).setName("Server").setDesc(info.server);
+    new import_obsidian24.Setting(this.containerEl).setName("Connection").setDesc(info.status);
+    new import_obsidian24.Setting(this.containerEl).setName("Last sync").setDesc(info.lastSync);
+    new import_obsidian24.Setting(this.containerEl).setName("Vault members").setDesc(info.members);
+    new import_obsidian24.Setting(this.containerEl).setName("Actions").setHeading();
     this.renderActions(plugin, info);
     const refresh = this.containerEl.createEl("button", { text: "Refresh" });
     refresh.onClickEvent(() => this.display());
@@ -27333,18 +27491,18 @@ var HavemindSettingTab = class extends import_obsidian22.PluginSettingTab {
    */
   renderActions(plugin, info) {
     const actions = plugin.connectionActions();
-    new import_obsidian22.Setting(this.containerEl).setName("Havemind panel").setDesc(
+    new import_obsidian24.Setting(this.containerEl).setName("Havemind panel").setDesc(
       "Connect a device, invite a peer, resolve conflicts and inspect the send queue."
     ).addButton(
       (button) => button.setButtonText("Open Havemind panel").setCta().onClick(() => plugin.revealPanel())
     );
-    new import_obsidian22.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
+    new import_obsidian24.Setting(this.containerEl).setName("Sync now").setDesc("Force a fresh sync cycle instead of waiting for the next poll.").addButton(
       (button) => button.setButtonText("Sync now").setDisabled(!info.connected).onClick(() => actions.syncNow())
     );
-    new import_obsidian22.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
+    new import_obsidian24.Setting(this.containerEl).setName("Disconnect").setDesc("Stop syncing. Notes on disk are left exactly as they are.").addButton(
       (button) => button.setButtonText("Disconnect").setDisabled(!info.connected).onClick(() => actions.disconnect())
     );
-    new import_obsidian22.Setting(this.containerEl).setName("Reset connection").setDesc(
+    new import_obsidian24.Setting(this.containerEl).setName("Reset connection").setDesc(
       "Clear the stored pairing so this device can be paired again. No note is touched."
     ).addButton(
       (button) => button.setButtonText("Reset connection").onClick(() => actions.resetConnection())
@@ -27382,7 +27540,7 @@ var PluginViewRegistry = class {
 };
 
 // src/main.ts
-var HavemindPlugin = class extends import_obsidian23.Plugin {
+var HavemindPlugin = class extends import_obsidian25.Plugin {
   constructor() {
     super(...arguments);
     __publicField(this, "connection", null);
@@ -27462,7 +27620,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
         // A phone joins vaults, it does not run them: hosting needs Docker, a
         // terminal and a machine that stays awake. The entry chooser drops the
         // host branch there rather than walking the user to a dead end.
-        canHost: !import_obsidian23.Platform.isMobileApp,
+        canHost: !import_obsidian25.Platform.isMobileApp,
         // The activity feed is a tab of this pane (plans/007 Stage 0): the log
         // snapshot mapped through the roster, so each row shows the author's
         // display name and colour.
@@ -27491,13 +27649,13 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
         recoveryRequiredProvider: () => this.syncState?.isRecoveryRequired() ?? false,
         onRetrySend: (revisionId) => {
           void this.sendQueue.retrySend(revisionId).catch(() => {
-            new import_obsidian23.Notice("Havemind: could not retry this queued change.");
+            new import_obsidian25.Notice("Havemind: could not retry this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
         onDiscardSend: (revisionId) => {
           void this.sendQueue.discardSend(revisionId).catch(() => {
-            new import_obsidian23.Notice("Havemind: could not discard this queued change.");
+            new import_obsidian25.Notice("Havemind: could not discard this queued change.");
             this.views.refreshOnboardingNow();
           });
         },
@@ -27586,7 +27744,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
       this.connectionStatus = "offline";
       this.connectionError = "Havemind could not start syncing. Try reconnecting.";
       this.statusBar.setStatus(formatStatusBar({ status: "offline" }));
-      new import_obsidian23.Notice("Havemind: could not start syncing. Try reconnecting.");
+      new import_obsidian25.Notice("Havemind: could not start syncing. Try reconnecting.");
       this.views.refreshOnboarding();
     }
   }
@@ -27646,7 +27804,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
     const connection = this.connection;
     const state = this.syncState;
     if (connection?.revisionContent === void 0 || state === null) {
-      new import_obsidian23.Notice("Havemind: connect before restoring a revision.");
+      new import_obsidian25.Notice("Havemind: connect before restoring a revision.");
       return;
     }
     try {
@@ -27659,14 +27817,14 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
         revisionId
       );
       if (result.outcome === "unavailable") {
-        new import_obsidian23.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
+        new import_obsidian25.Notice("Havemind: that version cannot be restored (a deletion or an attachment).");
       } else if (result.outcome === "unchanged") {
-        new import_obsidian23.Notice(`Havemind: ${result.path} already has that text.`);
+        new import_obsidian25.Notice(`Havemind: ${result.path} already has that text.`);
       } else {
-        new import_obsidian23.Notice(`Havemind: restored ${result.path} to that version.`);
+        new import_obsidian25.Notice(`Havemind: restored ${result.path} to that version.`);
       }
     } catch (error51) {
-      new import_obsidian23.Notice(
+      new import_obsidian25.Notice(
         `Havemind: could not restore that version, ${errorMessage(error51)}`
       );
     }
@@ -27736,7 +27894,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
   async syncNow() {
     const connection = this.connection;
     if (connection === null) {
-      new import_obsidian23.Notice("Havemind: connect before syncing.");
+      new import_obsidian25.Notice("Havemind: connect before syncing.");
       return;
     }
     if (connection.syncNow !== void 0 && this.connectionStatus !== "reconnect-required") {
@@ -27904,11 +28062,11 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
       this.lastSyncedAt = void 0;
       this.connectionError = void 0;
       this.statusBar.setStatus(formatStatusBar({ status: "disconnected" }));
-      new import_obsidian23.Notice(
+      new import_obsidian25.Notice(
         "Havemind: connection reset. Paste a new invitation or pairing token to connect."
       );
     } catch (error51) {
-      new import_obsidian23.Notice(`Havemind: could not reset the connection, ${errorMessage(error51)}`);
+      new import_obsidian25.Notice(`Havemind: could not reset the connection, ${errorMessage(error51)}`);
     } finally {
       this.resetInFlight = false;
       this.views.refreshOnboarding();
