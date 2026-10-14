@@ -26302,7 +26302,7 @@ function renderConnectForm(content, draft, live, onConnect) {
     "input",
     {
       type: "text",
-      placeholder: "https://your-server.your-tailnet.ts.net",
+      placeholder: "https://\u2026 (only if your line has no @)",
       value: draft.server
     }
   );
