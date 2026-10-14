@@ -24440,6 +24440,8 @@ function renderNoteHistory(container, deps) {
   list.addClass("havemind-history-list");
   const detail = container.createDiv();
   detail.addClass("havemind-history-detail");
+  detail.createDiv({ text: "Pick a version to see how it differs from the note now." }).addClass("havemind-hint");
+  let latest = 0;
   const items = [];
   for (const row of deps.rows) {
     const item = list.createEl("button", { text: `${row.author} \xB7 ${row.when}` });
@@ -24448,21 +24450,26 @@ function renderNoteHistory(container, deps) {
     item.onClickEvent(() => {
       for (const other of items) other.removeClass("is-active");
       item.addClass("is-active");
-      void showVersion(detail, row.revisionId, deps);
+      latest += 1;
+      const pick2 = latest;
+      void showVersion(detail, row.revisionId, deps, () => pick2 === latest);
     });
   }
 }
-async function showVersion(detail, revisionId, deps) {
-  detail.empty();
+async function showVersion(detail, revisionId, deps, stillWanted) {
   let version2;
   let now;
   try {
     [version2, now] = await Promise.all([deps.loadVersion(revisionId), deps.currentText()]);
   } catch (error51) {
+    if (!stillWanted()) return;
+    detail.empty();
     console.warn("Havemind: could not load a version for the note history", error51);
     detail.createDiv({ text: "Could not load this version. Check the connection and try again." }).addClass("havemind-hint");
     return;
   }
+  if (!stillWanted()) return;
+  detail.empty();
   if (version2 === null) {
     detail.createDiv({ text: "This version has no text to show: it is a deletion or an attachment." }).addClass("havemind-hint");
     return;
