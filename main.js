@@ -26293,17 +26293,28 @@ function renderConnectForm(content, draft, live, onConnect) {
     "textarea",
     { placeholder: "v1.\u2026 or hm_pt_\u2026@https://\u2026", value: draft.token }
   );
+  const serverField = content.createDiv();
+  serverField.addClass("havemind-connect-server-field");
   const serverInput = labelledField(
-    content,
+    serverField,
     "havemind-connect-server",
     "Server URL",
     "input",
     {
       type: "text",
-      placeholder: "Leave empty for the installer line",
+      placeholder: "https://your-server.your-tailnet.ts.net",
       value: draft.server
     }
   );
+  const needsServer = (text) => {
+    const value = text.trim();
+    return value.startsWith("hm_pt_") && !value.includes("@");
+  };
+  const showServer = () => {
+    serverField.toggleClass("havemind-is-hidden", !needsServer(tokenInput.value) && draft.server.trim() === "");
+  };
+  tokenInput.addEventListener("input", showServer);
+  showServer();
   live.token = tokenInput;
   live.server = serverInput;
   const status = renderFormStatus(content);
@@ -27080,18 +27091,17 @@ function renderInvitationEnvelope(content, model, actions) {
   if (model.agentJoinCommand !== void 0) {
     content.createEl("code", { text: model.agentJoinCommand, cls: "havemind-host-command" });
   }
-  const code = content.createEl("code", { text: envelope });
-  code.addClass("havemind-invite-envelope");
-  const fallback = content.createEl("textarea", {
-    value: envelope,
-    cls: "havemind-invite-copy-fallback",
+  const box = content.createEl("textarea", {
+    cls: "havemind-invite-envelope",
     attr: {
       id: "havemind-invite-envelope-text",
       readonly: "true",
+      rows: "6",
       "aria-label": "Invitation to copy"
     }
   });
-  fallback.setAttribute("readonly", "true");
+  box.value = envelope;
+  box.setAttribute("readonly", "true");
   const copyStatus = content.createDiv({ text: "" });
   copyStatus.addClass("havemind-form-status");
   const copy = content.createEl("button", { text: "Copy" });
