@@ -24174,15 +24174,18 @@ function registerCommands(plugin) {
   plugin.addCommand({
     id: "open-activity",
     name: "Open activity",
-    callback: () => plugin.openPane()
+    callback: () => plugin.openPane("activity")
   });
   plugin.addCommand({
     id: "connect",
     name: "Connect to Havemind",
-    callback: () => {
+    // Connected, this would only swap the live pane for the connect form.
+    checkCallback: (checking) => {
+      if (checking) return !plugin.connectionActions().connected();
       plugin.invitations.connectionActive = false;
       plugin.views.refreshOnboardingNow();
-      return plugin.openPane();
+      void plugin.openPane();
+      return true;
     }
   });
   plugin.addCommand({
@@ -26105,7 +26108,7 @@ function buildGettingStartedViewModel() {
       },
       {
         number: 3,
-        text: "Paste the Server URL and pairing token below, then select Connect."
+        text: "Paste the Server URL and pairing token into Havemind's connect screen, then select Connect."
       },
       {
         number: 4,
@@ -26671,7 +26674,7 @@ function renderStatusIndicator(content, panel, actions = {}, includeRecovery = t
   if (includeRecovery) renderRecoveryActions(content, panel, actions);
 }
 function renderRecoveryActions(content, panel, actions) {
-  if (actions.onRetry !== void 0 && (panel.status === "offline" || panel.status === "reconnect-required")) {
+  if (actions.onRetry !== void 0 && (panel.status === "offline" || panel.status === "retrying" || panel.status === "reconnect-required")) {
     const retry = content.createEl("button", { text: "Retry now" });
     retry.addClass("mod-cta");
     retry.addClass("havemind-retry");
@@ -27092,6 +27095,11 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
       }
     });
   }
+  /** Opens the pane on a given tab, for a command that names one. */
+  showTab(id) {
+    this.activeTab = id;
+    this.render();
+  }
   onClose() {
     this.repaints.stop();
     this.options.onClosed?.();
@@ -27100,10 +27108,8 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
    * Repaints at once, for a change the user just caused by tapping something.
    *
    * A tap has to answer immediately: coalescing is for events arriving FROM the
-   * server, where nobody is waiting on a specific frame.
-   */
-  /**
-   * Re-renders from the current panel state, called on every status change.
+   * server, where nobody is waiting on a specific frame. `refresh()` below
+   * re-renders from the current panel state, on every status change.
    *
    * COALESCED, and that is the point. 36 call sites reach this, and every
    * repaint reads the conflict provider, which scans the whole vault. On a
@@ -27860,7 +27866,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
    * an existing leaf, so asking twice focuses the pane rather than opening a
    * second copy of it.
    */
-  async openPane() {
+  async openPane(tab) {
     const existingLeaf = this.app.workspace.getLeavesOfType(HAVEMIND_ONBOARDING_VIEW)[0];
     const leaf = existingLeaf ?? this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
@@ -27868,5 +27874,6 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
       await leaf.setViewState({ active: true, type: HAVEMIND_ONBOARDING_VIEW });
     }
     await this.app.workspace.revealLeaf(leaf);
+    if (tab !== void 0 && leaf.view instanceof HavemindOnboardingView) leaf.view.showTab(tab);
   }
 };
