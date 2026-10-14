@@ -18818,6 +18818,26 @@ function classifyConnectInput(text) {
   if (trimmed.startsWith(ENVELOPE_PREFIX2)) return "envelope";
   return "unknown";
 }
+function originOf(value) {
+  try {
+    return new URL(value.trim()).origin;
+  } catch {
+    return null;
+  }
+}
+function resolvePairingCode(input, serverField) {
+  const trimmed = input.trim();
+  const at = trimmed.indexOf("@");
+  if (at === -1) return { pairingToken: trimmed, serverUrl: serverField.trim() };
+  const pairingToken = trimmed.slice(0, at);
+  const embedded = trimmed.slice(at + 1);
+  const embeddedOrigin = originOf(embedded) ?? embedded;
+  const field = serverField.trim();
+  if (field.length > 0 && originOf(field) !== embeddedOrigin) {
+    throw new Error(`the code is for ${embeddedOrigin}, but the Server URL field says ${field}. Clear the field or use the matching code.`);
+  }
+  return { pairingToken, serverUrl: embeddedOrigin };
+}
 var OwnerPairError = class extends Error {
   constructor() {
     super(...arguments);
@@ -23551,7 +23571,8 @@ async function connectFromInput(plugin, input, serverUrl, options) {
   const kind = classifyConnectInput(input);
   try {
     if (kind === "pairing") {
-      return await connectAsOwner(plugin, input.trim(), serverUrl, options);
+      const code = resolvePairingCode(input, serverUrl);
+      return await connectAsOwner(plugin, code.pairingToken, code.serverUrl, options);
     }
     if (kind === "envelope") {
       return await connectAsInvitee(plugin, input.trim(), options);
@@ -25875,7 +25896,7 @@ function renderConnectForm(content, draft, live, onConnect) {
     "havemind-connect-token",
     "Invitation or owner pairing token",
     "textarea",
-    { placeholder: "v1.\u2026 or hm_pt_\u2026", value: draft.token }
+    { placeholder: "v1.\u2026 or hm_pt_\u2026@https://\u2026", value: draft.token }
   );
   const serverInput = labelledField(
     content,
@@ -25884,7 +25905,7 @@ function renderConnectForm(content, draft, live, onConnect) {
     "input",
     {
       type: "text",
-      placeholder: "https://your-server.example",
+      placeholder: "https://your-server.example (not needed for hm_pt_\u2026@ codes)",
       value: draft.server
     }
   );
@@ -26077,19 +26098,19 @@ function buildEntryChooser(options = {}) {
     footnote: "Not sure? If a friend sent you a long block of text, it's the first one."
   };
 }
-var SELF_HOSTING_GUIDE_URL = "https://github.com/MikolajSapek/havemind/blob/main/docs/self-hosting.md";
+var SELF_HOSTING_GUIDE_URL = "https://github.com/MikolajSapek/havemind/blob/main/docs/install.md";
+var INSTALL_COMMAND = "curl -fsSL https://github.com/MikolajSapek/havemind/releases/latest/download/install.sh | bash";
 function buildHostView() {
   return {
     heading: "Run the server",
-    subheading: "On a machine that stays awake and is on your private network.",
+    subheading: "On a Linux machine or a Mac that stays awake.",
     steps: [
-      { text: "Install Docker and Tailscale on that machine." },
-      { text: "Sign both machines into the same tailnet." },
-      { text: "Run the stack:", command: "docker compose up -d" },
-      { text: "Copy its Tailscale address, that's your server URL." },
-      { text: "Connect below, then invite the others." }
+      { text: "Install Tailscale on this device and your phone, same account." },
+      { text: "On the server machine, run:", command: INSTALL_COMMAND },
+      { text: "It ends with one line. Connect below and paste it." },
+      { text: "Then invite the others." }
     ],
-    guideLabel: "Full self-hosting guide",
+    guideLabel: "Step-by-step install guide",
     guideUrl: SELF_HOSTING_GUIDE_URL,
     primaryAction: "I've done this, connect"
   };
