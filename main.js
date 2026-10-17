@@ -15839,6 +15839,17 @@ function editorTexts(workspace, path) {
 }
 
 // src/runtime/conflict-resolution.ts
+var DELETED_MARKER = "Deleted on another device.";
+var DELETED_MARKER_RE = /^Deleted on another device\.\n\nBy [^\n]+, \d{4}-\d{2}-\d{2} \d{4}\.\s*$/;
+function deletedMarkerBody(author, stamp) {
+  return `${DELETED_MARKER}
+
+By ${author}, ${stamp}.
+`;
+}
+function isDeletedMarker(text) {
+  return DELETED_MARKER_RE.test(text);
+}
 var UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 var LEGACY_UUID_RE = new RegExp(`^${UUID}-${UUID}$`);
 var NEW_SUFFIX_RE = / \(conflict (.+) (\d{4}-\d{2}-\d{2} \d{4})\)$/;
@@ -15992,6 +16003,11 @@ async function resolveOnce(port, copy, action) {
       if (!await port.exists(copy.copyPath)) return "vanished";
       const content = await port.readText(copy.copyPath);
       if (content === null) return "vanished";
+      if (isDeletedMarker(content) && copy.targetPath !== null) {
+        if (await port.exists(copy.targetPath)) await port.trashFile(copy.targetPath);
+        await port.deleteFile(copy.copyPath);
+        return "resolved";
+      }
       if (copy.targetPath === null || !await port.exists(copy.targetPath)) {
         return "target-missing";
       }
@@ -16045,6 +16061,11 @@ function createObsidianConflictPort(vault, workspace) {
       const file2 = vault.getAbstractFileByPath(path);
       if (file2 === null) return;
       await vault.delete(file2);
+    },
+    trashFile: async (path) => {
+      const file2 = vault.getAbstractFileByPath(path);
+      if (file2 === null) return;
+      await vault.trash(file2, false);
     }
   };
 }
@@ -16832,7 +16853,8 @@ async function listSyncableConfigPaths(adapter, root = CONFIG_DIR) {
     let listing;
     try {
       listing = await adapter.list(dir);
-    } catch {
+    } catch (error51) {
+      if (dir === root && await adapter.exists?.(root).catch(() => true) !== false) throw error51;
       continue;
     }
     for (const file2 of listing.files) {
@@ -16929,6 +16951,335 @@ function mergeConfigContent(path, localText, remoteText) {
   );
   return `${JSON.stringify({ ...localVolatile, ...remoteSemantic }, null, JSON_INDENT)}
 `;
+}
+
+// src/obsidian/vault-adapter.ts
+var MAX_BINARY_FILE_BYTES = 25 * 1024 * 1024;
+var LocalVaultError = class extends Error {
+  constructor(code, message) {
+    super(message);
+    __publicField(this, "code", code);
+    __publicField(this, "name", "LocalVaultError");
+  }
+};
+var RACY_STAT_MS = 2e3;
+function normalizeWirePath(path) {
+  return path.replace(/\\/gu, "/").normalize("NFC");
+}
+function classifyVaultPath(path) {
+  const canonicalPath = normalizeWirePath(path);
+  const kind = syncContentKind(canonicalPath);
+  if (kind === null) {
+    return { eligible: false };
+  }
+  return {
+    canonicalPath,
+    collisionKey: canonicalPath.toLowerCase(),
+    eligible: true,
+    kind
+  };
+}
+var VaultChangeObserver = class {
+  constructor(options) {
+    __publicField(this, "options");
+    __publicField(this, "tail", Promise.resolve());
+    this.options = options;
+  }
+  async observeCreate(path) {
+    return this.enqueue(() => this.handleCreate(path));
+  }
+  /**
+   * `force` commits the file even when its content matches the mapping: a
+   * Retry of a send whose queued copy is gone must send it again, and the
+   * mapping hash already advanced when the lost revision was committed.
+   */
+  async observeModify(path, options = {}) {
+    return this.enqueue(() => this.handleModify(path, options.force === true));
+  }
+  async observeRename(previousPath, nextPath) {
+    return this.enqueue(() => this.handleRename(previousPath, nextPath));
+  }
+  async observeDelete(path) {
+    return this.enqueue(() => this.handleDelete(path));
+  }
+  /**
+   * Handles a folder-level rename (Obsidian or another plugin moving a whole
+   * folder). Defence-in-depth: it does NOT assume Obsidian emits a per-child
+   * TFile rename for every note. It enumerates the mappings under the folder's
+   * OLD path prefix and routes each through the existing per-file rename
+   * machinery so heads/base state stay consistent. If a per-child event ALSO
+   * fires later, that child is already at its new path and dedupes to a no-op
+   * (see `handleRename`), so no child is double-processed. Returns the genuine
+   * per-child operations (empty when nothing was under the folder).
+   */
+  async observeFolderRename(previousFolderPath, nextFolderPath) {
+    return this.enqueue(
+      () => this.handleFolderRename(previousFolderPath, nextFolderPath)
+    );
+  }
+  /**
+   * Handles a folder-level delete by enumerating the mappings under the deleted
+   * folder's prefix and routing each through the existing per-file delete path
+   * (tombstoning each note). Idempotent with any per-child TFile delete events.
+   */
+  async observeFolderDelete(folderPath) {
+    return this.enqueue(() => this.handleFolderDelete(folderPath));
+  }
+  enqueue(task) {
+    const run = this.tail.then(task, task);
+    this.tail = run.then(noop, noop);
+    return run;
+  }
+  async handleCreate(path) {
+    const classified = classifyVaultPath(path);
+    if (!classified.eligible) return null;
+    const existing = await this.findMapping(classified.collisionKey);
+    if (existing !== void 0) {
+      return this.commitModify(path, classified, existing);
+    }
+    return this.commitCreate(path, classified);
+  }
+  /**
+   * Resolves the on-disk path to read from, canonical-first (FINDING 3). The
+   * canonical (forward-slash, NFC) form matches Obsidian's own path index, so it
+   * is tried first; the caller's original path is a belt-and-braces fallback for
+   * an exotic filesystem where only the raw form resolves. Returns `null` when
+   * NEITHER variant exists on disk, a genuine miss. Reading via the original
+   * (possibly backslash) path alone would miss on real Obsidian and either drop a
+   * live edit or read '' and push a phantom empty file over the peer's copy.
+   */
+  async resolveReadPath(canonicalPath, originalPath) {
+    if (await this.options.vault.exists(canonicalPath)) return canonicalPath;
+    if (originalPath !== canonicalPath && await this.options.vault.exists(originalPath)) {
+      return originalPath;
+    }
+    return null;
+  }
+  /**
+   * Reads a file's content and content hash according to its sync kind: markdown
+   * is canonicalised text hashed with SHA-256; a binary attachment is read as raw
+   * bytes, carried as base64 in `content`, and hashed over the RAW bytes
+   * (`hashBlob`), never a canonicalised form (F9). The read uses the canonical
+   * path first, falling back to the original (FINDING 3). Returns `null` when the
+   * file resolves at neither path (a genuine miss, never push a phantom '') or
+   * when a binary file is over {@link MAX_BINARY_FILE_BYTES} (excluded, not an
+   * error). A binary file's `content` is encoded when it is first read, so a
+   * caller that finds the file unchanged never pays for a 33 MB string.
+   */
+  async readContentForKind(canonicalPath, originalPath, kind) {
+    const readPath = await this.resolveReadPath(canonicalPath, originalPath);
+    if (readPath === null) return null;
+    if (kind === "binary") {
+      const bytes = await this.options.vault.readBinary(readPath);
+      if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return null;
+      return { get content() {
+        return bytesToBase64(bytes);
+      }, contentHash: await hashBlob(bytes) };
+    }
+    const content = normalizeContent(
+      normalizeConfigContent(canonicalPath, await this.options.vault.readText(readPath))
+    );
+    return { content, contentHash: await sha256Hex3(content) };
+  }
+  async commitCreate(readPath, classified) {
+    const read = await this.readContentForKind(
+      classified.canonicalPath,
+      readPath,
+      classified.kind
+    );
+    if (read === null) return null;
+    const { content, contentHash } = read;
+    const fileId = this.options.generateFileId();
+    const operation = this.buildOperation({
+      content,
+      contentHash,
+      contentKind: classified.kind,
+      fileId,
+      kind: "create",
+      path: classified.canonicalPath,
+      previousContentHash: null,
+      previousPath: null
+    });
+    const revisionId = await this.options.repository.commitLocalChange({
+      operation,
+      removeFileId: null,
+      upsertMapping: {
+        collisionKey: classified.collisionKey,
+        contentHash,
+        contentKind: classified.kind,
+        fileId,
+        path: classified.canonicalPath
+      }
+    });
+    return { ...operation, revisionId };
+  }
+  async handleModify(path, force) {
+    const classified = classifyVaultPath(path);
+    if (!classified.eligible) return null;
+    const mapping = await this.findMapping(classified.collisionKey);
+    if (mapping === void 0) {
+      return this.commitCreate(path, classified);
+    }
+    return this.commitModify(path, classified, mapping, force);
+  }
+  async commitModify(readPath, classified, mapping, force = false) {
+    const read = await this.readContentForKind(
+      classified.canonicalPath,
+      readPath,
+      classified.kind
+    );
+    if (read === null) return null;
+    const { contentHash } = read;
+    if (!force && contentHash === mapping.contentHash) return null;
+    const operation = this.buildOperation({
+      content: read.content,
+      contentHash,
+      contentKind: classified.kind,
+      fileId: mapping.fileId,
+      kind: "update",
+      path: classified.canonicalPath,
+      previousContentHash: mapping.contentHash,
+      previousPath: null
+    });
+    const revisionId = await this.options.repository.commitLocalChange({
+      operation,
+      removeFileId: null,
+      upsertMapping: {
+        collisionKey: classified.collisionKey,
+        contentHash,
+        contentKind: classified.kind,
+        fileId: mapping.fileId,
+        path: classified.canonicalPath
+      }
+    });
+    return { ...operation, revisionId };
+  }
+  async handleRename(previousPath, nextPath) {
+    const from = classifyVaultPath(previousPath);
+    const to = classifyVaultPath(nextPath);
+    if (!from.eligible) {
+      return to.eligible ? this.commitCreate(nextPath, to) : null;
+    }
+    if (!to.eligible) {
+      return this.commitDelete(from.collisionKey);
+    }
+    const mapping = await this.findMapping(from.collisionKey);
+    if (mapping === void 0) {
+      return this.handleCreate(nextPath);
+    }
+    const occupant = await this.findMapping(to.collisionKey);
+    if (occupant !== void 0 && occupant.fileId !== mapping.fileId) {
+      throw new LocalVaultError(
+        "path-collision",
+        `A different file already occupies ${to.canonicalPath}.`
+      );
+    }
+    const read = await this.readContentForKind(
+      to.canonicalPath,
+      nextPath,
+      to.kind
+    );
+    if (read === null) return null;
+    const { content, contentHash } = read;
+    const operation = this.buildOperation({
+      content,
+      contentHash,
+      contentKind: to.kind,
+      fileId: mapping.fileId,
+      kind: "rename",
+      path: to.canonicalPath,
+      previousContentHash: mapping.contentHash,
+      previousPath: from.canonicalPath
+    });
+    const revisionId = await this.options.repository.commitLocalChange({
+      operation,
+      removeFileId: null,
+      upsertMapping: {
+        collisionKey: to.collisionKey,
+        contentHash,
+        contentKind: to.kind,
+        fileId: mapping.fileId,
+        path: to.canonicalPath
+      }
+    });
+    return { ...operation, revisionId };
+  }
+  async handleDelete(path) {
+    const classified = classifyVaultPath(path);
+    if (!classified.eligible) return null;
+    return this.commitDelete(classified.collisionKey);
+  }
+  async handleFolderRename(previousFolderPath, nextFolderPath) {
+    const fromPrefix = normalizeWirePath(previousFolderPath);
+    const toPrefix = normalizeWirePath(nextFolderPath);
+    const results = [];
+    for (const mapping of await this.options.repository.listMappings()) {
+      const suffix = pathUnderFolder(mapping.path, fromPrefix);
+      if (suffix === null) continue;
+      const op = await this.handleRename(mapping.path, `${toPrefix}${suffix}`);
+      if (op !== null) results.push(op);
+    }
+    return results;
+  }
+  async handleFolderDelete(folderPath) {
+    const prefix = normalizeWirePath(folderPath);
+    const results = [];
+    for (const mapping of await this.options.repository.listMappings()) {
+      if (pathUnderFolder(mapping.path, prefix) === null) continue;
+      const op = await this.handleDelete(mapping.path);
+      if (op !== null) results.push(op);
+    }
+    return results;
+  }
+  async commitDelete(collisionKey) {
+    const mapping = await this.findMapping(collisionKey);
+    if (mapping === void 0) return null;
+    const operation = this.buildOperation({
+      content: null,
+      contentHash: null,
+      ...mapping.contentKind === void 0 ? {} : { contentKind: mapping.contentKind },
+      fileId: mapping.fileId,
+      kind: "delete",
+      path: mapping.path,
+      previousContentHash: mapping.contentHash,
+      previousPath: null
+    });
+    const revisionId = await this.options.repository.commitLocalChange({
+      operation,
+      removeFileId: mapping.fileId,
+      upsertMapping: null
+    });
+    return { ...operation, revisionId };
+  }
+  async findMapping(collisionKey) {
+    const mappings = await this.options.repository.listMappings();
+    return mappings.find((mapping) => mapping.collisionKey === collisionKey);
+  }
+  buildOperation(fields) {
+    return {
+      ...fields,
+      observedAt: this.options.clock(),
+      operationId: this.options.generateOperationId(),
+      // Unknown until the repository commits the change and reports back the
+      // real id it enqueued; the caller fills this in on the returned object.
+      revisionId: null
+    };
+  }
+};
+function normalizeContent(text) {
+  return canonicalizeMarkdown(text);
+}
+function pathUnderFolder(path, folderPrefix) {
+  const prefix = `${folderPrefix}/`;
+  return path.startsWith(prefix) ? path.slice(folderPrefix.length) : null;
+}
+async function sha256Hex3(text) {
+  const data = new TextEncoder().encode(text);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function noop() {
+  return void 0;
 }
 
 // ../../packages/sync-core/dist/diff3.js
@@ -17550,335 +17901,6 @@ var ApplyDeferredError = class extends Error {
   }
 };
 
-// src/obsidian/vault-adapter.ts
-var MAX_BINARY_FILE_BYTES = 25 * 1024 * 1024;
-var LocalVaultError = class extends Error {
-  constructor(code, message) {
-    super(message);
-    __publicField(this, "code", code);
-    __publicField(this, "name", "LocalVaultError");
-  }
-};
-var RACY_STAT_MS = 2e3;
-function normalizeWirePath(path) {
-  return path.replace(/\\/gu, "/").normalize("NFC");
-}
-function classifyVaultPath(path) {
-  const canonicalPath = normalizeWirePath(path);
-  const kind = syncContentKind(canonicalPath);
-  if (kind === null) {
-    return { eligible: false };
-  }
-  return {
-    canonicalPath,
-    collisionKey: canonicalPath.toLowerCase(),
-    eligible: true,
-    kind
-  };
-}
-var VaultChangeObserver = class {
-  constructor(options) {
-    __publicField(this, "options");
-    __publicField(this, "tail", Promise.resolve());
-    this.options = options;
-  }
-  async observeCreate(path) {
-    return this.enqueue(() => this.handleCreate(path));
-  }
-  /**
-   * `force` commits the file even when its content matches the mapping: a
-   * Retry of a send whose queued copy is gone must send it again, and the
-   * mapping hash already advanced when the lost revision was committed.
-   */
-  async observeModify(path, options = {}) {
-    return this.enqueue(() => this.handleModify(path, options.force === true));
-  }
-  async observeRename(previousPath, nextPath) {
-    return this.enqueue(() => this.handleRename(previousPath, nextPath));
-  }
-  async observeDelete(path) {
-    return this.enqueue(() => this.handleDelete(path));
-  }
-  /**
-   * Handles a folder-level rename (Obsidian or another plugin moving a whole
-   * folder). Defence-in-depth: it does NOT assume Obsidian emits a per-child
-   * TFile rename for every note. It enumerates the mappings under the folder's
-   * OLD path prefix and routes each through the existing per-file rename
-   * machinery so heads/base state stay consistent. If a per-child event ALSO
-   * fires later, that child is already at its new path and dedupes to a no-op
-   * (see `handleRename`), so no child is double-processed. Returns the genuine
-   * per-child operations (empty when nothing was under the folder).
-   */
-  async observeFolderRename(previousFolderPath, nextFolderPath) {
-    return this.enqueue(
-      () => this.handleFolderRename(previousFolderPath, nextFolderPath)
-    );
-  }
-  /**
-   * Handles a folder-level delete by enumerating the mappings under the deleted
-   * folder's prefix and routing each through the existing per-file delete path
-   * (tombstoning each note). Idempotent with any per-child TFile delete events.
-   */
-  async observeFolderDelete(folderPath) {
-    return this.enqueue(() => this.handleFolderDelete(folderPath));
-  }
-  enqueue(task) {
-    const run = this.tail.then(task, task);
-    this.tail = run.then(noop, noop);
-    return run;
-  }
-  async handleCreate(path) {
-    const classified = classifyVaultPath(path);
-    if (!classified.eligible) return null;
-    const existing = await this.findMapping(classified.collisionKey);
-    if (existing !== void 0) {
-      return this.commitModify(path, classified, existing);
-    }
-    return this.commitCreate(path, classified);
-  }
-  /**
-   * Resolves the on-disk path to read from, canonical-first (FINDING 3). The
-   * canonical (forward-slash, NFC) form matches Obsidian's own path index, so it
-   * is tried first; the caller's original path is a belt-and-braces fallback for
-   * an exotic filesystem where only the raw form resolves. Returns `null` when
-   * NEITHER variant exists on disk, a genuine miss. Reading via the original
-   * (possibly backslash) path alone would miss on real Obsidian and either drop a
-   * live edit or read '' and push a phantom empty file over the peer's copy.
-   */
-  async resolveReadPath(canonicalPath, originalPath) {
-    if (await this.options.vault.exists(canonicalPath)) return canonicalPath;
-    if (originalPath !== canonicalPath && await this.options.vault.exists(originalPath)) {
-      return originalPath;
-    }
-    return null;
-  }
-  /**
-   * Reads a file's content and content hash according to its sync kind: markdown
-   * is canonicalised text hashed with SHA-256; a binary attachment is read as raw
-   * bytes, carried as base64 in `content`, and hashed over the RAW bytes
-   * (`hashBlob`), never a canonicalised form (F9). The read uses the canonical
-   * path first, falling back to the original (FINDING 3). Returns `null` when the
-   * file resolves at neither path (a genuine miss, never push a phantom '') or
-   * when a binary file is over {@link MAX_BINARY_FILE_BYTES} (excluded, not an
-   * error). A binary file's `content` is encoded when it is first read, so a
-   * caller that finds the file unchanged never pays for a 33 MB string.
-   */
-  async readContentForKind(canonicalPath, originalPath, kind) {
-    const readPath = await this.resolveReadPath(canonicalPath, originalPath);
-    if (readPath === null) return null;
-    if (kind === "binary") {
-      const bytes = await this.options.vault.readBinary(readPath);
-      if (bytes.byteLength > MAX_BINARY_FILE_BYTES) return null;
-      return { get content() {
-        return bytesToBase64(bytes);
-      }, contentHash: await hashBlob(bytes) };
-    }
-    const content = normalizeContent(
-      normalizeConfigContent(canonicalPath, await this.options.vault.readText(readPath))
-    );
-    return { content, contentHash: await sha256Hex3(content) };
-  }
-  async commitCreate(readPath, classified) {
-    const read = await this.readContentForKind(
-      classified.canonicalPath,
-      readPath,
-      classified.kind
-    );
-    if (read === null) return null;
-    const { content, contentHash } = read;
-    const fileId = this.options.generateFileId();
-    const operation = this.buildOperation({
-      content,
-      contentHash,
-      contentKind: classified.kind,
-      fileId,
-      kind: "create",
-      path: classified.canonicalPath,
-      previousContentHash: null,
-      previousPath: null
-    });
-    const revisionId = await this.options.repository.commitLocalChange({
-      operation,
-      removeFileId: null,
-      upsertMapping: {
-        collisionKey: classified.collisionKey,
-        contentHash,
-        contentKind: classified.kind,
-        fileId,
-        path: classified.canonicalPath
-      }
-    });
-    return { ...operation, revisionId };
-  }
-  async handleModify(path, force) {
-    const classified = classifyVaultPath(path);
-    if (!classified.eligible) return null;
-    const mapping = await this.findMapping(classified.collisionKey);
-    if (mapping === void 0) {
-      return this.commitCreate(path, classified);
-    }
-    return this.commitModify(path, classified, mapping, force);
-  }
-  async commitModify(readPath, classified, mapping, force = false) {
-    const read = await this.readContentForKind(
-      classified.canonicalPath,
-      readPath,
-      classified.kind
-    );
-    if (read === null) return null;
-    const { contentHash } = read;
-    if (!force && contentHash === mapping.contentHash) return null;
-    const operation = this.buildOperation({
-      content: read.content,
-      contentHash,
-      contentKind: classified.kind,
-      fileId: mapping.fileId,
-      kind: "update",
-      path: classified.canonicalPath,
-      previousContentHash: mapping.contentHash,
-      previousPath: null
-    });
-    const revisionId = await this.options.repository.commitLocalChange({
-      operation,
-      removeFileId: null,
-      upsertMapping: {
-        collisionKey: classified.collisionKey,
-        contentHash,
-        contentKind: classified.kind,
-        fileId: mapping.fileId,
-        path: classified.canonicalPath
-      }
-    });
-    return { ...operation, revisionId };
-  }
-  async handleRename(previousPath, nextPath) {
-    const from = classifyVaultPath(previousPath);
-    const to = classifyVaultPath(nextPath);
-    if (!from.eligible) {
-      return to.eligible ? this.commitCreate(nextPath, to) : null;
-    }
-    if (!to.eligible) {
-      return this.commitDelete(from.collisionKey);
-    }
-    const mapping = await this.findMapping(from.collisionKey);
-    if (mapping === void 0) {
-      return this.handleCreate(nextPath);
-    }
-    const occupant = await this.findMapping(to.collisionKey);
-    if (occupant !== void 0 && occupant.fileId !== mapping.fileId) {
-      throw new LocalVaultError(
-        "path-collision",
-        `A different file already occupies ${to.canonicalPath}.`
-      );
-    }
-    const read = await this.readContentForKind(
-      to.canonicalPath,
-      nextPath,
-      to.kind
-    );
-    if (read === null) return null;
-    const { content, contentHash } = read;
-    const operation = this.buildOperation({
-      content,
-      contentHash,
-      contentKind: to.kind,
-      fileId: mapping.fileId,
-      kind: "rename",
-      path: to.canonicalPath,
-      previousContentHash: mapping.contentHash,
-      previousPath: from.canonicalPath
-    });
-    const revisionId = await this.options.repository.commitLocalChange({
-      operation,
-      removeFileId: null,
-      upsertMapping: {
-        collisionKey: to.collisionKey,
-        contentHash,
-        contentKind: to.kind,
-        fileId: mapping.fileId,
-        path: to.canonicalPath
-      }
-    });
-    return { ...operation, revisionId };
-  }
-  async handleDelete(path) {
-    const classified = classifyVaultPath(path);
-    if (!classified.eligible) return null;
-    return this.commitDelete(classified.collisionKey);
-  }
-  async handleFolderRename(previousFolderPath, nextFolderPath) {
-    const fromPrefix = normalizeWirePath(previousFolderPath);
-    const toPrefix = normalizeWirePath(nextFolderPath);
-    const results = [];
-    for (const mapping of await this.options.repository.listMappings()) {
-      const suffix = pathUnderFolder(mapping.path, fromPrefix);
-      if (suffix === null) continue;
-      const op = await this.handleRename(mapping.path, `${toPrefix}${suffix}`);
-      if (op !== null) results.push(op);
-    }
-    return results;
-  }
-  async handleFolderDelete(folderPath) {
-    const prefix = normalizeWirePath(folderPath);
-    const results = [];
-    for (const mapping of await this.options.repository.listMappings()) {
-      if (pathUnderFolder(mapping.path, prefix) === null) continue;
-      const op = await this.handleDelete(mapping.path);
-      if (op !== null) results.push(op);
-    }
-    return results;
-  }
-  async commitDelete(collisionKey) {
-    const mapping = await this.findMapping(collisionKey);
-    if (mapping === void 0) return null;
-    const operation = this.buildOperation({
-      content: null,
-      contentHash: null,
-      ...mapping.contentKind === void 0 ? {} : { contentKind: mapping.contentKind },
-      fileId: mapping.fileId,
-      kind: "delete",
-      path: mapping.path,
-      previousContentHash: mapping.contentHash,
-      previousPath: null
-    });
-    const revisionId = await this.options.repository.commitLocalChange({
-      operation,
-      removeFileId: mapping.fileId,
-      upsertMapping: null
-    });
-    return { ...operation, revisionId };
-  }
-  async findMapping(collisionKey) {
-    const mappings = await this.options.repository.listMappings();
-    return mappings.find((mapping) => mapping.collisionKey === collisionKey);
-  }
-  buildOperation(fields) {
-    return {
-      ...fields,
-      observedAt: this.options.clock(),
-      operationId: this.options.generateOperationId(),
-      // Unknown until the repository commits the change and reports back the
-      // real id it enqueued; the caller fills this in on the returned object.
-      revisionId: null
-    };
-  }
-};
-function normalizeContent(text) {
-  return canonicalizeMarkdown(text);
-}
-function pathUnderFolder(path, folderPrefix) {
-  const prefix = `${folderPrefix}/`;
-  return path.startsWith(prefix) ? path.slice(folderPrefix.length) : null;
-}
-async function sha256Hex3(text) {
-  const data = new TextEncoder().encode(text);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-function noop() {
-  return void 0;
-}
-
 // src/runtime/keyed-mutex.ts
 function noop2() {
 }
@@ -17911,6 +17933,435 @@ var KeyedMutex = class {
     return this.chains.size;
   }
 };
+
+// src/sync/sync-runner.ts
+var PermanentApplyError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PermanentApplyError";
+  }
+};
+var PARENT_QUARANTINED_REASON = "parent-quarantined";
+var MISSING_PARENT_REASON = "missing-parent";
+function buildLineageIndex(outbox) {
+  const parents = /* @__PURE__ */ new Map();
+  const children = /* @__PURE__ */ new Map();
+  for (const item of outbox) {
+    const itemParents = item.parentRevisionIds ?? [];
+    parents.set(item.revisionId, itemParents);
+    for (const parentId of itemParents) {
+      const list = children.get(parentId);
+      if (list === void 0) {
+        children.set(parentId, [item.revisionId]);
+      } else {
+        list.push(item.revisionId);
+      }
+    }
+  }
+  return {
+    parentsOf: (revisionId) => parents.get(revisionId) ?? [],
+    childrenOf: (revisionId) => children.get(revisionId) ?? []
+  };
+}
+var MAX_APPLY_ATTEMPTS = 3;
+var DEFAULT_BASE_BACKOFF_MS = 5e3;
+var DEFAULT_MAX_BACKOFF_MS = 6e4;
+var DEFAULT_MAX_PUSH_BATCH_BYTES = 512 * 1024;
+var DEFAULT_MAX_PUSH_BATCH_ITEMS = 64;
+var SyncRunner = class {
+  constructor(options) {
+    __publicField(this, "options");
+    __publicField(this, "inFlight", null);
+    __publicField(this, "rerunRequested", false);
+    __publicField(this, "failureCount", 0);
+    __publicField(this, "cycleCounter", 0);
+    __publicField(this, "stopped", false);
+    __publicField(this, "pendingBackoffCancellations", /* @__PURE__ */ new Set());
+    /** Consecutive failed applies per incoming revision, reset on success. */
+    __publicField(this, "applyFailures", /* @__PURE__ */ new Map());
+    /**
+     * Server head at this runner's FIRST pull (it is rebuilt per connection):
+     * events up to it are the initial catch-up (`bootstrap`), later ones live. The
+     * pull `cursor` is the current head, so this holds across paged cycles.
+     */
+    __publicField(this, "bootstrapTarget", null);
+    this.options = {
+      baseBackoffMs: options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS,
+      maxBackoffMs: options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
+      random: options.random ?? Math.random,
+      maxPushBatchBytes: options.maxPushBatchBytes ?? DEFAULT_MAX_PUSH_BATCH_BYTES,
+      maxPushBatchItems: options.maxPushBatchItems ?? DEFAULT_MAX_PUSH_BATCH_ITEMS,
+      ...options
+    };
+  }
+  /**
+   * Single-flight: overlapping triggers coalesce into one extra rerun. A stopped
+   * runner is inert, so an old runner's leftover backoff timer can never push
+   * under a stale identity after a reconnect.
+   */
+  trigger() {
+    if (this.stopped) {
+      return Promise.resolve(idleCycleResult());
+    }
+    if (this.inFlight !== null) {
+      this.rerunRequested = true;
+      return this.inFlight;
+    }
+    return this.loop();
+  }
+  /** Quiesces the runner for good (no triggers, backoff cancelled); idempotent. */
+  stop() {
+    this.stopped = true;
+    for (const cancel of this.pendingBackoffCancellations) {
+      cancel();
+    }
+    this.pendingBackoffCancellations.clear();
+  }
+  async loop() {
+    let result;
+    do {
+      this.rerunRequested = false;
+      const cycle = this.runCycle();
+      this.inFlight = cycle;
+      try {
+        result = await cycle;
+      } finally {
+        this.inFlight = null;
+      }
+    } while (this.rerunRequested && !this.stopped);
+    return result;
+  }
+  async runCycle() {
+    const cycleId = this.cycleCounter += 1;
+    let result;
+    try {
+      await this.options.beforeCycle?.();
+      let push = { pushed: 0, quarantined: 0 };
+      let pushFailure = null;
+      try {
+        push = await this.runPush();
+      } catch (error51) {
+        if (isAuthDenied(error51)) throw error51;
+        pushFailure = { error: error51 };
+      }
+      await this.options.beforePull?.();
+      const apply = await this.runPull();
+      await this.options.afterPull?.();
+      if (pushFailure !== null) throw pushFailure.error;
+      this.failureCount = 0;
+      result = {
+        applied: apply.applied,
+        conflicts: apply.conflicts,
+        cycleId,
+        deferred: apply.deferred,
+        pushed: push.pushed,
+        quarantined: push.quarantined,
+        status: apply.status,
+        suppressed: apply.suppressed
+      };
+    } catch (error51) {
+      const status = isAuthDenied(error51) ? "unauthenticated" : "offline";
+      if (status === "offline") {
+        this.scheduleBackoff();
+      }
+      result = {
+        applied: 0,
+        conflicts: 0,
+        cycleId,
+        deferred: 0,
+        pushed: 0,
+        quarantined: 0,
+        status,
+        suppressed: 0,
+        error: error51 instanceof Error ? error51.message : String(error51)
+      };
+    }
+    this.options.onCycleComplete?.(result);
+    return result;
+  }
+  /**
+   * Drains the outbox in size-bounded sub-batches and reconciles each per-item
+   * result: a permanent rejection is quarantined, a transient one stays queued
+   * until the next pull, a transient transport failure is re-thrown (backoff).
+   *
+   * Quarantine CASCADES to outbox descendants: a dead parent never lands, so its
+   * children would get MISSING_PARENT forever. The `quarantined` count covers
+   * the whole lineage so the status never reads "synced" beside a dead one.
+   */
+  async runPush() {
+    const outbox = await this.options.state.listOutbox();
+    if (outbox.length === 0) {
+      return { pushed: 0, quarantined: 0 };
+    }
+    const queue = this.planPushBatches(outbox);
+    const lineage = buildLineageIndex(outbox);
+    const pending = new Set(outbox.map((item) => item.revisionId));
+    const accepted = /* @__PURE__ */ new Set();
+    const quarantinedIds = /* @__PURE__ */ new Set();
+    let pushed = 0;
+    const quarantineLineage = async (rootId, rootReason) => {
+      const work = [
+        { id: rootId, reason: rootReason }
+      ];
+      while (work.length > 0) {
+        const next = work.shift();
+        if (next === void 0 || !pending.has(next.id)) {
+          continue;
+        }
+        pending.delete(next.id);
+        quarantinedIds.add(next.id);
+        await this.options.state.quarantineOutboxItem(next.id, next.reason);
+        for (const childId of lineage.childrenOf(next.id)) {
+          work.push({ id: childId, reason: PARENT_QUARANTINED_REASON });
+        }
+      }
+    };
+    for (let index = 0; index < queue.length; index += 1) {
+      const batch = queue[index];
+      if (batch === void 0 || batch.length === 0) {
+        continue;
+      }
+      const live = batch.filter((item) => pending.has(item.revisionId));
+      if (live.length === 0) {
+        continue;
+      }
+      let results;
+      try {
+        results = await this.options.transport.push(live);
+      } catch (error51) {
+        if (isAuthDenied(error51)) {
+          throw error51;
+        }
+        if (isPermanentError(error51)) {
+          if (live.length === 1 && live[0] !== void 0) {
+            await quarantineLineage(live[0].revisionId, permanentReason(error51));
+            continue;
+          }
+          for (const item of live) {
+            queue.push([item]);
+          }
+          continue;
+        }
+        throw error51;
+      }
+      for (const result of results) {
+        if (quarantinedIds.has(result.revisionId)) {
+          continue;
+        }
+        if (result.outcome === "accepted" && result.receipt !== void 0) {
+          await this.options.state.recordPushReceipt(result.receipt);
+          pending.delete(result.revisionId);
+          accepted.add(result.revisionId);
+          pushed += 1;
+        } else if (result.outcome === "rejected" && result.permanent === true) {
+          await quarantineLineage(result.revisionId, "server-rejected");
+        } else if (result.outcome === "rejected" && result.missingParent === true && !await this.parentStillViable(
+          result.revisionId,
+          lineage,
+          pending,
+          accepted
+        )) {
+          await quarantineLineage(result.revisionId, MISSING_PARENT_REASON);
+        }
+      }
+    }
+    return { pushed, quarantined: quarantinedIds.size };
+  }
+  /**
+   * Whether a MISSING_PARENT child can still land: a parent is pending, was
+   * accepted this cycle, or was authored earlier (already on the server).
+   */
+  async parentStillViable(revisionId, lineage, pending, accepted) {
+    for (const parentId of lineage.parentsOf(revisionId)) {
+      if (pending.has(parentId) || accepted.has(parentId)) {
+        return true;
+      }
+      if (await this.options.state.isLocallyAuthored(parentId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Groups the outbox into sub-batches under the byte and item budgets. An
+   * oversized revision gets its own batch (it is the first item, so no split
+   * fires), so a 4xx on it never wedges other files.
+   */
+  planPushBatches(outbox) {
+    const maxBytes = this.options.maxPushBatchBytes;
+    const maxItems = this.options.maxPushBatchItems;
+    const batches = [];
+    let current = [];
+    let currentBytes = 0;
+    for (const item of outbox) {
+      const bytes = item.payloadBytes ?? 0;
+      const wouldOverflow = current.length > 0 && (current.length >= maxItems || currentBytes + bytes > maxBytes);
+      if (wouldOverflow) {
+        batches.push(current);
+        current = [];
+        currentBytes = 0;
+      }
+      current.push(item);
+      currentBytes += bytes;
+    }
+    if (current.length > 0) {
+      batches.push(current);
+    }
+    return batches;
+  }
+  /**
+   * Applies a parked incoming change again. True when it no longer needs to be
+   * listed (applied, a conflict copy written, or already superseded); false
+   * while an unsaved editor still holds the file. A failure is thrown.
+   */
+  async retryParked(revisionId) {
+    const parked = await this.options.state.listParkedRemote?.();
+    const event = parked?.find((item) => item.revision.revisionId === revisionId);
+    if (event === void 0) return true;
+    const outcome = await this.options.vault.applyRemote(event, { bootstrap: false });
+    if (outcome === "deferred") return false;
+    await this.options.state.unparkRemote?.(revisionId);
+    return true;
+  }
+  async runPull() {
+    let cursor = await this.options.state.loadCursor();
+    const { cursor: serverHead, events } = await this.options.transport.pull(cursor);
+    if (this.bootstrapTarget === null) {
+      this.bootstrapTarget = serverHead;
+    }
+    const bootstrapTarget = this.bootstrapTarget;
+    const ordered = [...events].sort(
+      (left, right) => left.serverSequence - right.serverSequence
+    );
+    let applied = 0;
+    let suppressed = 0;
+    let conflicts = 0;
+    let deferred = 0;
+    for (const remoteEvent of ordered) {
+      if (remoteEvent.serverSequence <= cursor) {
+        continue;
+      }
+      if (remoteEvent.serverSequence !== cursor + 1) {
+        break;
+      }
+      if (await this.options.state.isLocallyAuthored(remoteEvent.revision.revisionId)) {
+        suppressed += 1;
+        cursor = remoteEvent.serverSequence;
+        await this.options.state.saveCursor(cursor);
+        continue;
+      }
+      const buffers = await this.options.vault.openBuffers(
+        remoteEvent.revision.fileId
+      );
+      if (buffers.some((buffer) => buffer.unsaved)) {
+        deferred += 1;
+        break;
+      }
+      let outcome;
+      try {
+        outcome = await this.options.vault.applyRemote(remoteEvent, {
+          bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
+        });
+      } catch (error51) {
+        const id = remoteEvent.revision.revisionId;
+        const attempts = (this.applyFailures.get(id) ?? 0) + 1;
+        if (isAuthDenied(error51) || this.options.state.parkRemote === void 0 || attempts < MAX_APPLY_ATTEMPTS && !(error51 instanceof PermanentApplyError)) {
+          this.applyFailures.set(id, attempts);
+          throw error51;
+        }
+        this.applyFailures.delete(id);
+        await this.options.state.parkRemote(
+          remoteEvent,
+          error51 instanceof Error ? error51.message : String(error51)
+        );
+        cursor = remoteEvent.serverSequence;
+        await this.options.state.saveCursor(cursor);
+        continue;
+      }
+      this.applyFailures.delete(remoteEvent.revision.revisionId);
+      if (outcome === "deferred") {
+        deferred += 1;
+        break;
+      }
+      if (outcome === "conflict") {
+        conflicts += 1;
+      } else {
+        await this.options.state.retireEquivalentMerges?.(remoteEvent);
+        applied += 1;
+      }
+      cursor = remoteEvent.serverSequence;
+      await this.options.state.saveCursor(cursor);
+    }
+    return {
+      applied,
+      conflicts,
+      deferred,
+      status: resolveStatus({ conflicts, deferred }),
+      suppressed
+    };
+  }
+  scheduleBackoff() {
+    if (this.stopped) {
+      return;
+    }
+    this.failureCount += 1;
+    const ceiling = Math.min(
+      this.options.maxBackoffMs,
+      this.options.baseBackoffMs * 2 ** (this.failureCount - 1)
+    );
+    const half = ceiling / 2;
+    const delayMs = half + this.options.random() * half;
+    const scheduledTimer = {};
+    let fired = false;
+    const scheduled = this.options.scheduler(() => {
+      fired = true;
+      if (scheduledTimer.cancellation !== void 0) {
+        this.pendingBackoffCancellations.delete(scheduledTimer.cancellation);
+      }
+      void this.trigger();
+    }, delayMs);
+    if (typeof scheduled !== "function") return;
+    const cancellation = scheduled;
+    scheduledTimer.cancellation = cancellation;
+    if (!fired && !this.stopped) {
+      this.pendingBackoffCancellations.add(cancellation);
+    } else if (this.stopped) {
+      cancellation();
+    }
+  }
+};
+function isAuthDenied(error51) {
+  return typeof error51 === "object" && error51 !== null && error51.authDenied === true;
+}
+function isPermanentError(error51) {
+  return typeof error51 === "object" && error51 !== null && error51.permanent === true;
+}
+function idleCycleResult() {
+  return {
+    applied: 0,
+    conflicts: 0,
+    deferred: 0,
+    pushed: 0,
+    quarantined: 0,
+    status: "synced",
+    suppressed: 0
+  };
+}
+function permanentReason(error51) {
+  if (error51 instanceof Error && error51.message.length > 0) {
+    return error51.message;
+  }
+  return "permanent-http-error";
+}
+function resolveStatus(counts) {
+  if (counts.conflicts > 0) {
+    return "conflict";
+  }
+  if (counts.deferred > 0) {
+    return "deferred";
+  }
+  return "synced";
+}
 
 // src/runtime/vault-apply.ts
 var ParentFolderOccupiedError = class extends Error {
@@ -17979,6 +18430,9 @@ var VaultApplyAdapter = class {
     }
     const decoded = await this.resolveRevision(event);
     await this.history?.ensureEvent(event);
+    if (!inSyncScope(decoded.path) || decoded.previousPath !== null && !inSyncScope(decoded.previousPath)) {
+      throw new PermanentApplyError("The path is outside what Havemind syncs, so this change was not applied.");
+    }
     const origin = options?.bootstrap === true ? "bootstrap" : "live";
     return withKeys(this.lock, [this.lockKey(decoded.path), ...decoded.previousPath === null ? [] : [this.lockKey(decoded.previousPath)]], async () => {
       if ((await this.openBuffers(fileId)).some((buffer) => buffer.unsaved)) return "deferred";
@@ -18063,6 +18517,12 @@ var VaultApplyAdapter = class {
     const onDisk = await this.read(decoded.kind, decoded.path);
     const converged = onDisk !== null && contentMatches(onDisk, incoming);
     const owner = this.files.fileIdAtPath(decoded.path);
+    if (owner === null && onDisk === null && !lastWriterWins) {
+      const variant = await this.files.pathCaseVariant?.(decoded.path);
+      if (variant != null && this.files.fileIdAtPath(variant) !== fileId) {
+        return this.writeConflict(event, decoded);
+      }
+    }
     if (owner !== null && owner !== fileId) {
       if (converged && this.history !== void 0 && owner < fileId && (await this.history.heads(owner)).length > 0) return "noop";
       if (!converged && !lastWriterWins) return this.writeConflict(event, decoded);
@@ -18238,7 +18698,7 @@ var VaultApplyAdapter = class {
   async writeConflict(event, decoded) {
     const existing = this.files.conflictArtifactPathFor(event.revision.revisionId);
     const target2 = existing ?? await this.buildConflictPath(event, decoded);
-    const content = incomingContent(decoded);
+    const content = decoded.operation === "delete" ? deletedMarkerBody(this.resolveAuthorName?.(event) ?? this.fallbackAuthorName, formatConflictTimestamp(this.now())) : incomingContent(decoded);
     await (typeof content === "string" ? this.files.writeConflictArtifact(target2, content) : this.files.writeBinaryConflictArtifact(target2, content));
     if (existing === null) {
       await this.files.recordConflictArtifactPath(
@@ -18274,6 +18734,9 @@ var VaultApplyAdapter = class {
     return candidate;
   }
 };
+function inSyncScope(path) {
+  return syncContentKind(path) !== null || isSyncableConfigPath(path);
+}
 function noteBasename(path) {
   const slash = path.lastIndexOf("/");
   const leaf = slash === -1 ? path : path.slice(slash + 1);
@@ -18328,6 +18791,26 @@ async function resolveConflictTarget(vault, path) {
   const filename = separatorIndex === -1 ? path : path.slice(separatorIndex + 1);
   const resolvedFolder = folder === "" ? "" : await ensureWritableConflictFolder(vault, folder);
   return resolvedFolder === "" ? filename : `${resolvedFolder}/${filename}`;
+}
+function numberedConflictPath(path, n) {
+  const slash = path.lastIndexOf("/");
+  const leaf = path.slice(slash + 1);
+  const marker = leaf.lastIndexOf(" (conflict ");
+  const dot = leaf.lastIndexOf(".");
+  const cut = marker !== -1 ? marker : dot > 0 ? dot : leaf.length;
+  return `${path.slice(0, slash + 1)}${leaf.slice(0, cut)} ${n}${leaf.slice(cut)}`;
+}
+async function placeConflictArtifact(vault, path, holdsSame, create) {
+  for (let attempt = 1; ; attempt += 1) {
+    const target2 = attempt === 1 ? path : numberedConflictPath(path, attempt);
+    const existing = vault.getAbstractFileByPath(target2);
+    if (existing === null) return create(target2);
+    if (!isFolder(existing) && await holdsSame(existing)) return;
+  }
+}
+function sameBytes(a, b) {
+  const left = new Uint8Array(a);
+  return left.byteLength === b.byteLength && left.every((byte, index) => byte === b[index]);
 }
 function toArrayBuffer(bytes) {
   if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
@@ -18466,22 +18949,34 @@ function createVaultFilePort(options) {
     },
     async writeConflictArtifact(path, content) {
       const targetPath = await resolveConflictTarget(vault, path);
-      const existing = vault.getAbstractFileByPath(targetPath);
-      if (existing === null) {
-        await vault.create(targetPath, content);
-        return;
-      }
-      await vault.modify(existing, content);
+      await placeConflictArtifact(
+        vault,
+        targetPath,
+        async (existing) => await vault.read(existing) === content,
+        (target2) => vault.create(target2, content).then(() => void 0)
+      );
     },
     async writeBinaryConflictArtifact(path, bytes) {
       const targetPath = await resolveConflictTarget(vault, path);
-      const data = toArrayBuffer(bytes);
-      const existing = vault.getAbstractFileByPath(targetPath);
-      if (existing === null) {
-        await vault.createBinary(targetPath, data);
-        return;
+      await placeConflictArtifact(
+        vault,
+        targetPath,
+        async (existing) => sameBytes(await vault.readBinary(existing), bytes),
+        (target2) => vault.createBinary(target2, toArrayBuffer(bytes)).then(() => void 0)
+      );
+    },
+    async pathCaseVariant(path) {
+      const slash = path.lastIndexOf("/");
+      const folders = vault;
+      const parent = slash === -1 ? folders.getRoot?.() : folders.getFolderByPath?.(path.slice(0, slash));
+      const wanted = classifyVaultPath(path);
+      if (parent == null || !wanted.eligible) return null;
+      for (const child of parent.children) {
+        if (child.path === path) continue;
+        const sibling = classifyVaultPath(child.path);
+        if (sibling.eligible && sibling.collisionKey === wanted.collisionKey) return child.path;
       }
-      await vault.modifyBinary(existing, data);
+      return null;
     },
     recordPathOwner: (fileId, path) => state.recordPathOwner(fileId, path),
     recordApplied: (fileId, path, hash2, content) => state.recordApplied(fileId, path, hash2, content),
@@ -20290,6 +20785,8 @@ var SYNCABLE_EXTENSION_SET = /* @__PURE__ */ new Set([
   "md",
   ...SYNCABLE_BINARY_EXTENSIONS
 ]);
+var BULK_DELETE_MIN = 25;
+var BULK_DELETE_SHARE = 0.3;
 var MAX_SKIPPED_DETAILS = 10;
 var MAX_BINARY_FILE_MB = MAX_BINARY_FILE_BYTES / (1024 * 1024);
 function formatReconcileNotices(result) {
@@ -20305,6 +20802,9 @@ function formatReconcileNotices(result) {
     );
   }
   return notices;
+}
+function formatHeldDeletesNotice(count) {
+  return `Havemind: ${count} synced file(s) are missing from this vault. Not deleted on your other devices yet, in case this is a mistake.`;
 }
 function warnSkippedPaths(result) {
   for (const { path, reason } of result.skippedPaths) {
@@ -20356,8 +20856,14 @@ async function reconcileVaultState(options) {
     });
   }
   const mappingsByCollision = /* @__PURE__ */ new Map();
-  for (const mapping of await repository.listMappings()) {
+  const allMappings = await repository.listMappings();
+  for (const mapping of allMappings) {
     mappingsByCollision.set(mapping.collisionKey, mapping);
+  }
+  if (options.configListingFailed?.() === true) {
+    for (const [key, mapping] of mappingsByCollision) {
+      if (isSyncableConfigPath(mapping.path)) mappingsByCollision.delete(key);
+    }
   }
   let unchanged = 0;
   let updated = 0;
@@ -20419,13 +20925,15 @@ async function reconcileVaultState(options) {
   const {
     created,
     deleted,
+    deletesHeld,
     renamed,
     skipped: tailSkipped
   } = await applyRenamesCreatesDeletes(
     observer,
     unmatchedVault,
     unmatchedMappings,
-    recordSkip
+    recordSkip,
+    options.allowBulkDeletes === true ? null : allMappings.length
   );
   return {
     attachmentsExcluded,
@@ -20438,7 +20946,8 @@ async function reconcileVaultState(options) {
     skipped: skipped + tailSkipped,
     skippedPaths,
     unchanged,
-    updated
+    updated,
+    deletesHeld
   };
 }
 async function observeResilient(path, onSkip, task) {
@@ -20455,7 +20964,7 @@ function describeSkipReason(error51) {
   if (error51 instanceof Error && error51.message !== "") return error51.message;
   return "unknown error";
 }
-async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip) {
+async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMappings, onSkip, breakerTotal) {
   const vaultByContent = groupBy(unmatchedVault, (file2) => `${file2.kind}:${file2.contentHash}`);
   const mappingsByContent = groupBy(unmatchedMappings, (m) => `${m.contentKind ?? "markdown"}:${m.contentHash}`);
   const consumedVault = /* @__PURE__ */ new Set();
@@ -20493,9 +21002,12 @@ async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMap
       skipped += 1;
     }
   }
+  const pending = unmatchedMappings.filter((mapping) => !consumedMappings.has(mapping));
+  if (breakerTotal !== null && pending.length >= BULK_DELETE_MIN && pending.length >= breakerTotal * BULK_DELETE_SHARE) {
+    return { created, deleted: 0, deletesHeld: pending.length, renamed, skipped };
+  }
   let deleted = 0;
-  for (const mapping of unmatchedMappings) {
-    if (consumedMappings.has(mapping)) continue;
+  for (const mapping of pending) {
     if (await observeResilient(
       mapping.path,
       onSkip,
@@ -20506,7 +21018,7 @@ async function applyRenamesCreatesDeletes(observer, unmatchedVault, unmatchedMap
       skipped += 1;
     }
   }
-  return { created, deleted, renamed, skipped };
+  return { created, deleted, deletesHeld: 0, renamed, skipped };
 }
 function groupBy(items, key) {
   const groups = /* @__PURE__ */ new Map();
@@ -20567,6 +21079,79 @@ var CommitPathRecovery = class {
 function retryFailedCommit(path, deps) {
   if (!deps.exists(path)) return "file-missing";
   return deps.retrigger(path) ? "retriggered" : "unavailable";
+}
+
+// src/runtime/bootstrap-identities.ts
+function pathsNeedingResolution(localPaths, blocked) {
+  return localPaths.filter((path) => {
+    const classified = classifyVaultPath(path);
+    return classified.eligible && blocked.has(classified.collisionKey) && !isSyncableConfigPath(classified.canonicalPath);
+  });
+}
+function pathsToScan(paths, blocked, mappedKeys) {
+  return paths.filter((path) => {
+    const classified = classifyVaultPath(path);
+    return !classified.eligible || !blocked.has(classified.collisionKey) || mappedKeys.has(classified.collisionKey);
+  });
+}
+var NOTICE_NAMED_PATHS = 3;
+function formatBlockedNotice(paths) {
+  const named = paths.slice(0, NOTICE_NAMED_PATHS).join(", ");
+  const more = paths.length > NOTICE_NAMED_PATHS ? ` and ${paths.length - NOTICE_NAMED_PATHS} more` : "";
+  return `Havemind: ${paths.length} existing file(s) need conflict resolution before upload: ${named}${more}.`;
+}
+async function bootstrapIdentities(options) {
+  const { history, state, producer, vault } = options;
+  await producer.recover();
+  await history.refresh();
+  const heads = await history.allHeads();
+  const counts = /* @__PURE__ */ new Map();
+  for (const head of heads) counts.set(head.revision.fileId, (counts.get(head.revision.fileId) ?? 0) + 1);
+  const mappings = await producer.listMappings();
+  const mapped = new Set(mappings.map((m) => m.collisionKey));
+  const mappedFileIds = new Set(mappings.map((m) => m.fileId));
+  const blocked = /* @__PURE__ */ new Set();
+  const untracked = (await vault.listSyncablePaths()).some((localPath) => {
+    const classified = classifyVaultPath(localPath);
+    return classified.eligible && !mapped.has(classified.collisionKey);
+  });
+  if (!untracked) return blocked;
+  const pending = await state.listOutbox();
+  const candidates = [...heads].sort((a, b) => a.revision.fileId.localeCompare(b.revision.fileId));
+  for (const head of candidates) {
+    if (mappedFileIds.has(head.revision.fileId)) continue;
+    const remote = await history.payload(head);
+    if (remote.operation === "delete") continue;
+    const path = classifyVaultPath(remote.path);
+    if (!path.eligible || mapped.has(path.collisionKey) || !await vault.exists(remote.path)) continue;
+    blocked.add(path.collisionKey);
+    if (pending.length > 0 || counts.get(head.revision.fileId) !== 1) continue;
+    let content = null;
+    let contentHash;
+    if (remote.kind === "binary") {
+      if (vault.readBinary === void 0) continue;
+      const bytes = await vault.readBinary(remote.path);
+      contentHash = await hashBlob(bytes);
+      if (remote.binaryContent == null || contentHash !== await hashBlob(remote.binaryContent)) continue;
+    } else {
+      content = canonicalizeMarkdown(normalizeConfigContent(remote.path, await vault.readText(remote.path)));
+      if (content !== remote.content) continue;
+      contentHash = await hashPlaintext(content);
+    }
+    await state.recordPathOwner(head.revision.fileId, path.canonicalPath);
+    await state.recordBaseHash(head.revision.fileId, contentHash);
+    if (content !== null) await state.recordBaseContent(head.revision.fileId, content);
+    await producer.adoptRemoteMapping({
+      fileId: head.revision.fileId,
+      path: path.canonicalPath,
+      collisionKey: path.collisionKey,
+      contentHash,
+      ...remote.kind === "binary" ? { contentKind: "binary" } : {}
+    }, head.revision.revisionId);
+    mapped.add(path.collisionKey);
+    blocked.delete(path.collisionKey);
+  }
+  return blocked;
 }
 
 // src/runtime/modify-debounce.ts
@@ -21854,13 +22439,21 @@ function startPushProducer(plugin, wiring) {
     generateRevisionId: () => globalThis.crypto.randomUUID()
   });
   producerRef.current = repository;
+  let configListingFailed = false;
   const snapshot = {
     async listSyncablePaths() {
       const notes = vault.getFiles().map((file2) => file2.path).filter((path) => {
         const extension = pathExtension(path.normalize("NFC"));
         return extension === "md" || SYNCABLE_BINARY_EXTENSIONS.includes(extension);
       });
-      const config2 = await listSyncableConfigPaths(vault.adapter, CONFIG_DIR);
+      let config2 = [];
+      try {
+        config2 = await listSyncableConfigPaths(vault.adapter, CONFIG_DIR);
+        configListingFailed = false;
+      } catch (error51) {
+        configListingFailed = true;
+        console.warn("Havemind: could not list the config folder, config deletes are skipped.", error51 instanceof Error ? error51.name : typeof error51);
+      }
       return [...notes, ...config2];
     },
     // P7: size and mtime without reading the file, so the startup scan can
@@ -21909,19 +22502,9 @@ function startPushProducer(plugin, wiring) {
       await repository.recover();
       blocked = await initializeIdentities?.(repository, snapshot) ?? /* @__PURE__ */ new Set();
       if (disposed) return;
-      if (blocked.size > 0) new import_obsidian3.Notice(`Havemind: ${blocked.size} existing file(s) need conflict resolution before upload.`);
-      const result = await reconcileVaultState({ observer, repository, vault: {
-        ...snapshot,
-        listSyncablePaths: async () => (await snapshot.listSyncablePaths()).filter((path) => {
-          const classified = classifyVaultPath(path);
-          return !classified.eligible || !blocked.has(classified.collisionKey);
-        })
-      } });
-      if (result.skipped > 0) {
-        new import_obsidian3.Notice(`Havemind: ${result.skipped} file(s) could not be synced and were skipped.`);
-        warnSkippedPaths(result);
-      }
-      for (const notice of formatReconcileNotices(result)) new import_obsidian3.Notice(notice);
+      const needResolution = blocked.size === 0 ? [] : pathsNeedingResolution(await snapshot.listSyncablePaths(), blocked);
+      if (needResolution.length > 0) new import_obsidian3.Notice(formatBlockedNotice(needResolution));
+      reportReconcile(await reconcile(false));
       initialized = true;
     })();
     try {
@@ -21929,6 +22512,41 @@ function startPushProducer(plugin, wiring) {
     } finally {
       initializing = null;
     }
+  };
+  const reconcile = (allowBulkDeletes) => reconcileVaultState({
+    observer,
+    repository,
+    allowBulkDeletes,
+    configListingFailed: () => configListingFailed,
+    vault: {
+      ...snapshot,
+      listSyncablePaths: async () => {
+        const mapped = new Set((await repository.listMappings()).map((mapping) => mapping.collisionKey));
+        return pathsToScan(await snapshot.listSyncablePaths(), blocked, mapped);
+      }
+    }
+  });
+  const offerHeldDeletes = (count) => {
+    const fragment = document.createDocumentFragment();
+    const text = document.createElement("div");
+    text.textContent = formatHeldDeletesNotice(count);
+    const confirm = document.createElement("button");
+    confirm.textContent = "Delete them on all devices";
+    fragment.appendChild(text);
+    fragment.appendChild(confirm);
+    const notice = new import_obsidian3.Notice(fragment, 0);
+    confirm.addEventListener("click", () => {
+      notice.hide();
+      afterChange(reconcile(true).then(reportReconcile));
+    });
+  };
+  const reportReconcile = (result) => {
+    if (result.skipped > 0) {
+      new import_obsidian3.Notice(`Havemind: ${result.skipped} file(s) could not be synced and were skipped.`);
+      warnSkippedPaths(result);
+    }
+    for (const notice of formatReconcileNotices(result)) new import_obsidian3.Notice(notice);
+    if (result.deletesHeld > 0) offerHeldDeletes(result.deletesHeld);
   };
   const observer = new VaultChangeObserver({
     clock: () => Date.now(),
@@ -22130,429 +22748,6 @@ function lastEditedLabel(membershipId, roster) {
 
 // src/runtime/adapters/sync-controller.ts
 var import_obsidian4 = require("obsidian");
-
-// src/sync/sync-runner.ts
-var PARENT_QUARANTINED_REASON = "parent-quarantined";
-var MISSING_PARENT_REASON = "missing-parent";
-function buildLineageIndex(outbox) {
-  const parents = /* @__PURE__ */ new Map();
-  const children = /* @__PURE__ */ new Map();
-  for (const item of outbox) {
-    const itemParents = item.parentRevisionIds ?? [];
-    parents.set(item.revisionId, itemParents);
-    for (const parentId of itemParents) {
-      const list = children.get(parentId);
-      if (list === void 0) {
-        children.set(parentId, [item.revisionId]);
-      } else {
-        list.push(item.revisionId);
-      }
-    }
-  }
-  return {
-    parentsOf: (revisionId) => parents.get(revisionId) ?? [],
-    childrenOf: (revisionId) => children.get(revisionId) ?? []
-  };
-}
-var MAX_APPLY_ATTEMPTS = 3;
-var DEFAULT_BASE_BACKOFF_MS = 5e3;
-var DEFAULT_MAX_BACKOFF_MS = 6e4;
-var DEFAULT_MAX_PUSH_BATCH_BYTES = 512 * 1024;
-var DEFAULT_MAX_PUSH_BATCH_ITEMS = 64;
-var SyncRunner = class {
-  constructor(options) {
-    __publicField(this, "options");
-    __publicField(this, "inFlight", null);
-    __publicField(this, "rerunRequested", false);
-    __publicField(this, "failureCount", 0);
-    __publicField(this, "cycleCounter", 0);
-    __publicField(this, "stopped", false);
-    __publicField(this, "pendingBackoffCancellations", /* @__PURE__ */ new Set());
-    /** Consecutive failed applies per incoming revision, reset on success. */
-    __publicField(this, "applyFailures", /* @__PURE__ */ new Map());
-    /**
-     * Server head at this runner's FIRST pull (it is rebuilt per connection):
-     * events up to it are the initial catch-up (`bootstrap`), later ones live. The
-     * pull `cursor` is the current head, so this holds across paged cycles.
-     */
-    __publicField(this, "bootstrapTarget", null);
-    this.options = {
-      baseBackoffMs: options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS,
-      maxBackoffMs: options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
-      random: options.random ?? Math.random,
-      maxPushBatchBytes: options.maxPushBatchBytes ?? DEFAULT_MAX_PUSH_BATCH_BYTES,
-      maxPushBatchItems: options.maxPushBatchItems ?? DEFAULT_MAX_PUSH_BATCH_ITEMS,
-      ...options
-    };
-  }
-  /**
-   * Single-flight: overlapping triggers coalesce into one extra rerun. A stopped
-   * runner is inert, so an old runner's leftover backoff timer can never push
-   * under a stale identity after a reconnect.
-   */
-  trigger() {
-    if (this.stopped) {
-      return Promise.resolve(idleCycleResult());
-    }
-    if (this.inFlight !== null) {
-      this.rerunRequested = true;
-      return this.inFlight;
-    }
-    return this.loop();
-  }
-  /** Quiesces the runner for good (no triggers, backoff cancelled); idempotent. */
-  stop() {
-    this.stopped = true;
-    for (const cancel of this.pendingBackoffCancellations) {
-      cancel();
-    }
-    this.pendingBackoffCancellations.clear();
-  }
-  async loop() {
-    let result;
-    do {
-      this.rerunRequested = false;
-      const cycle = this.runCycle();
-      this.inFlight = cycle;
-      try {
-        result = await cycle;
-      } finally {
-        this.inFlight = null;
-      }
-    } while (this.rerunRequested && !this.stopped);
-    return result;
-  }
-  async runCycle() {
-    const cycleId = this.cycleCounter += 1;
-    let result;
-    try {
-      await this.options.beforeCycle?.();
-      let push = { pushed: 0, quarantined: 0 };
-      let pushFailure = null;
-      try {
-        push = await this.runPush();
-      } catch (error51) {
-        if (isAuthDenied(error51)) throw error51;
-        pushFailure = { error: error51 };
-      }
-      await this.options.beforePull?.();
-      const apply = await this.runPull();
-      await this.options.afterPull?.();
-      if (pushFailure !== null) throw pushFailure.error;
-      this.failureCount = 0;
-      result = {
-        applied: apply.applied,
-        conflicts: apply.conflicts,
-        cycleId,
-        deferred: apply.deferred,
-        pushed: push.pushed,
-        quarantined: push.quarantined,
-        status: apply.status,
-        suppressed: apply.suppressed
-      };
-    } catch (error51) {
-      const status = isAuthDenied(error51) ? "unauthenticated" : "offline";
-      if (status === "offline") {
-        this.scheduleBackoff();
-      }
-      result = {
-        applied: 0,
-        conflicts: 0,
-        cycleId,
-        deferred: 0,
-        pushed: 0,
-        quarantined: 0,
-        status,
-        suppressed: 0,
-        error: error51 instanceof Error ? error51.message : String(error51)
-      };
-    }
-    this.options.onCycleComplete?.(result);
-    return result;
-  }
-  /**
-   * Drains the outbox in size-bounded sub-batches and reconciles each per-item
-   * result: a permanent rejection is quarantined, a transient one stays queued
-   * until the next pull, a transient transport failure is re-thrown (backoff).
-   *
-   * Quarantine CASCADES to outbox descendants: a dead parent never lands, so its
-   * children would get MISSING_PARENT forever. The `quarantined` count covers
-   * the whole lineage so the status never reads "synced" beside a dead one.
-   */
-  async runPush() {
-    const outbox = await this.options.state.listOutbox();
-    if (outbox.length === 0) {
-      return { pushed: 0, quarantined: 0 };
-    }
-    const queue = this.planPushBatches(outbox);
-    const lineage = buildLineageIndex(outbox);
-    const pending = new Set(outbox.map((item) => item.revisionId));
-    const accepted = /* @__PURE__ */ new Set();
-    const quarantinedIds = /* @__PURE__ */ new Set();
-    let pushed = 0;
-    const quarantineLineage = async (rootId, rootReason) => {
-      const work = [
-        { id: rootId, reason: rootReason }
-      ];
-      while (work.length > 0) {
-        const next = work.shift();
-        if (next === void 0 || !pending.has(next.id)) {
-          continue;
-        }
-        pending.delete(next.id);
-        quarantinedIds.add(next.id);
-        await this.options.state.quarantineOutboxItem(next.id, next.reason);
-        for (const childId of lineage.childrenOf(next.id)) {
-          work.push({ id: childId, reason: PARENT_QUARANTINED_REASON });
-        }
-      }
-    };
-    for (let index = 0; index < queue.length; index += 1) {
-      const batch = queue[index];
-      if (batch === void 0 || batch.length === 0) {
-        continue;
-      }
-      const live = batch.filter((item) => pending.has(item.revisionId));
-      if (live.length === 0) {
-        continue;
-      }
-      let results;
-      try {
-        results = await this.options.transport.push(live);
-      } catch (error51) {
-        if (isAuthDenied(error51)) {
-          throw error51;
-        }
-        if (isPermanentError(error51)) {
-          if (live.length === 1 && live[0] !== void 0) {
-            await quarantineLineage(live[0].revisionId, permanentReason(error51));
-            continue;
-          }
-          for (const item of live) {
-            queue.push([item]);
-          }
-          continue;
-        }
-        throw error51;
-      }
-      for (const result of results) {
-        if (quarantinedIds.has(result.revisionId)) {
-          continue;
-        }
-        if (result.outcome === "accepted" && result.receipt !== void 0) {
-          await this.options.state.recordPushReceipt(result.receipt);
-          pending.delete(result.revisionId);
-          accepted.add(result.revisionId);
-          pushed += 1;
-        } else if (result.outcome === "rejected" && result.permanent === true) {
-          await quarantineLineage(result.revisionId, "server-rejected");
-        } else if (result.outcome === "rejected" && result.missingParent === true && !await this.parentStillViable(
-          result.revisionId,
-          lineage,
-          pending,
-          accepted
-        )) {
-          await quarantineLineage(result.revisionId, MISSING_PARENT_REASON);
-        }
-      }
-    }
-    return { pushed, quarantined: quarantinedIds.size };
-  }
-  /**
-   * Whether a MISSING_PARENT child can still land: a parent is pending, was
-   * accepted this cycle, or was authored earlier (already on the server).
-   */
-  async parentStillViable(revisionId, lineage, pending, accepted) {
-    for (const parentId of lineage.parentsOf(revisionId)) {
-      if (pending.has(parentId) || accepted.has(parentId)) {
-        return true;
-      }
-      if (await this.options.state.isLocallyAuthored(parentId)) {
-        return true;
-      }
-    }
-    return false;
-  }
-  /**
-   * Groups the outbox into sub-batches under the byte and item budgets. An
-   * oversized revision gets its own batch (it is the first item, so no split
-   * fires), so a 4xx on it never wedges other files.
-   */
-  planPushBatches(outbox) {
-    const maxBytes = this.options.maxPushBatchBytes;
-    const maxItems = this.options.maxPushBatchItems;
-    const batches = [];
-    let current = [];
-    let currentBytes = 0;
-    for (const item of outbox) {
-      const bytes = item.payloadBytes ?? 0;
-      const wouldOverflow = current.length > 0 && (current.length >= maxItems || currentBytes + bytes > maxBytes);
-      if (wouldOverflow) {
-        batches.push(current);
-        current = [];
-        currentBytes = 0;
-      }
-      current.push(item);
-      currentBytes += bytes;
-    }
-    if (current.length > 0) {
-      batches.push(current);
-    }
-    return batches;
-  }
-  /**
-   * Applies a parked incoming change again. True when it no longer needs to be
-   * listed (applied, a conflict copy written, or already superseded); false
-   * while an unsaved editor still holds the file. A failure is thrown.
-   */
-  async retryParked(revisionId) {
-    const parked = await this.options.state.listParkedRemote?.();
-    const event = parked?.find((item) => item.revision.revisionId === revisionId);
-    if (event === void 0) return true;
-    const outcome = await this.options.vault.applyRemote(event, { bootstrap: false });
-    if (outcome === "deferred") return false;
-    await this.options.state.unparkRemote?.(revisionId);
-    return true;
-  }
-  async runPull() {
-    let cursor = await this.options.state.loadCursor();
-    const { cursor: serverHead, events } = await this.options.transport.pull(cursor);
-    if (this.bootstrapTarget === null) {
-      this.bootstrapTarget = serverHead;
-    }
-    const bootstrapTarget = this.bootstrapTarget;
-    const ordered = [...events].sort(
-      (left, right) => left.serverSequence - right.serverSequence
-    );
-    let applied = 0;
-    let suppressed = 0;
-    let conflicts = 0;
-    let deferred = 0;
-    for (const remoteEvent of ordered) {
-      if (remoteEvent.serverSequence <= cursor) {
-        continue;
-      }
-      if (remoteEvent.serverSequence !== cursor + 1) {
-        break;
-      }
-      if (await this.options.state.isLocallyAuthored(remoteEvent.revision.revisionId)) {
-        suppressed += 1;
-        cursor = remoteEvent.serverSequence;
-        await this.options.state.saveCursor(cursor);
-        continue;
-      }
-      const buffers = await this.options.vault.openBuffers(
-        remoteEvent.revision.fileId
-      );
-      if (buffers.some((buffer) => buffer.unsaved)) {
-        deferred += 1;
-        break;
-      }
-      let outcome;
-      try {
-        outcome = await this.options.vault.applyRemote(remoteEvent, {
-          bootstrap: bootstrapTarget !== null && remoteEvent.serverSequence <= bootstrapTarget
-        });
-      } catch (error51) {
-        const id = remoteEvent.revision.revisionId;
-        const attempts = (this.applyFailures.get(id) ?? 0) + 1;
-        if (isAuthDenied(error51) || this.options.state.parkRemote === void 0 || attempts < MAX_APPLY_ATTEMPTS) {
-          this.applyFailures.set(id, attempts);
-          throw error51;
-        }
-        this.applyFailures.delete(id);
-        await this.options.state.parkRemote(
-          remoteEvent,
-          error51 instanceof Error ? error51.message : String(error51)
-        );
-        cursor = remoteEvent.serverSequence;
-        await this.options.state.saveCursor(cursor);
-        continue;
-      }
-      this.applyFailures.delete(remoteEvent.revision.revisionId);
-      if (outcome === "deferred") {
-        deferred += 1;
-        break;
-      }
-      if (outcome === "conflict") {
-        conflicts += 1;
-      } else {
-        await this.options.state.retireEquivalentMerges?.(remoteEvent);
-        applied += 1;
-      }
-      cursor = remoteEvent.serverSequence;
-      await this.options.state.saveCursor(cursor);
-    }
-    return {
-      applied,
-      conflicts,
-      deferred,
-      status: resolveStatus({ conflicts, deferred }),
-      suppressed
-    };
-  }
-  scheduleBackoff() {
-    if (this.stopped) {
-      return;
-    }
-    this.failureCount += 1;
-    const ceiling = Math.min(
-      this.options.maxBackoffMs,
-      this.options.baseBackoffMs * 2 ** (this.failureCount - 1)
-    );
-    const half = ceiling / 2;
-    const delayMs = half + this.options.random() * half;
-    const scheduledTimer = {};
-    let fired = false;
-    const scheduled = this.options.scheduler(() => {
-      fired = true;
-      if (scheduledTimer.cancellation !== void 0) {
-        this.pendingBackoffCancellations.delete(scheduledTimer.cancellation);
-      }
-      void this.trigger();
-    }, delayMs);
-    if (typeof scheduled !== "function") return;
-    const cancellation = scheduled;
-    scheduledTimer.cancellation = cancellation;
-    if (!fired && !this.stopped) {
-      this.pendingBackoffCancellations.add(cancellation);
-    } else if (this.stopped) {
-      cancellation();
-    }
-  }
-};
-function isAuthDenied(error51) {
-  return typeof error51 === "object" && error51 !== null && error51.authDenied === true;
-}
-function isPermanentError(error51) {
-  return typeof error51 === "object" && error51 !== null && error51.permanent === true;
-}
-function idleCycleResult() {
-  return {
-    applied: 0,
-    conflicts: 0,
-    deferred: 0,
-    pushed: 0,
-    quarantined: 0,
-    status: "synced",
-    suppressed: 0
-  };
-}
-function permanentReason(error51) {
-  if (error51 instanceof Error && error51.message.length > 0) {
-    return error51.message;
-  }
-  return "permanent-http-error";
-}
-function resolveStatus(counts) {
-  if (counts.conflicts > 0) {
-    return "conflict";
-  }
-  if (counts.deferred > 0) {
-    return "deferred";
-  }
-  return "synced";
-}
 
 // src/runtime/scheduler.ts
 var SyncScheduler = class {
@@ -22905,61 +23100,6 @@ function parsePullResponse(response) {
 }
 function malformed(detail) {
   return new RequestUrlTransportError("malformed-response", detail);
-}
-
-// src/runtime/bootstrap-identities.ts
-async function bootstrapIdentities(options) {
-  const { history, state, producer, vault } = options;
-  await producer.recover();
-  await history.refresh();
-  const heads = await history.allHeads();
-  const counts = /* @__PURE__ */ new Map();
-  for (const head of heads) counts.set(head.revision.fileId, (counts.get(head.revision.fileId) ?? 0) + 1);
-  const mappings = await producer.listMappings();
-  const mapped = new Set(mappings.map((m) => m.collisionKey));
-  const mappedFileIds = new Set(mappings.map((m) => m.fileId));
-  const blocked = /* @__PURE__ */ new Set();
-  const untracked = (await vault.listSyncablePaths()).some((localPath) => {
-    const classified = classifyVaultPath(localPath);
-    return classified.eligible && !mapped.has(classified.collisionKey);
-  });
-  if (!untracked) return blocked;
-  const pending = await state.listOutbox();
-  const candidates = [...heads].sort((a, b) => a.revision.fileId.localeCompare(b.revision.fileId));
-  for (const head of candidates) {
-    if (mappedFileIds.has(head.revision.fileId)) continue;
-    const remote = await history.payload(head);
-    if (remote.operation === "delete") continue;
-    const path = classifyVaultPath(remote.path);
-    if (!path.eligible || mapped.has(path.collisionKey) || !await vault.exists(remote.path)) continue;
-    blocked.add(path.collisionKey);
-    if (pending.length > 0 || counts.get(head.revision.fileId) !== 1) continue;
-    let content = null;
-    let contentHash;
-    if (remote.kind === "binary") {
-      if (vault.readBinary === void 0) continue;
-      const bytes = await vault.readBinary(remote.path);
-      contentHash = await hashBlob(bytes);
-      if (remote.binaryContent == null || contentHash !== await hashBlob(remote.binaryContent)) continue;
-    } else {
-      content = canonicalizeMarkdown(await vault.readText(remote.path));
-      if (content !== remote.content) continue;
-      contentHash = await hashPlaintext(content);
-    }
-    await state.recordPathOwner(head.revision.fileId, path.canonicalPath);
-    await state.recordBaseHash(head.revision.fileId, contentHash);
-    if (content !== null) await state.recordBaseContent(head.revision.fileId, content);
-    await producer.adoptRemoteMapping({
-      fileId: head.revision.fileId,
-      path: path.canonicalPath,
-      collisionKey: path.collisionKey,
-      contentHash,
-      ...remote.kind === "binary" ? { contentKind: "binary" } : {}
-    }, head.revision.revisionId);
-    mapped.add(path.collisionKey);
-    blocked.delete(path.collisionKey);
-  }
-  return blocked;
 }
 
 // src/runtime/head-reconciliation.ts
@@ -24729,6 +24869,7 @@ async function sweepConflictCopies(deps) {
         deps.port.readText(copy.copyPath)
       ]);
       if (mine === null || theirs === null) continue;
+      if (isDeletedMarker(theirs)) continue;
       const result = merge2(ancestor, mine, theirs);
       if (result.status !== "merged") continue;
       if (!await deps.port.replaceText(targetPath, mine, result.text)) continue;
@@ -25076,6 +25217,13 @@ async function setModelKey(options, key) {
   return "failed";
 }
 
+// src/plugin/agent-name.ts
+var AGENT_NAME = /^[\p{L}\p{N}_ .-]{1,40}$/u;
+function agentNameProblem(name) {
+  if (AGENT_NAME.test(name) && !name.startsWith(".")) return null;
+  return "Use 1 to 40 letters, digits, spaces, dots, dashes or underscores for the agent name, and do not start with a dot.";
+}
+
 // src/headless/task-note.ts
 var AGENTS_FOLDER = "Havemind/Agents";
 var UNIT_MINUTES = { m: 1, h: 60, d: 24 * 60 };
@@ -25091,7 +25239,7 @@ var AGENT_PRESETS = [
     summary: "Files new notes from Inbox/ into folders under Notes/.",
     mayWrite: ["Inbox", "Notes"],
     every: "1h",
-    instructions: 'For each new or changed note in Inbox/, pick the best existing folder under Notes/ (or a new one with a plain name) and write the note there unchanged, with a line of tags at the end. Then replace the note in Inbox/ with one line linking to where it went, like "Filed to [[Notes/Work/Idea]]". Never change or drop any of the text people wrote.'
+    instructions: 'For each new or changed note in Inbox/, pick the best existing folder under Notes/ (or a new one with a plain name) and write the note there unchanged. Add only tags the note does not already have: put them on its existing tag line if there is one, otherwise on one new line at the end, and never repeat a tag. Then replace the note in Inbox/ with one line linking to where it went, like "Filed to [[Notes/Work/Idea]]". Never change or drop any of the text people wrote.'
   },
   {
     id: "daily-summary",
@@ -25174,6 +25322,7 @@ var Invitations = class {
     __publicField(this, "connectionNoticeKind");
     /** The shown invitation is for an AI agent (plan 014): show how it joins. */
     __publicField(this, "pendingInvitationIsAgent", false);
+    __publicField(this, "lastPendingRefresh", 0);
   }
   /**
    * Owner action: open the unified "Create connection" panel where the invite
@@ -25199,7 +25348,7 @@ var Invitations = class {
       role: "editor",
       name: "",
       invitation: this.pendingInvitation,
-      pending: this.pendingApprovals,
+      pending: this.activePendingApprovals(),
       invitationExpired: this.isInvitationExpired(),
       ...this.pendingInvitationIsAgent ? { agentJoinCommand: AGENT_JOIN_COMMAND } : {},
       ...this.connectionNotice === void 0 ? {} : { notice: this.connectionNotice },
@@ -25288,11 +25437,39 @@ var Invitations = class {
       report(`Could not approve: ${errorMessage(error51)}`);
     }
   }
+  /** The waiting devices whose invitation has not expired: all a screen may show. */
+  activePendingApprovals(now = Date.now()) {
+    return this.pendingApprovals.filter((entry) => Date.parse(entry.expiresAt) > now);
+  }
+  /** Forgets everything the owner composer held: the next connection may be another vault. */
+  clearOwnerState() {
+    this.pendingInvitation = null;
+    this.pendingApprovals = [];
+    this.connectionActive = false;
+    this.connectionNotice = void 0;
+    this.connectionNoticeKind = void 0;
+  }
+  /**
+   * Re-reads the waiting devices from the server, at most every 30 s: called on
+   * every synced transition so a request made on another device, or one that
+   * expired, shows up without a restart. The role is read from the server
+   * roster too, because an invited owner is recorded as an editor on the
+   * connection; asking as a non-owner is a 403 and a wasted token rotation.
+   */
+  async refreshPendingApprovalsSoon() {
+    const ownerOnRoster = this.plugin.people.rosterMembers.some((member) => member.self && member.role === "owner");
+    if (!ownerOnRoster && this.plugin.connection?.selfMembership?.role !== "owner") return;
+    const now = Date.now();
+    if (now - this.lastPendingRefresh < 3e4) return;
+    this.lastPendingRefresh = now;
+    await this.restorePendingApprovals();
+  }
   /** Hydrates owner approvals after restart; failure never disrupts sync. */
   async restorePendingApprovals() {
     try {
       const pending = await listPendingApprovalsForOwner(this.plugin);
       if (pending === null || this.plugin.unloaded) return;
+      if (JSON.stringify(pending) === JSON.stringify(this.pendingApprovals)) return;
       this.pendingApprovals = [...pending];
       this.plugin.views.refreshOnboarding();
     } catch {
@@ -25306,6 +25483,11 @@ var Invitations = class {
    */
   async createInvitation(role, name, report, agentPresetId) {
     const agent = role === "agent";
+    const problem = agent && name.length > 0 ? agentNameProblem(name) : null;
+    if (problem !== null) {
+      report(problem);
+      return;
+    }
     const memberRole = role === "owner" ? "owner" : "editor";
     try {
       const invitation = await createInvitationForOwner(this.plugin, {
@@ -25409,27 +25591,21 @@ var Agents = class {
     this.plugin.views.refreshOnboardingNow();
   }
   async add(presetId, name, login, report) {
-    const api = await agentApiForOwner(this.plugin);
-    if (api === null) {
-      report("Connect as the vault owner first.");
+    const problem = agentNameProblem(name);
+    if (problem !== null) {
+      report(problem);
       return;
     }
+    if (login?.kind === "local") {
+      report("Claude Code on this computer is not available yet in this build.");
+      return;
+    }
+    let loginSaved = null;
     try {
-      if (login?.kind === "local") {
-        report("Claude Code on this computer is not available yet in this build.");
+      const api = await agentApiForOwner(this.plugin);
+      if (api === null) {
+        report("Connect as the vault owner first.");
         return;
-      }
-      if (login !== null) {
-        const saved = await setModelKey(api, {
-          provider: login.provider,
-          ...login.secret === void 0 ? {} : { secret: login.secret },
-          ...login.model === void 0 ? {} : { model: login.model },
-          ...login.baseUrl === void 0 ? {} : { baseUrl: login.baseUrl }
-        });
-        if (saved !== "saved") {
-          report(saved === "invalid" ? INVALID[login.provider] ?? "That login was refused." : "Could not save it on the server.");
-          return;
-        }
       }
       const added = await addAgent(api, name);
       if (added === "name-taken") {
@@ -25440,14 +25616,36 @@ var Agents = class {
         report(added === "unsupported" ? "This server cannot add agents with one click yet; update it." : "Could not add the agent.");
         return;
       }
-      await writeTaskNote(this.plugin, name, presetId);
-      this.notice = `${name} is joining. It appears in yellow within a minute; its task is in Havemind/Agents/${name}.md.`;
-      this.formOpen = false;
-      this.plugin.views.refreshOnboardingNow();
-      void this.waitForAgent(name);
+      if (login !== null) {
+        loginSaved = await setModelKey(api, {
+          provider: login.provider,
+          ...login.secret === void 0 ? {} : { secret: login.secret },
+          ...login.model === void 0 ? {} : { model: login.model },
+          ...login.baseUrl === void 0 ? {} : { baseUrl: login.baseUrl }
+        });
+      }
     } catch {
       report("Could not reach the server. Try again in a moment.");
+      return;
     }
+    const missing = [];
+    if (login !== null && loginSaved !== "saved") {
+      missing.push(loginSaved === "invalid" ? `its login was refused: ${(INVALID[login.provider] ?? "Check it.").replace(/\.$/u, "").replace(/^./u, (c) => c.toLowerCase())}` : "its login could not be saved");
+    }
+    try {
+      await writeTaskNote(this.plugin, name, presetId);
+    } catch {
+      missing.push("its task note could not be written");
+    }
+    if (missing.length === 0) {
+      this.notice = `${name} is joining. It appears in yellow within a minute; its task is in Havemind/Agents/${name}.md.`;
+    } else {
+      this.notice = `Agent added, but ${missing.join(" and ")}.`;
+      report(this.notice);
+    }
+    this.formOpen = false;
+    this.plugin.views.refreshOnboardingNow();
+    void this.waitForAgent(name);
   }
 };
 
@@ -26339,7 +26537,8 @@ function captureDrafts(draft, live) {
   if (live.token) draft.token = live.token.value;
   if (live.server) draft.server = live.server.value;
   if (live.role) {
-    draft.role = live.role.value === "owner" ? "owner" : "editor";
+    const role = live.role.value;
+    draft.role = role === "owner" || role === "agent" ? role : "editor";
   }
   if (live.name) draft.name = live.name.value;
 }
@@ -27144,9 +27343,7 @@ function renderPendingRow(content, entry, actions, codes = {}) {
     codes[entry.invitationId] = phraseInput.value;
   });
   const status = renderFormStatus(row);
-  const approve = row.createEl("button", { text: "Approve" });
-  approve.addClass("mod-cta");
-  approve.onClickEvent(() => {
+  const submit = () => {
     const phrase = phraseInput.value.trim();
     if (phrase.length === 0) {
       status.setText("Enter the code you heard, then approve.");
@@ -27158,7 +27355,13 @@ function renderPendingRow(content, entry, actions, codes = {}) {
       phrase,
       (message) => status.setText(message)
     );
+  };
+  phraseInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submit();
   });
+  const approve = row.createEl("button", { text: "Approve" });
+  approve.addClass("mod-cta");
+  approve.onClickEvent(submit);
   const onReject = actions.onReject;
   if (onReject !== void 0) {
     armedButton(row, "Reject", "Confirm reject", "mod-warning", () => {
@@ -27260,8 +27463,24 @@ var ENDPOINTS = [
   { id: "gemini", title: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-pro" },
   { id: "ollama", title: "Ollama on the server", baseUrl: "http://host.docker.internal:11434/v1", model: "llama3.1" }
 ];
-function secretField(parent, label, placeholder) {
-  const field = labelledField(parent, "havemind-agent-key", label, "input", { type: "password", placeholder });
+function clearAgentSecrets(draft) {
+  delete draft.agentSecret;
+  delete draft.agentModel;
+  delete draft.agentBaseUrl;
+  delete draft.agentEndpoint;
+}
+function remember(field, event, keep) {
+  field.addEventListener(event, () => keep(field.value));
+}
+function secretField(parent, label, placeholder, draft) {
+  const field = labelledField(parent, "havemind-agent-key", label, "input", {
+    type: "password",
+    placeholder,
+    value: draft.agentSecret ?? ""
+  });
+  remember(field, "input", (value) => {
+    draft.agentSecret = value;
+  });
   field.setAttribute("type", "password");
   field.setAttribute("autocomplete", "off");
   field.addClass("havemind-agent-field");
@@ -27291,26 +27510,36 @@ function renderBrains(content, model, draft) {
         return;
       case "claude-code":
         command(detail, "In Terminal, run this once and paste what it prints:", "claude setup-token");
-        fields.secret = secretField(detail, "Token", "sk-ant-oat01-\u2026");
+        fields.secret = secretField(detail, "Token", "sk-ant-oat01-\u2026", draft);
         break;
       case "codex":
         command(detail, "Signed in to Codex on this computer? Copy its login:", "cat ~/.codex/auth.json | pbcopy");
-        fields.secret = secretField(detail, "Codex login (auth.json)", '{"tokens": \u2026}');
+        fields.secret = secretField(detail, "Codex login (auth.json)", '{"tokens": \u2026}', draft);
         break;
       case "anthropic":
-        fields.secret = secretField(detail, "Anthropic API key", "sk-ant-api03-\u2026");
+        fields.secret = secretField(detail, "Anthropic API key", "sk-ant-api03-\u2026", draft);
         break;
       case "openai-compatible": {
         const endpoint = labelledField(detail, "havemind-agent-endpoint", "Service", "select");
         for (const option of ENDPOINTS) endpoint.createEl("option", { text: option.title, value: option.id });
         const first = ENDPOINTS[0];
-        fields.baseUrl = labelledField(detail, "havemind-agent-base", "Address", "input", { type: "text", value: first?.baseUrl ?? "" });
-        fields.model = labelledField(detail, "havemind-agent-model", "Model", "input", { type: "text", value: first?.model ?? "" });
+        endpoint.value = draft.agentEndpoint ?? first?.id ?? "";
+        fields.baseUrl = labelledField(detail, "havemind-agent-base", "Address", "input", { type: "text", value: draft.agentBaseUrl ?? first?.baseUrl ?? "" });
+        fields.model = labelledField(detail, "havemind-agent-model", "Model", "input", { type: "text", value: draft.agentModel ?? first?.model ?? "" });
         for (const field of [endpoint, fields.baseUrl, fields.model]) field.addClass("havemind-agent-field");
-        fields.secret = secretField(detail, "API key (none for Ollama)", "sk-\u2026");
+        remember(fields.baseUrl, "input", (value) => {
+          draft.agentBaseUrl = value;
+        });
+        remember(fields.model, "input", (value) => {
+          draft.agentModel = value;
+        });
+        fields.secret = secretField(detail, "API key (none for Ollama)", "sk-\u2026", draft);
         endpoint.addEventListener("change", () => {
           const picked = ENDPOINTS.find((option) => option.id === endpoint.value);
           if (picked === void 0) return;
+          draft.agentEndpoint = picked.id;
+          draft.agentBaseUrl = picked.baseUrl;
+          draft.agentModel = picked.model;
           if (fields.baseUrl !== void 0) fields.baseUrl.value = picked.baseUrl;
           if (fields.model !== void 0) fields.model.value = picked.model;
         });
@@ -27331,6 +27560,7 @@ function renderBrains(content, model, draft) {
     button.createDiv({ text: choice.title }).addClass("havemind-agent-brain-title");
     button.createDiv({ text: choice.detail }).addClass("havemind-agent-brain-sub");
     button.onClickEvent(() => {
+      if (draft.agentBrain !== choice.id) clearAgentSecrets(draft);
       draft.agentBrain = choice.id;
       for (const other of buttons) {
         const on = other === button;
@@ -27362,6 +27592,8 @@ function renderTiles(content, draft, onPick) {
   grid.addClass("havemind-agent-tiles");
   const chosen = draft.agentTask ?? AGENT_PRESETS[0]?.id ?? CUSTOM_AGENT.id;
   const tiles = [];
+  const summary = content.createDiv({ text: presetById(chosen).summary });
+  summary.addClass("havemind-agent-summary");
   for (const preset of [...AGENT_PRESETS, CUSTOM_AGENT]) {
     const tile = grid.createEl("button", {
       attr: { role: "radio", "aria-checked": String(preset.id === chosen), "data-agent": preset.id }
@@ -27380,16 +27612,12 @@ function renderTiles(content, draft, onPick) {
         other.toggleClass("is-selected", on);
         other.setAttribute("aria-checked", String(on));
       }
-      summaryRef.el?.setText(preset.summary);
+      summary.setText(preset.summary);
       onPick(preset);
     });
     tiles.push(tile);
   }
-  const summary = content.createDiv({ text: presetById(chosen).summary });
-  summary.addClass("havemind-agent-summary");
-  summaryRef.el = summary;
 }
-var summaryRef = {};
 function renderAddAgent(content, model, draft, actions) {
   const title = content.createDiv();
   title.addClass("havemind-composer-title");
@@ -27466,13 +27694,8 @@ function renderPendingCards(body, actions) {
     card.createDiv({
       text: `As ${entry.intendedKind === "agent" ? "AI agent" : entry.intendedRole ?? "editor"} \xB7 expires in ${minutes} min`
     }).addClass("havemind-pending-meta");
-    if (actions.onOpenComposer !== void 0) {
-      const open2 = actions.onOpenComposer;
-      const enter = card.createEl("button", {
-        text: name === void 0 ? "Enter the code" : `Enter ${name}\u2019s code`
-      });
-      enter.addClass("mod-cta");
-      enter.onClickEvent(() => open2());
+    if (actions.approval !== void 0) {
+      renderPendingRow(card, entry, actions.approval.actions, actions.approval.codes);
     }
   }
 }
@@ -27489,6 +27712,7 @@ function renderPeopleTab(body, composer, actions) {
     return;
   }
   if (agent?.notice !== void 0) body.createDiv({ text: agent.notice }).addClass("havemind-hint");
+  if (actions.isOwner !== true) return;
   if (actions.onOpenComposer !== void 0) {
     const open2 = body.createEl("button", { text: "Invite someone" });
     open2.addClass("havemind-invite-cta");
@@ -27760,6 +27984,18 @@ function renderStatusHero(target2, panel, options, now = Date.now()) {
 }
 
 // src/ui/screens/tab-screens.ts
+function isOwnerView(options) {
+  try {
+    return (options.rejoinRosterProvider?.()?.rows ?? []).some((row) => row.self && row.role === "owner");
+  } catch {
+    return false;
+  }
+}
+function openAddAgentModel(options, draft) {
+  const model = options.addAgentProvider?.() ?? null;
+  if (model === null) clearAgentSecrets(draft);
+  return model;
+}
 function buildTabScreens(context) {
   const { options } = context;
   return {
@@ -27779,46 +28015,54 @@ function buildTabScreens(context) {
         ...options.onRestore ? { onRestore: options.onRestore } : {}
       });
     },
-    renderPeople: (target2, model) => renderPeopleTab(target2, model, {
-      renderRoster: (rosterTarget) => {
-        const roster = options.rejoinRosterProvider?.();
-        if (roster === void 0) return;
-        renderRejoinRoster(rosterTarget, roster, {
-          waiting: options.rejoinWaitingProvider?.() ?? /* @__PURE__ */ new Set(),
-          ...options.onRejoin === void 0 ? {} : { onRejoin: options.onRejoin },
-          ...options.onRemove === void 0 ? {} : { onRemove: options.onRemove },
-          ...options.onUndoAgent === void 0 ? {} : { onUndoAgent: options.onUndoAgent }
-        });
-      },
-      renderComposer: (composerTarget, m) => renderInviteComposer(composerTarget, m, context.draft, context.liveInputs, {
-        onClose: options.onCloseComposer,
-        onCreate: options.onCreateInvitation,
-        onCopy: options.onCopyInvitation,
-        onDismiss: options.onDismissInvitation,
-        onApprove: options.onApprove,
-        onReject: options.onReject
-      }),
-      onOpenComposer: options.onOpenComposer,
-      ...options.onAddAgent === void 0 ? {} : {
-        addAgent: {
-          model: options.addAgentProvider?.() ?? null,
-          draft: context.draft,
-          actions: {
-            onAdd: options.onAddAgent,
-            onClose: () => options.onCloseAddAgent?.()
-          },
-          ...options.onOpenAddAgent === void 0 ? {} : { onOpen: options.onOpenAddAgent },
-          ...options.agentNoticeProvider?.() === void 0 ? {} : { notice: options.agentNoticeProvider?.() }
-        }
-      },
-      pending: (() => {
-        try {
-          return options.pendingApprovalsProvider?.() ?? [];
-        } catch {
-          return [];
-        }
-      })()
-    })
+    renderPeople: (target2, model) => {
+      var _a3;
+      return renderPeopleTab(target2, model, {
+        renderRoster: (rosterTarget) => {
+          const roster = options.rejoinRosterProvider?.();
+          if (roster === void 0) return;
+          renderRejoinRoster(rosterTarget, roster, {
+            waiting: options.rejoinWaitingProvider?.() ?? /* @__PURE__ */ new Set(),
+            ...options.onRejoin === void 0 ? {} : { onRejoin: options.onRejoin },
+            ...options.onRemove === void 0 ? {} : { onRemove: options.onRemove },
+            ...options.onUndoAgent === void 0 ? {} : { onUndoAgent: options.onUndoAgent }
+          });
+        },
+        renderComposer: (composerTarget, m) => renderInviteComposer(composerTarget, m, context.draft, context.liveInputs, {
+          onClose: options.onCloseComposer,
+          onCreate: options.onCreateInvitation,
+          onCopy: options.onCopyInvitation,
+          onDismiss: options.onDismissInvitation,
+          onApprove: options.onApprove,
+          onReject: options.onReject
+        }),
+        onOpenComposer: options.onOpenComposer,
+        isOwner: isOwnerView(options),
+        approval: {
+          actions: { onApprove: options.onApprove, onReject: options.onReject },
+          codes: (_a3 = context.draft).codes ?? (_a3.codes = {})
+        },
+        ...options.onAddAgent === void 0 ? {} : {
+          addAgent: {
+            model: openAddAgentModel(options, context.draft),
+            draft: context.draft,
+            actions: {
+              onAdd: options.onAddAgent,
+              onClose: () => options.onCloseAddAgent?.()
+            },
+            ...options.onOpenAddAgent === void 0 ? {} : { onOpen: options.onOpenAddAgent },
+            ...options.agentNoticeProvider?.() === void 0 ? {} : { notice: options.agentNoticeProvider?.() }
+          }
+        },
+        pending: (() => {
+          try {
+            return options.pendingApprovalsProvider?.() ?? [];
+          } catch {
+            return [];
+          }
+        })()
+      });
+    }
   };
 }
 function buildBodyRenderers(options) {
@@ -27907,6 +28151,36 @@ function renderConnectedBodyFor(content, panel, composer, context, callbacks) {
     onMore: context.onMore
   });
   return { focusTabOnRender: state.focusTabOnRender };
+}
+
+// src/ui/screens/repaint-viewport.ts
+var TAB_BODY = ".havemind-tab-body";
+function captureViewport(content, tab) {
+  const scrollTop = content.querySelector(TAB_BODY)?.scrollTop ?? 0;
+  const active = content.ownerDocument?.activeElement;
+  if (active == null || !content.contains(active) || !active.getAttribute("id")) return { tab, scrollTop };
+  return {
+    tab,
+    scrollTop,
+    focusId: active.getAttribute("id") ?? "",
+    selection: { start: active.selectionStart ?? null, end: active.selectionEnd ?? null }
+  };
+}
+function restoreViewport(content, saved, tab) {
+  const body = content.querySelector(TAB_BODY);
+  if (body !== null && saved.tab === tab && saved.scrollTop > 0) body.scrollTop = saved.scrollTop;
+  if (saved.focusId === void 0) return;
+  const current = content.ownerDocument?.activeElement;
+  if (current != null && content.contains(current)) return;
+  const field = content.querySelector(`#${saved.focusId}`);
+  if (field === null) return;
+  field.focus({ preventScroll: true });
+  const { start, end } = saved.selection ?? { start: null, end: null };
+  if (start === null || end === null) return;
+  try {
+    field.setSelectionRange(start, end);
+  } catch {
+  }
 }
 
 // src/ui/screens/repaint-scheduler.ts
@@ -28032,6 +28306,8 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
     __publicField(this, "helpOpen", false);
     /** Which tab the connected pane is showing. */
     __publicField(this, "activeTab", "status");
+    /** The tab the DOM on screen was drawn for; `activeTab` is already the next one mid-switch. */
+    __publicField(this, "renderedTab", "status");
     /**
      * Set for exactly one render after a keyboard or click selection, so focus
      * lands on the newly opened tab. Cleared as it is consumed: a status-driven
@@ -28116,6 +28392,7 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
     const content = this.containerEl.children[1];
     if (!content) return;
     captureDrafts(this.draft, this.liveInputs);
+    const viewport = captureViewport(content, this.renderedTab);
     content.empty();
     content.addClass("havemind-view");
     content.removeClass("havemind-view-scrolls");
@@ -28173,15 +28450,9 @@ var HavemindOnboardingView = class extends import_obsidian21.ItemView {
       }
     );
     this.focusTabOnRender = focusTabOnRender;
+    restoreViewport(content, viewport, this.activeTab);
+    this.renderedTab = this.activeTab;
   }
-  /**
-   * Everything below the header: the alarms, the tab strip and the open tab.
-   *
-   * Split from `render()` so the dispatcher above stays readable as a list of
-   * screens. The ordering rules it encodes are the load-bearing part, and they
-   * are commented where they apply.
-   */
-  /** Renders the rejoin-aware roster with its owner actions from the options. */
 };
 
 // src/runtime/activity-persistence.ts
@@ -28446,7 +28717,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
           void this.syncNow();
         },
         composerProvider: () => this.invitations.connectionActive ? this.invitations.composerModel() : null,
-        pendingApprovalsProvider: () => this.invitations.pendingApprovals,
+        pendingApprovalsProvider: () => this.invitations.activePendingApprovals(),
         guestWaitingProvider: () => this.awaitingApproval,
         guestInvalidProvider: () => this.guestInvitationInvalid,
         panelProvider: () => this.connectionPanel(),
@@ -28768,6 +29039,8 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
     this.connectionError = void 0;
     this.awaitingApproval = null;
     this.guestInvitationInvalid = false;
+    this.invitations.clearOwnerState();
+    this.people.rosterMembers = [];
     this.activityLog.clear();
     this.statusBar.setStatus(formatStatusBar({ status: "disconnected" }));
     this.views.refreshOnboardingNow();
@@ -28794,6 +29067,7 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
       this.lastSyncedAt = Date.now();
       this.connectionError = void 0;
       void this.statusBar.refreshLastEdited();
+      void this.invitations.refreshPendingApprovalsSoon();
     }
     if (status === "reset-required") {
       this.connectionError = void 0;
@@ -28903,14 +29177,10 @@ var HavemindPlugin = class extends import_obsidian23.Plugin {
       forgetSharedAccessProvider(this);
       this.people.rosterMembers = [];
       this.people.rejoinWaiting = /* @__PURE__ */ new Set();
-      this.invitations.pendingInvitation = null;
-      this.invitations.pendingApprovals = [];
+      this.invitations.clearOwnerState();
       this.sendQueue.notifiedQuarantineIds = /* @__PURE__ */ new Set();
       this.awaitingApproval = null;
       this.guestInvitationInvalid = false;
-      this.invitations.connectionActive = false;
-      this.invitations.connectionNotice = void 0;
-      this.invitations.connectionNoticeKind = void 0;
       this.connectionStatus = "disconnected";
       this.lastSyncedAt = void 0;
       this.connectionError = void 0;
